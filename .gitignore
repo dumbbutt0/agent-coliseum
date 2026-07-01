@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Run outputs — regenerable from logs (which are regenerable from seed). Folders kept via .gitkeep.
+logs/*.jsonl
+derived/*.json
+checkpoints/*
+wandb/
+runs/
+
+# Never commit secrets / identity
+.env
+*.key
+
+.DS_Store
+Thumbs.db

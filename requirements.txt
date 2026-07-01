@@ -1,0 +1,16 @@
+# The smoke test needs NONE of these — it's stdlib only. Install per phase as you reach it.
+
+# Phase 0 (foundations): Python + numpy is enough.
+numpy>=1.26
+
+# Phase 1 (RL body) — uncomment when you swap random policies for trained ones:
+# gymnasium>=0.29
+# pettingzoo>=1.24
+# stable-baselines3>=2.3
+# supersuit>=3.9
+# torch                # already installed on this machine: 2.12.0+cu130
+
+# Experiment tracking / config (add when useful):
+# wandb>=0.17
+# tensorboard>=2.16
+# pyyaml>=6.0

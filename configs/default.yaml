@@ -1,0 +1,19 @@
+# Frozen experiment config — reproducibility pillar. Log this file with every run; change ONE thing per experiment.
+seed: 42
+
+env:
+  name: duel-v0        # the toy placeholder env; becomes a PettingZoo combat env in Phase 1
+  start_hp: 15
+  max_rounds: 50
+
+season:
+  rounds: 5            # round-robin passes per run
+
+training:               # placeholders for the RL phase
+  algo: ppo
+  total_steps: 0        # 0 = scaffold only; bump when the trained body lands
+  n_envs: 8             # match CPU threads — small-agent RL is CPU-bound, not GPU-bound
+
+logging:
+  log_dir: logs
+  derived_dir: derived
