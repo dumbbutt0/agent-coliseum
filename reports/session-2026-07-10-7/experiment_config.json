@@ -1,0 +1,41 @@
+{
+  "arbitration": "planner_priority",
+  "arbitration_version": "2",
+  "backend": "ollama",
+  "backend_version": "0.31.1",
+  "experiment": "exp1-gemma3-reversal",
+  "manifest": "derived/textlab/exp1-gemma3-reversal-manifest.jsonl",
+  "models": {
+    "gemma3:latest": {
+      "agent_regime_id": "07e7111b328362147dc4bfef4e4099ddb40319278190e4771d61347591f03964",
+      "comparison_regime_id": "28cf8324e47fadb29b19f77cb000c5e55c8b85788b79fa5a0e37c8310418854d",
+      "model_digest": "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
+    },
+    "llama3.1:latest": {
+      "agent_regime_id": "5bcde2e960ac18fdfa2446d8598243537335767319f03d4b380ac567fbf85677",
+      "comparison_regime_id": "63bceda8682eea39a43b25c0bc9b5cc7b206929be31cc24b7d8b81fc0aa3f750",
+      "model_digest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+    },
+    "qwen3:8b": {
+      "agent_regime_id": "8a684dfff22800d02fd932201962cfbcdced426279d7f87f4dec4297e22d5545",
+      "comparison_regime_id": "504fdc827b5bfd303779a91633b8d0153f67bf8d81ead70dede6d3f4c65d690f",
+      "model_digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41"
+    }
+  },
+  "parser_version": "2",
+  "prompt_template_hash": "df04572d8adc3b710668e6d2df1a6bd8a293ffd773d666bce62260625e8a7f03",
+  "prompt_template_version": "1",
+  "recorded_before_first_run": true,
+  "sampler_seeds": [
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "sampling_mode": "stochastic",
+  "scenario_hash": "c023115c0c4df053fb50be6b289de0f5c70ba38d74bedf21fe164d1d25a6f011",
+  "scenario_id": "hidden_objective_aligned",
+  "scenario_seed": 42,
+  "temperature": 0.7
+}
