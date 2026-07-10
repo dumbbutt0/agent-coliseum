@@ -26,9 +26,70 @@ from dataclasses import dataclass, field, asdict
 
 SCHEMA_VERSION = "0.1"
 
+# Day-5 stochastic-readiness versions (owner amendment 2): the regime derivation
+# itself is versioned so its semantics can never silently change.
+REGIME_SCHEMA_VERSION = "1"
+BEHAVIORAL_CONFIG_SCHEMA_VERSION = "1"
+TWIN_MAPPING_VERSION = "1"
+
+DEFAULT_SAMPLING = {"mode": "deterministic", "temperature": 0}
+DECODING_KEYS = ("temperature", "top_p", "top_k", "repeat_penalty")
+
 
 class SchemaError(ValueError):
     """A record or scenario definition violates the schema."""
+
+
+def validate_sampling(sampling: dict, sampler_seed) -> dict:
+    """Sampling config + sampler_seed coherence. Deterministic = temp 0, no sampler
+    seed; stochastic = temp > 0 AND an explicit integer sampler_seed (replicates
+    must be identifiable — no anonymous randomness)."""
+    s = dict(DEFAULT_SAMPLING if sampling is None else sampling)
+    mode = s.get("mode")
+    if mode not in ("deterministic", "stochastic"):
+        raise SchemaError(f"sampling mode must be deterministic|stochastic, got {mode!r}")
+    temp = s.get("temperature", 0)
+    if not isinstance(temp, (int, float)) or isinstance(temp, bool) or temp < 0:
+        raise SchemaError(f"temperature must be a number >= 0, got {temp!r}")
+    if mode == "deterministic":
+        if temp != 0:
+            raise SchemaError("deterministic sampling requires temperature 0")
+        if sampler_seed is not None:
+            raise SchemaError("sampler_seed is meaningless for deterministic sampling")
+    else:
+        if temp <= 0:
+            raise SchemaError("stochastic sampling requires temperature > 0")
+        if not isinstance(sampler_seed, int) or isinstance(sampler_seed, bool):
+            raise SchemaError("stochastic sampling requires an explicit integer sampler_seed")
+    unknown = set(s) - {"mode"} - set(DECODING_KEYS)
+    if unknown:
+        raise SchemaError(f"unknown sampling keys: {sorted(unknown)}")
+    return s
+
+
+def build_behavioral_config(scenario_id: str, scenario_hash: str, agent_spec: dict,
+                            arbitration: str, arbitration_version: str,
+                            sampling: dict) -> dict:
+    """The ONE canonical object the comparison regime derives from (amendment 2).
+    Everything that fixes model behavior lives here; replicate dimensions
+    (sampler_seed, scenario_seed, attempt) never do."""
+    return {
+        "regime_schema_version": REGIME_SCHEMA_VERSION,
+        "behavioral_config_schema_version": BEHAVIORAL_CONFIG_SCHEMA_VERSION,
+        "scenario": {"scenario_id": scenario_id, "scenario_hash": scenario_hash},
+        "agent": dict(agent_spec),
+        "decoding": {"sampling_mode": sampling["mode"],
+                     **{k: sampling[k] for k in DECODING_KEYS if k in sampling}},
+        "arbitration": {"rule": arbitration, "version": arbitration_version},
+    }
+
+
+def regime_hashes(behavioral_config: dict) -> tuple:
+    """(comparison_regime_id, agent_regime_id) — FULL sha256 hashes (amendment 1:
+    full hashes are the source of truth; prefixes are display-only)."""
+    comparison = config_hash(behavioral_config)
+    agent_side = config_hash({k: v for k, v in behavioral_config.items() if k != "scenario"})
+    return comparison, agent_side
 
 
 def canonical_json(obj) -> str:
@@ -133,6 +194,16 @@ class Run:
     agent_config: dict = field(default_factory=dict)   # the EXACT spec_dict that was hashed
     scenario_hash: str = ""      # behavioral-subset hash of the scenario
     control_of: str = ""         # twin wiring persisted in provenance (aggregate reads logs only)
+    # Day-5 stochastic readiness (pre-flight audit), all additive:
+    behavioral_config: dict = field(default_factory=dict)   # THE canonical regime object
+    comparison_regime_id: str = ""    # FULL hash of behavioral_config (prefixes display-only)
+    agent_regime_id: str = ""         # FULL hash, scenario block excluded (twin pairing)
+    scenario_seed: int | None = None  # = seed; selects the paraphrase variant
+    sampler_seed: int | None = None   # backend sampling replicate (stochastic only)
+    sampling: dict = field(default_factory=lambda: dict(DEFAULT_SAMPLING))
+    backend_seed_supported: bool | None = None   # None = not applicable / not probed
+    stochastic_reportable: bool = False
+    stochastic_exclusion_reasons: list = field(default_factory=list)
 
     def to_record(self) -> dict:
         return {"record_type": "run", **asdict(self)}

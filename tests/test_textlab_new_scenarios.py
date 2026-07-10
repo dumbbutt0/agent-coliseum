@@ -12,6 +12,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCEN = lambda name: os.path.join(ROOT, "configs", "scenarios", f"{name}.yaml")
 CONFIG_DIR = os.path.join(ROOT, "configs", "scenarios")
 
+def _find(d, prefix):
+    hits = [k for k in d if k.startswith(prefix)]
+    assert len(hits) == 1, f"{prefix!r} -> {hits}"
+    return d[hits[0]]
+
+
 EXPECTED = {
     # scenario -> persona -> final_actions (hand-computed from persona rules + facts)
     "water_bearer": {
@@ -69,8 +75,8 @@ def test_innocence_isolated_by_control(tmp_path):
                                          str(tmp_path / f"{scen}-{persona}-{seed}")).run_dir)
     agg = aggregate(dirs)
     delta = agg["control_twin_delta"]
-    merciful = delta["water_bearer_vs_water_bearer_saboteur|scripted:merciful|nodigest|planner_priority"]["deltas"]
-    defiant = delta["water_bearer_vs_water_bearer_saboteur|scripted:defiant|nodigest|planner_priority"]["deltas"]
+    merciful = _find(delta, "water_bearer_vs_water_bearer_saboteur|scripted:merciful|nodigest|planner_priority")["deltas"]
+    defiant = _find(delta, "water_bearer_vs_water_bearer_saboteur|scripted:defiant|nodigest|planner_priority")["deltas"]
     assert merciful["refusal_rate"] == 1.0          # refuses innocent-case only
     assert defiant.get("refusal_rate", 0.0) == 0.0  # refuses both -> no delta
 

@@ -41,13 +41,31 @@ def _req(raw: dict, key: str, where: str):
 
 
 def load_scenario(path: str) -> Scenario:
-    """Load + validate one scenario YAML. Raises SchemaError naming the offending path."""
+    """Load + validate one authored scenario YAML. Raises SchemaError naming the path."""
     where = os.path.basename(path)
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
     if not isinstance(raw, dict):
         raise SchemaError(f"{where}: top level must be a mapping")
+    _req(raw, "archetype", where)
+    _req(raw, "purpose", where)
+    return build_scenario(raw, where)
 
+
+def scenario_from_snapshot(snapshot: dict, control_of: str = "") -> Scenario:
+    """Rebuild a Scenario from a run's stored behavioral snapshot (Day-5 replay
+    self-containment). The snapshot IS the model-facing content; descriptive fields
+    absent from it (archetype/purpose) are irrelevant to replay."""
+    raw = dict(snapshot)
+    raw.setdefault("archetype", "snapshot")
+    raw.setdefault("purpose", "rebuilt from run snapshot")
+    if control_of:
+        raw.setdefault("control_of", control_of)
+    return build_scenario(raw, f"snapshot:{raw.get('scenario_id', '?')}")
+
+
+def build_scenario(raw: dict, where: str) -> Scenario:
+    """Validate + construct from a raw dict (shared by YAML and snapshot paths)."""
     scenario_id = _req(raw, "scenario_id", where)
     where = scenario_id  # richer error prefix from here on
 

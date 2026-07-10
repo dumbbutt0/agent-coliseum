@@ -20,7 +20,8 @@ import re
 import time
 from dataclasses import dataclass, asdict, field
 
-from .schema import SchemaError, config_hash
+from .schema import (DEFAULT_SAMPLING, DECODING_KEYS, SchemaError, config_hash,
+                     validate_sampling)
 
 # Behavioral versions (Codex finding #9): bump on ANY change to prompt wording,
 # parser semantics, or budgets — they are lineage inputs, so silent behavioral
@@ -282,7 +283,6 @@ class LLMAgent(AgentInterface):
 
     kind = "llm"
     backend = "abstract"
-    TEMPERATURE = 0
 
     def __init__(self, model: str):
         if not model:
@@ -299,6 +299,28 @@ class LLMAgent(AgentInterface):
         self.digest_status = "missing"    # "ok" | "missing"
         self.host_kind = "n/a"            # "local" | "lan" | "remote" | "n/a" — log-only
         self.think_param = "n/a"          # "off" | "unsupported" | "n/a" — fair reflex channel
+        # Day-5: sampling provenance. Deterministic temp-0 by default; stochastic
+        # requires configure_sampling() with an explicit sampler_seed.
+        self.sampling = dict(DEFAULT_SAMPLING)
+        self.sampler_seed: int | None = None
+        self.backend_seed_supported: bool | None = None
+        self.seed_probe: dict = {}        # scoped verification record (log-only, incl. timestamp)
+        self._last_payload: dict = {}     # exact backend request options, stored per capture
+
+    def configure_sampling(self, sampling: dict | None, sampler_seed: int | None):
+        self.sampling = validate_sampling(sampling, sampler_seed)
+        self.sampler_seed = sampler_seed
+
+    def verify_seeded_sampling(self) -> bool:
+        """Scoped probe: 'seeded sampling verified for THIS backend/model/config' —
+        never universal proof (owner amendment 3). Mock/abstract backends are
+        trivially deterministic, hence trivially verified."""
+        self.backend_seed_supported = True
+        self.seed_probe = {"backend_name": self.backend, "backend_version": "n/a",
+                           "model_digest": self.model_digest,
+                           "seed_probe_prompt_hash": "", "seed_probe_result": "verified",
+                           "seed_probe_timestamp": ""}
+        return True
 
     # -- backend contract ----------------------------------------------------
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
@@ -323,7 +345,8 @@ class LLMAgent(AgentInterface):
             raw, latency = self._generate(prompt, budget)
             self.captures.append({"key": key, "prompt_hash": config_hash(prompt),
                                   "raw_text": raw, "latency_ms": latency,
-                                  "model_id": self.model, "backend": self.backend})
+                                  "model_id": self.model, "backend": self.backend,
+                                  "backend_payload": dict(self._last_payload)})
         choice, status = parse_llm_response(raw, actions)
         meta = {"parse_status": status, "raw_model_text": raw[:2000],
                 "latency_ms": latency, "model_id": self.model, "backend": self.backend,
@@ -354,7 +377,8 @@ class LLMAgent(AgentInterface):
         # Latency and host never are (evidence/infrastructure, not behavior).
         return {"kind": self.kind, "backend": self.backend, "agent_id": self.agent_id,
                 "model": self.model, "model_digest": self.model_digest,
-                "temperature": self.TEMPERATURE, "constitution": self.constitution,
+                "sampling": dict(self.sampling),   # mode/temperature/decoding — NOT sampler_seed
+                "constitution": self.constitution,
                 "reflex_budget": dict(REFLEX_BUDGET),
                 "planner_budget": dict(PLANNER_BUDGET),
                 "prompt_template_version": PROMPT_TEMPLATE_VERSION,
@@ -369,8 +393,9 @@ class LLMAgent(AgentInterface):
                 "model_digest": self.model_digest, "model_family": self.model_family,
                 "reflex_budget": REFLEX_BUDGET["num_predict"],
                 "planner_budget": PLANNER_BUDGET["num_predict"],
-                "temperature": self.TEMPERATURE, "ollama_host_kind": self.host_kind,
-                "think_param": self.think_param}
+                "sampling": dict(self.sampling), "ollama_host_kind": self.host_kind,
+                "think_param": self.think_param,
+                "seed_probe": dict(self.seed_probe)}
 
 
 def _fixtures_root() -> str:
@@ -406,6 +431,16 @@ class MockLLMAgent(LLMAgent):
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
         key = f"{self._current_key}"
         raw = self._responses.get(key, self._responses.get("default", ""))
+        # payload mirror so the stochastic path is testable offline: what an HTTP
+        # backend WOULD have been sent (temperature/decoding/seed)
+        opts = {"temperature": self.sampling.get("temperature", 0),
+                "num_predict": budget["num_predict"]}
+        for k in DECODING_KEYS:
+            if k in self.sampling and k != "temperature":
+                opts[k] = self.sampling[k]
+        if self.sampler_seed is not None:
+            opts["seed"] = self.sampler_seed
+        self._last_payload = {"model": self.model, "options": opts, "think": None}
         return raw, 0.0
 
     def _pass(self, state: dict, actions: list, deliberate: bool) -> Choice:
@@ -460,13 +495,29 @@ class OllamaAgent(LLMAgent):
             pass
         self.digest_status = "missing"
 
-    def _post(self, prompt: str, num_predict: int, timeout_s: float) -> dict:
+    def _options(self, num_predict: int) -> dict:
+        """The exact sampling options sent to the backend — also stored per capture
+        so the payload is provable evidence, not an assumption."""
+        opts = {"temperature": self.sampling.get("temperature", 0),
+                "num_predict": num_predict}
+        for k in DECODING_KEYS:
+            if k in self.sampling and k != "temperature":
+                opts[k] = self.sampling[k]
+        if self.sampler_seed is not None:
+            opts["seed"] = self.sampler_seed
+        return opts
+
+    def _post(self, prompt: str, num_predict: int, timeout_s: float,
+              options_override: dict | None = None) -> dict:
         import urllib.error
         import urllib.request
+        options = options_override if options_override is not None else self._options(num_predict)
         payload = {"model": self.model, "prompt": prompt, "stream": False,
-                   "options": {"temperature": self.TEMPERATURE, "num_predict": num_predict}}
+                   "options": options}
         if self._think_supported:
             payload["think"] = False      # disable thinking mode where the backend supports it
+        self._last_payload = {"model": self.model, "options": dict(options),
+                              "think": payload.get("think")}
         req = urllib.request.Request(f"{self.host}/api/generate",
                                      data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"})
@@ -477,8 +528,37 @@ class OllamaAgent(LLMAgent):
             if e.code == 400 and self._think_supported:
                 self._think_supported = False
                 self.think_param = "unsupported"
-                return self._post(prompt, num_predict, timeout_s)
+                return self._post(prompt, num_predict, timeout_s, options_override)
             raise
+
+    def _backend_version(self) -> str:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{self.host}/api/version", timeout=5) as resp:
+                return json.loads(resp.read()).get("version", "unknown")
+        except Exception:
+            return "unknown"
+
+    def verify_seeded_sampling(self) -> bool:
+        """SCOPED verification (owner amendment 3): 'seeded sampling verified for this
+        backend/model/config'. Same prompt + same options.seed twice at the requested
+        temperature must be byte-equal (required). Different-seed difference is not
+        required — short outputs can coincide by chance. Probe is warmup-adjacent:
+        never captured, never latency-measured."""
+        probe_prompt = "Reply with one word: ready"
+        opts = self._options(num_predict=8)
+        a = self._post(probe_prompt, 8, 60, options_override=opts).get("response", "")
+        b = self._post(probe_prompt, 8, 60, options_override=opts).get("response", "")
+        verified = (a == b) and self.sampler_seed is not None
+        self.backend_seed_supported = verified
+        self.seed_probe = {"backend_name": self.backend,
+                           "backend_version": self._backend_version(),
+                           "model_digest": self.model_digest,
+                           "seed_probe_prompt_hash": config_hash(probe_prompt),
+                           "seed_probe_result": "verified" if verified else "failed",
+                           "seed_probe_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        self._warm = True                 # the probe warmed the model
+        return verified
 
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
         if not self._warm:
@@ -515,6 +595,11 @@ class ReplayLLMAgent(LLMAgent):
         self.digest_status = run_manifest.get("digest_status", "missing")
         self.host_kind = info.get("ollama_host_kind", "n/a")
         self.think_param = info.get("think_param", "n/a")
+        # stored sampling identity, never current defaults (Day-5 amendment)
+        self.sampling = dict(run_manifest.get("sampling", DEFAULT_SAMPLING))
+        self.sampler_seed = run_manifest.get("sampler_seed")
+        self.backend_seed_supported = run_manifest.get("backend_seed_supported")
+        self.seed_probe = dict(info.get("seed_probe", {}))
         self._stored_llm_info = {k: v for k, v in info.items() if k != "capture_hash"}
 
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:

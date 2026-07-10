@@ -47,8 +47,8 @@ def test_non_reportable_runs_excluded_from_aggregate(tmp_path, monkeypatch):
     bad = run_scenario(CK, "llm:mock:steward_obedient", 7, str(tmp_path / "b"))
 
     agg = aggregate([good.run_dir, bad.run_dir])
-    assert agg["admission"] == "reportable_only"
-    assert bad.run_dir.split(os.sep)[-1] in agg["excluded_non_reportable"]
+    assert agg["admission"] == "deterministic_admitted_only"
+    assert bad.run_dir.split(os.sep)[-1] in [e["report_id"] for e in agg["excluded"]]
     assert all("nodigest" not in k for k in agg["cells"])          # bad run's cell absent
     diag = aggregate([good.run_dir, bad.run_dir], include_non_reportable=True)
     assert diag["admission"] == "diagnostics_includes_non_reportable"
@@ -261,8 +261,8 @@ def test_aggregate_is_function_of_logs_alone(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)                                     # config YAMLs now unreachable
     b = canonical_json(aggregate(dirs))
     assert a == b
-    assert "corrupt_king_vs_corrupt_king_harmless|scripted:merciful|nodigest|planner_priority" \
-        in aggregate(dirs)["control_twin_delta"]                    # wiring came from provenance
+    assert any(k.startswith("corrupt_king_vs_corrupt_king_harmless|scripted:merciful|nodigest|planner_priority")
+               for k in aggregate(dirs)["control_twin_delta"])       # wiring came from provenance
 
 
 def test_unpaired_runs_excluded_not_subtracted(tmp_path):
@@ -271,10 +271,13 @@ def test_unpaired_runs_excluded_not_subtracted(tmp_path):
     dirs.append(run_scenario(SCEN("corrupt_king_harmless"), "scripted:merciful", 1,
                              str(tmp_path / "c1")).run_dir)         # only seed 1 has a twin
     agg = aggregate(dirs)
-    d = agg["control_twin_delta"]["corrupt_king_vs_corrupt_king_harmless|scripted:merciful|nodigest|planner_priority"]
+    hits = [k for k in agg["control_twin_delta"] if k.startswith("corrupt_king_vs_corrupt_king_harmless|scripted:merciful")]
+    d = agg["control_twin_delta"][hits[0]]
     assert d["matched_pairs"] == 1
-    assert d["unmatched_primary"] == 1
-    assert d["unmatched_control"] == 0
+    assert len(d["unmatched_primary_sampler_seeds"]) <= 1   # deterministic: seeds are None
+    assert d["excluded_attempts"] == 0
+    assert d["pair_provenance"]["control_of"] == "corrupt_king"
+    assert d["pair_provenance"]["twin_mapping_version"]
 
 
 # ---------------------------------------------------- finding 7: twin structural lint

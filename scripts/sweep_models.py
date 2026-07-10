@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""The first reportable cross-model sweep: pinned-digest models x all scenarios x seeds.
+"""Reportable cross-model sweep: pinned-digest models x scenarios x scenario seeds
+(x sampler seeds when stochastic).
 
     OLLAMA_HOST=http://10.0.0.8:11434 python3 scripts/sweep_models.py \
-        --models llama3.1:latest qwen3:8b gemma3:latest --seeds 1 2 3 5 8
+        --models llama3.1:latest --seeds 1 2 3 5 8                      # deterministic
+    ... --temperature 0.7 --sampler-seeds 11 12 13 14 15                # stochastic
 
-Model-major order (minimal model swapping on the host). Resume-safe: completed
-(model, scenario, seed) triples are recorded in the sweep manifest and skipped on
-rerun. Aborts a model entirely if its digest cannot be pinned (ruling: no digest,
-not reportable — and a sweep is reportable-only).
+Resume identity (Day-5): a manifest row is keyed by (FULL comparison_regime_id,
+scenario_seed, sampler_seed) and must carry its exact evidence dir; rows are
+validated against their run.json on load. Legacy dir-less rows are REFUSED
+(migrate first). A repulled tag changes the digest -> new regime -> reruns.
 """
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -20,16 +23,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from coliseum.textlab.agents import OllamaAgent  # noqa: E402
 from coliseum.textlab.graph_export import write_graphs  # noqa: E402
 from coliseum.textlab.metrics import write_aggregate, write_run_metrics  # noqa: E402
-from coliseum.textlab.runner import run_scenario  # noqa: E402
+from coliseum.textlab.runner import ARBITRATION_VERSION, run_scenario  # noqa: E402
+from coliseum.textlab.scenario import load_scenario  # noqa: E402
+from coliseum.textlab.schema import (SchemaError, build_behavioral_config,  # noqa: E402
+                                     regime_hashes, validate_sampling)
+
+_ATTEMPT_RE = re.compile(r"\.a(\d+)$")
 
 
-def manifest_load(path):
+def manifest_load(path: str, out_root: str) -> dict:
+    """(regime_id, scenario_seed, sampler_seed) -> validated row. Refuses ambiguity."""
     done = {}
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                rec = json.loads(line)
-                done[(rec["model"], rec["scenario"], rec["seed"])] = rec
+    if not os.path.exists(path):
+        return done
+    with open(path, encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            rec = json.loads(line)
+            if "dir" not in rec:
+                raise SchemaError(
+                    f"{path}:{i + 1}: legacy manifest row without an exact evidence dir — "
+                    "REFUSED (run scripts/migrate_manifest.py or use a fresh manifest)")
+            run_dir = os.path.join(out_root, rec["dir"])
+            manifest_file = os.path.join(run_dir, "run.json")
+            if not os.path.exists(manifest_file):
+                raise SchemaError(f"{path}:{i + 1}: evidence dir missing run.json: {run_dir}")
+            run = json.load(open(manifest_file, encoding="utf-8"))
+            if run["run_id"] != rec["run_id"]:
+                raise SchemaError(f"{path}:{i + 1}: run_id mismatch vs evidence "
+                                  f"({rec['run_id']} vs {run['run_id']})")
+            regime = rec.get("regime_id") or run.get("comparison_regime_id", "")
+            key = (regime, rec.get("scenario_seed", rec.get("seed")), rec.get("sampler_seed"))
+            done[key] = rec
     return done
 
 
@@ -37,73 +61,103 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--models", nargs="+",
                    default=["llama3.1:latest", "qwen3:8b", "gemma3:latest"])
-    p.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 5, 8])
+    p.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 5, 8],
+                   help="SCENARIO seeds (variant selection)")
+    p.add_argument("--sampler-seeds", type=int, nargs="+", default=None,
+                   help="sampler seeds (stochastic runs; requires --temperature > 0)")
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--arbitration", default="planner_priority")
     p.add_argument("--config-dir", default="configs/scenarios")
     p.add_argument("--out-root", default="logs/runs")
     p.add_argument("--manifest", default="derived/textlab/sweep-manifest.jsonl")
     args = p.parse_args()
 
+    if args.temperature > 0:
+        sampling = {"mode": "stochastic", "temperature": args.temperature}
+        sampler_seeds = args.sampler_seeds or []
+        if not sampler_seeds:
+            sys.exit("stochastic sweep requires --sampler-seeds")
+        mode = "stochastic"
+    else:
+        sampling = None
+        sampler_seeds = [None]
+        mode = "deterministic"
+    validate_sampling(sampling, sampler_seeds[0])
+
     scenarios = sorted(f[:-5] for f in os.listdir(args.config_dir) if f.endswith(".yaml"))
     os.makedirs(os.path.dirname(args.manifest), exist_ok=True)
-    done = manifest_load(args.manifest)
-    total = len(args.models) * len(scenarios) * len(args.seeds)
-    print(f"sweep: {len(args.models)} models x {len(scenarios)} scenarios x "
-          f"{len(args.seeds)} seeds = {total} runs ({len(done)} already done)", flush=True)
+    done = manifest_load(args.manifest, args.out_root)
+    total = len(args.models) * len(scenarios) * len(args.seeds) * len(sampler_seeds)
+    print(f"sweep[{mode}]: {len(args.models)} models x {len(scenarios)} scenarios x "
+          f"{len(args.seeds)} scenario-seeds x {len(sampler_seeds)} sampler-seeds "
+          f"= {total} runs ({len(done)} already done)", flush=True)
 
     manifest = open(args.manifest, "a", encoding="utf-8")
-    completed = failed = 0
+    completed = 0
     for model in args.models:
-        probe = OllamaAgent(model)                       # digest check before any run
+        probe = OllamaAgent(model)
         if probe.digest_status != "ok":
-            print(f"!! {model}: digest could not be pinned — model SKIPPED "
-                  f"(sweep is reportable-only)", flush=True)
+            print(f"!! {model}: digest could not be pinned — model SKIPPED", flush=True)
             continue
+        probe.configure_sampling(sampling, sampler_seeds[0])
         print(f"== {model}  digest={probe.model_digest[:20]}  family={probe.model_family} "
-              f"host={probe.host}", flush=True)
-        for scenario in scenarios:
-            path = os.path.join(args.config_dir, f"{scenario}.yaml")
-            for seed in args.seeds:
-                key = (model, scenario, seed)
-                if key in done:
-                    continue
-                try:
-                    r = run_scenario(path, f"llm:ollama:{model}", seed, out_root=args.out_root)
-                    ok = r.run.reportable
-                    manifest.write(json.dumps({"model": model, "scenario": scenario,
-                                               "seed": seed, "run_id": r.run_id,
-                                               "dir": os.path.basename(r.run_dir),  # evidence id (.aN)
-                                               "reportable": ok,
-                                               "path": r.final_actions}) + "\n")
-                    manifest.flush()
-                    completed += 1
-                    print(f"  [{completed + len(done)}/{total}] {scenario} s{seed}: "
-                          f"{' -> '.join(r.final_actions)}", flush=True)
-                except Exception as e:
-                    failed += 1
-                    print(f"  !! {scenario} s{seed}: {e.__class__.__name__}: {e}", flush=True)
-                    traceback.print_exc()
+              f"host={probe.host}  mode={mode}", flush=True)
+        for scenario_name in scenarios:
+            path = os.path.join(args.config_dir, f"{scenario_name}.yaml")
+            scen = load_scenario(path)
+            # pre-run regime (probe spec == runtime spec: same code, digest, sampling)
+            bc = build_behavioral_config(scen.scenario_id, scen.behavioral_hash(),
+                                         probe.spec_dict(), args.arbitration,
+                                         ARBITRATION_VERSION, validate_sampling(sampling, sampler_seeds[0]))
+            regime_id, _ = regime_hashes(bc)
+            for scenario_seed in args.seeds:
+                for sampler_seed in sampler_seeds:
+                    if (regime_id, scenario_seed, sampler_seed) in done:
+                        continue
+                    try:
+                        r = run_scenario(path, f"llm:ollama:{model}", scenario_seed,
+                                         out_root=args.out_root, arbitration=args.arbitration,
+                                         sampling=sampling, sampler_seed=sampler_seed)
+                        if r.run.comparison_regime_id != regime_id:
+                            print(f"  !! regime drift mid-sweep for {model}/{scenario_name} "
+                                  f"— digest or config changed; aborting model", flush=True)
+                            break
+                        row = {"regime_id": r.run.comparison_regime_id,
+                               "model": model, "scenario": scenario_name,
+                               "scenario_seed": scenario_seed, "sampler_seed": sampler_seed,
+                               "variant_id": r.run.variant_id,
+                               "temperature": r.run.sampling.get("temperature", 0),
+                               "sampling_mode": r.run.sampling["mode"],
+                               "digest": r.run.agent_config.get("model_digest", ""),
+                               "scenario_hash": r.run.scenario_hash,
+                               "arbitration": args.arbitration,
+                               "run_id": r.run_id,
+                               "dir": os.path.basename(r.run_dir),
+                               "reportable": r.run.reportable,
+                               "stochastic_reportable": r.run.stochastic_reportable,
+                               "path": r.final_actions}
+                        manifest.write(json.dumps(row) + "\n")
+                        manifest.flush()
+                        completed += 1
+                        k = f" k{sampler_seed}" if sampler_seed is not None else ""
+                        print(f"  [{completed + len(done)}/{total}] {scenario_name} "
+                              f"s{scenario_seed}{k}: {' -> '.join(r.final_actions)}", flush=True)
+                    except Exception as e:
+                        print(f"  !! {scenario_name} s{scenario_seed} k{sampler_seed}: "
+                              f"{e.__class__.__name__}: {e}", flush=True)
+                        traceback.print_exc()
     manifest.close()
 
-    done = manifest_load(args.manifest)
-    run_dirs = []
-    for rec in done.values():
-        d = os.path.join(args.out_root, rec.get("dir", rec["run_id"]))
-        if not os.path.exists(os.path.join(d, "run.json")):
-            # legacy manifest rows without the evidence dir: resolve the attempt
-            import glob as _glob
-            hits = sorted(_glob.glob(os.path.join(args.out_root, rec["run_id"] + ".a*")))
-            d = hits[-1] if hits else d
-        if os.path.exists(os.path.join(d, "run.json")):
-            run_dirs.append(d)
-    run_dirs = sorted(set(run_dirs))
+    done = manifest_load(args.manifest, args.out_root)
+    run_dirs = sorted({os.path.join(args.out_root, rec["dir"]) for rec in done.values()})
     print(f"\nderiving metrics + graphs for {len(run_dirs)} sweep runs...", flush=True)
     for d in run_dirs:
         write_run_metrics(d)
-    write_aggregate(run_dirs)
+    write_aggregate(run_dirs, mode=mode)
     write_graphs(run_dirs)
-    non_reportable = [rec["run_id"] for rec in done.values() if not rec["reportable"]]
-    print(f"sweep complete: {len(done)} runs, {len(non_reportable)} non-reportable"
-          + (f" ({non_reportable[:3]}...)" if non_reportable else ""), flush=True)
+    non_rep = [r["run_id"] for r in done.values()
+               if not (r["stochastic_reportable"] if mode == "stochastic" else r["reportable"])]
+    print(f"sweep complete: {len(done)} runs, {len(non_rep)} non-{mode}-reportable", flush=True)
 
 
 if __name__ == "__main__":

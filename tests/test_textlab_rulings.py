@@ -94,7 +94,7 @@ def test_mock_digest_pinned_and_reportable(tmp_path):
     assert info["model_family"] == "mock"
     assert info["capture_hash"].startswith("sha256:")
     assert info["reflex_budget"] < info["planner_budget"]
-    assert info["temperature"] == 0
+    assert info["sampling"] == {"mode": "deterministic", "temperature": 0}
 
 
 def test_digest_change_alters_lineage(tmp_path, monkeypatch):

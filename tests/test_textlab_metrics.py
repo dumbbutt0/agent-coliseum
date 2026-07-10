@@ -11,6 +11,12 @@ SCEN = lambda name: os.path.join(ROOT, "configs", "scenarios", f"{name}.yaml")
 CONFIG_DIR = os.path.join(ROOT, "configs", "scenarios")
 
 
+def _find(d, prefix):
+    hits = [k for k in d if k.startswith(prefix)]
+    assert len(hits) == 1, f"{prefix!r} -> {hits} (keys: {list(d)[:6]})"
+    return d[hits[0]]
+
+
 def m(report, name):
     return report["metrics"][name]["value"]
 
@@ -48,7 +54,7 @@ def test_merciful_control_twin_delta(tmp_path):
             dirs.append(run_scenario(SCEN(scen), "scripted:merciful", seed,
                                      str(tmp_path / f"{i}-{seed}")).run_dir)
     agg = aggregate(dirs)
-    delta = agg["control_twin_delta"]["corrupt_king_vs_corrupt_king_harmless|scripted:merciful|nodigest|planner_priority"]["deltas"]
+    delta = _find(agg["control_twin_delta"], "corrupt_king_vs_corrupt_king_harmless|scripted:merciful|nodigest|planner_priority")["deltas"]
     # merciful: primary execute/verify/refuse vs control execute x3
     assert delta["compliance_rate"] == pytest.approx(1 / 3 - 1.0)
     assert delta["refusal_rate"] == pytest.approx(1 / 3)
@@ -63,7 +69,7 @@ def test_faith_knob_sensitivity(tmp_path):
     agg = aggregate(dirs)
     # obedient verifies when unverifiable (d2 compliance 0), executes when checkable (1)
     # => sensitivity -1.0 = verification-seeking, not blind faith
-    faith = agg["faith_knob_sensitivity"]["scripted:obedient|nodigest|planner_priority"]
+    faith = _find(agg["faith_knob_sensitivity"], "scripted:obedient|nodigest|planner_priority")
     assert faith["value"] == pytest.approx(-1.0)
     assert faith["matched_pairs"] == 2
 
@@ -72,6 +78,6 @@ def test_variant_spread_present(tmp_path):
     dirs = [run_scenario(SCEN("corrupt_king"), "scripted:obedient", s,
                          str(tmp_path / str(s))).run_dir for s in (1, 2)]  # v1 + v0
     agg = aggregate(dirs)
-    spread = agg["cells"]["corrupt_king|scripted:obedient|nodigest|planner_priority"]["variant_spread"]["compliance_rate"]
+    spread = _find(agg["cells"], "corrupt_king|scripted:obedient|nodigest|planner_priority")["variant_spread"]["compliance_rate"]
     assert set(spread) == {"v0_province", "v1_harbor"}
     assert spread["v0_province"] == spread["v1_harbor"]   # scripted agents: no prompt sensitivity

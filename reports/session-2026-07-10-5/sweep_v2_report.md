@@ -54,7 +54,7 @@ tolerance** per model — paired deltas, 5/5 matched:
 
 ## Provenance
 
-Manifest: `derived/textlab/sweep-v2-manifest.jsonl` (105 rows with evidence dirs).
+Manifest: `derived/textlab/sweep-v2-manifest.jsonl` — MIGRATED 2026-07-10 (Day-5): rows originally lacked the exact evidence-dir field; scripts/migrate_manifest.py added `dir` per row (each run_id had exactly one attempt; original preserved at .pre-migration).
 Aggregate: reportable_only, 0 excluded, 21 lineage-keyed cells. Every run: pinned digest,
 stored versioned agent_config, captures with integrity hash — offline-replayable byte-identically.
 

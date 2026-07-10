@@ -23,7 +23,7 @@ def produce(base):
     for d in run_dirs:
         files.append(write_run_metrics(d, str(base / "metrics")))
         files.append(os.path.join(d, "decisions.jsonl"))
-    files.append(write_aggregate(run_dirs, str(base / "metrics"), CONFIG_DIR))
+    files.append(write_aggregate(run_dirs, str(base / "metrics")))
     files.extend(write_graphs(run_dirs, str(base / "graphs")))
     return sorted(files)
 

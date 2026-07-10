@@ -22,9 +22,10 @@ import urllib.parse
 from ..logging_substrate import RunLogger
 from ..seeding import seed_everything
 from .agents import AgentInterface, LLMAgent, agent_from_manifest, make_agent
-from .scenario import load_scenario, pick_variant
+from .scenario import load_scenario, pick_variant, scenario_from_snapshot
 from .schema import (DecisionNode, EventDelta, MemoryUpdate, Outcome, Run,
-                     SchemaError, apply_delta, canonical_json, config_hash)
+                     SchemaError, apply_delta, build_behavioral_config,
+                     canonical_json, config_hash, regime_hashes, validate_sampling)
 
 # Ruling 1 (2026-07-10): personas RECOMMEND (reflex + plan, both preserved);
 # the harness ARBITRATES and records which named rule selected the final action.
@@ -118,19 +119,25 @@ def _allocate_run_dir(out_root: str, run_id: str, run_hash: str, live_llm: bool)
 def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                  out_root: str = "logs/runs", parent_id: str | None = None,
                  arbitration: str = "planner_priority",
-                 replay_from: str | None = None) -> RunResult:
-    """`replay_from`: path to a prior LLM run dir. The replay agent's ENTIRE identity
-    comes from that run's manifest (zero network, zero fixture reads — finding #2);
-    its captured outputs are integrity-checked against the stored capture_hash and
-    served verbatim, so the replayed run is byte-identical to the live original."""
+                 replay_from: str | None = None,
+                 sampling: dict | None = None,
+                 sampler_seed: int | None = None) -> RunResult:
+    """`seed` is the SCENARIO seed (variant selection). `sampler_seed` + `sampling`
+    control backend sampling: deterministic temp-0 by default; stochastic requires
+    temperature > 0 and an explicit sampler_seed (replicates must be identifiable).
+
+    `replay_from`: path to a prior LLM run dir. The replay agent's ENTIRE identity
+    comes from that run's manifest; the scenario comes from the run's stored
+    behavioral SNAPSHOT (a later YAML edit cannot alter replay); captures are
+    integrity-checked and served verbatim — byte-identical to the live original."""
     if arbitration not in ARBITRATION_RULES:
         raise SchemaError(f"unknown arbitration rule {arbitration!r} (have {sorted(ARBITRATION_RULES)})")
     arbitrate = ARBITRATION_RULES[arbitration]
-    scenario = load_scenario(scenario_path)
 
     if replay_from is not None:
         manifest_path = os.path.join(replay_from, "run.json")
         cap_path = os.path.join(replay_from, "captures.jsonl")
+        snap_path = os.path.join(replay_from, "scenario.snapshot.json")
         if not agent_spec.startswith("llm:"):
             raise SchemaError(f"replay_from only applies to llm agents, not {agent_spec!r}")
         if not os.path.exists(manifest_path):
@@ -141,6 +148,21 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
         if original["agent_id"] != agent_spec:
             raise SchemaError(f"replay agent mismatch: recorded {original['agent_id']!r}, "
                               f"requested {agent_spec!r}")
+        # scenario self-containment (Day-5 #6): stored snapshot wins; without one,
+        # the current YAML must PROVE it matches the recorded behavioral hash
+        if os.path.exists(snap_path):
+            snapshot = json.load(open(snap_path, encoding="utf-8"))
+            if config_hash(snapshot) != original.get("scenario_hash"):
+                raise SchemaError("scenario snapshot does not match recorded scenario_hash "
+                                  "— snapshot evidence corrupted")
+            scenario = scenario_from_snapshot(snapshot, control_of=original.get("control_of", ""))
+        else:
+            scenario = load_scenario(scenario_path)
+            if scenario.behavioral_hash() != original.get("scenario_hash"):
+                raise SchemaError(
+                    "REPLAY REFUSED: no stored snapshot and the current scenario YAML's "
+                    f"behavioral hash differs from the recorded one "
+                    f"({scenario.behavioral_hash()[:16]}… vs {original.get('scenario_hash', '')[:16]}…)")
         cap_bytes = open(cap_path, "rb").read()
         stored_hash = original.get("llm_info", {}).get("capture_hash", "")
         actual_hash = "sha256:" + hashlib.sha256(cap_bytes).hexdigest()[:24]
@@ -150,24 +172,67 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
         agent = agent_from_manifest(original)
         agent.load_replay([json.loads(line) for line in cap_bytes.decode("utf-8").splitlines()
                            if line.strip()])
+        # replicate identity from the manifest, never current defaults
+        sampling = dict(original.get("sampling", {"mode": "deterministic", "temperature": 0}))
+        sampler_seed = original.get("sampler_seed")
+        seed = original["seed"]
     else:
+        scenario = load_scenario(scenario_path)
         agent: AgentInterface = make_agent(agent_spec)
+
+    sampling = validate_sampling(sampling, sampler_seed)
+    if sampling["mode"] == "stochastic":
+        if not isinstance(agent, LLMAgent):
+            raise SchemaError("stochastic sampling applies to llm agents only")
+        if replay_from is None:
+            agent.configure_sampling(sampling, sampler_seed)
+            # scoped probe: seeded sampling verified for THIS backend/model/config
+            agent.verify_seeded_sampling()
+    elif isinstance(agent, LLMAgent) and replay_from is None:
+        agent.configure_sampling(sampling, sampler_seed)
 
     seed_everything(seed)
     variant = pick_variant(scenario, seed)
 
-    # Behavioral lineage (finding #9): model-facing scenario subset + the agent's
-    # versioned behavioral config + arbitration semantics. Descriptive metadata and
-    # infrastructure never enter this hash.
-    run_hash = config_hash({"scenario_behavioral": scenario.behavioral_dict(),
-                            "agent": agent.spec_dict(),
-                            "arbitration": arbitration,
-                            "arbitration_version": ARBITRATION_VERSION})
-    run_id = ".".join([scenario.scenario_id, variant["variant_id"],
-                       urllib.parse.quote(agent_spec, safe=""),   # reversible escaping
-                       f"s{seed}", run_hash[:16]])
+    # THE canonical regime object (Day-5 amendment 2): one versioned source for
+    # everything behavioral except the replicate dimensions.
+    if replay_from is not None and original.get("behavioral_config"):
+        behavioral_config = original["behavioral_config"]
+    else:
+        behavioral_config = build_behavioral_config(
+            scenario.scenario_id, scenario.behavioral_hash(), agent.spec_dict(),
+            arbitration, ARBITRATION_VERSION, sampling)
+    comparison_regime_id, agent_regime_id = regime_hashes(behavioral_config)
+
+    run_hash = config_hash({"behavioral_config": behavioral_config,
+                            "sampler_seed": sampler_seed})
+    id_parts = [scenario.scenario_id, variant["variant_id"],
+                urllib.parse.quote(agent_spec, safe=""),   # reversible escaping
+                f"s{seed}"]
+    if sampler_seed is not None:
+        id_parts.append(f"k{sampler_seed}")
+    id_parts.append(run_hash[:16])       # display segment; FULL hash lives in run.json
+    run_id = ".".join(id_parts)
     live_llm = isinstance(agent, LLMAgent) and replay_from is None
     run_dir, attempt = _allocate_run_dir(out_root, run_id, run_hash, live_llm)
+
+    # behavioral snapshot: makes the run dir self-contained for replay (Day-5 #6)
+    snapshot_dict = scenario.behavioral_dict()
+    with open(os.path.join(run_dir, "scenario.snapshot.json"), "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(snapshot_dict) + "\n")
+
+    # stochastic admission (machine-readable exclusion reasons)
+    reasons = []
+    if sampling["mode"] != "stochastic":
+        reasons.append("deterministic_mode")
+    else:
+        if sampler_seed is None:
+            reasons.append("no_sampler_seed")
+        if getattr(agent, "digest_status", "n/a") != "ok":
+            reasons.append("digest_missing")
+        if getattr(agent, "backend_seed_supported", None) is not True:
+            reasons.append("backend_seed_unverified")
+
     log = DecisionLog(run_id, run_dir)
     run = Run(run_id=run_id, parent_id=parent_id, seed=seed,
               scenario_id=scenario.scenario_id, variant_id=variant["variant_id"],
@@ -175,8 +240,15 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
               started_at=_now(), code_version=_code_version(),
               arbitration=arbitration, attempt=attempt,
               agent_config=agent.spec_dict(),
-              scenario_hash=scenario.behavioral_hash(),
-              control_of=scenario.control_of)
+              scenario_hash=config_hash(snapshot_dict),
+              control_of=scenario.control_of,
+              behavioral_config=behavioral_config,
+              comparison_regime_id=comparison_regime_id,
+              agent_regime_id=agent_regime_id,
+              scenario_seed=seed, sampler_seed=sampler_seed, sampling=sampling,
+              backend_seed_supported=getattr(agent, "backend_seed_supported", None),
+              stochastic_reportable=(not reasons),
+              stochastic_exclusion_reasons=reasons)
 
     dps = {dp.dp_id: dp for dp in scenario.decision_points}
     state = dict(scenario.initial_state)

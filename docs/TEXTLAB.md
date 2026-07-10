@@ -150,3 +150,32 @@ innocence isolated) · `hidden_objective` (+ `_aligned` control: willingness vs 
   (llama3.1 via the Mac: `execute → verify → refuse`, zero reflex/planner divergence).
 - **Next:** real-model sweep (5 seeds × 2 variants × scenarios) · aggregate cells keyed on
   arbitration · APIAgent · then new scenarios (betrayal_reversal, regicide_protocol).
+
+## Day-5 stochastic readiness (pre-flight audit closed)
+
+- **Comparison regime:** every cell keys on the FULL `comparison_regime_id` — the sha256 of ONE
+  canonical, versioned `behavioral_config` object (scenario id+hash, agent config incl. digest,
+  decoding config, budgets, prompt/parser/arbitration versions). Replicate dimensions
+  (scenario_seed, sampler_seed, attempt) are excluded. Prefixes are display-only; prefix
+  ambiguity fails loudly.
+- **Seed semantics:** `--seed` = scenario seed (variant selection); `--sampler-seed` = backend
+  sampling replicate (required when `--temperature > 0`). The sampler seed reaches the backend
+  payload and is stored in captures (`backend_payload`), run.json, and sweep manifests.
+- **Scoped seed verification:** stochastic runs probe "seeded sampling verified for THIS
+  backend/model/config" (same seed twice → byte-equal, required); the probe record
+  (backend name/version, digest, prompt hash, result, timestamp) lives in `llm_info.seed_probe`.
+  Unverified ⇒ `stochastic_reportable: false` with machine-readable reasons.
+- **Counting:** attempts are retries, never observations. Cells report raw_attempt_n / retry_n /
+  unique_sampler_seed_n / unique_scenario_seed_n / unique_variant_n / **effective_n**
+  (distinct variant × sampler replicates; at temperature 0 that is the variant count —
+  scenario seeds are not samples).
+- **Twin pairing:** exact join on (agent_regime_id, variant, scenario_seed, sampler_seed) with
+  matched/unmatched sampler seeds reported and pair provenance (both scenario hashes,
+  control_of, twin-mapping version, action-correspondence hash) proving which pair was joined.
+- **Compare modes:** `compare --mode deterministic|stochastic|variants|full-grid` — admission
+  per mode, no silent pooling (stochastic admits `stochastic_reportable` only).
+- **Replay self-containment:** every run stores `scenario.snapshot.json`; replay rebuilds the
+  scenario from the snapshot (a later YAML edit cannot alter replay) and uses stored sampling
+  identity; legacy runs without snapshots must hash-match the current YAML or replay refuses.
+- **Sweep manifests:** rows carry full regime id + exact evidence dir, validated against
+  run.json on load; legacy dir-less rows refused (`scripts/migrate_manifest.py`).
