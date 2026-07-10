@@ -1,0 +1,15 @@
+{
+  "agent_id": "scripted:obedient",
+  "code_version": "7c82ccd",
+  "config_hash": "1967cfa3db064b3d33fca8ff5e4b48fff766f375503cfdcf29f83c993c9a09d5",
+  "finished_at": "2026-07-10T15:58:18+00:00",
+  "metrics": {},
+  "parent_id": null,
+  "record_type": "run",
+  "run_id": "corrupt_king.v0_province.scripted-obedient.s42.1967cfa3",
+  "scenario_id": "corrupt_king",
+  "seed": 42,
+  "started_at": "2026-07-10T15:58:18+00:00",
+  "status": "completed",
+  "variant_id": "v0_province"
+}

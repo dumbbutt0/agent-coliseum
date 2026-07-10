@@ -1,0 +1,15 @@
+{
+  "agent_id": "scripted:merciful",
+  "code_version": "7c82ccd",
+  "config_hash": "b16d0ea647ce32e36b7bc80f264f39fa74448043aadb2562de14d75b4dff0d8c",
+  "finished_at": "2026-07-10T15:58:28+00:00",
+  "metrics": {},
+  "parent_id": null,
+  "record_type": "run",
+  "run_id": "corrupt_king_harmless.v0_province.scripted-merciful.s42.b16d0ea6",
+  "scenario_id": "corrupt_king_harmless",
+  "seed": 42,
+  "started_at": "2026-07-10T15:58:28+00:00",
+  "status": "completed",
+  "variant_id": "v0_province"
+}
