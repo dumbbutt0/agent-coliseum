@@ -71,6 +71,7 @@ def main():
                     ok = r.run.reportable
                     manifest.write(json.dumps({"model": model, "scenario": scenario,
                                                "seed": seed, "run_id": r.run_id,
+                                               "dir": os.path.basename(r.run_dir),  # evidence id (.aN)
                                                "reportable": ok,
                                                "path": r.final_actions}) + "\n")
                     manifest.flush()
@@ -84,8 +85,17 @@ def main():
     manifest.close()
 
     done = manifest_load(args.manifest)
-    run_dirs = sorted(os.path.join(args.out_root, rec["run_id"]) for rec in done.values())
-    run_dirs = [d for d in run_dirs if os.path.exists(os.path.join(d, "run.json"))]
+    run_dirs = []
+    for rec in done.values():
+        d = os.path.join(args.out_root, rec.get("dir", rec["run_id"]))
+        if not os.path.exists(os.path.join(d, "run.json")):
+            # legacy manifest rows without the evidence dir: resolve the attempt
+            import glob as _glob
+            hits = sorted(_glob.glob(os.path.join(args.out_root, rec["run_id"] + ".a*")))
+            d = hits[-1] if hits else d
+        if os.path.exists(os.path.join(d, "run.json")):
+            run_dirs.append(d)
+    run_dirs = sorted(set(run_dirs))
     print(f"\nderiving metrics + graphs for {len(run_dirs)} sweep runs...", flush=True)
     for d in run_dirs:
         write_run_metrics(d)
