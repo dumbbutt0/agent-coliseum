@@ -1,0 +1,1 @@
+byte-identical: hidden_objective_aligned.v1_cistern.llm%3Aollama%3Agemma3%3Alatest.s1.k11.d259aa48b58a97ba (decisions.jsonl, replayed from captured outputs)

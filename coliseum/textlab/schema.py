@@ -29,8 +29,28 @@ SCHEMA_VERSION = "0.1"
 # Day-5 stochastic-readiness versions (owner amendment 2): the regime derivation
 # itself is versioned so its semantics can never silently change.
 REGIME_SCHEMA_VERSION = "1"
-BEHAVIORAL_CONFIG_SCHEMA_VERSION = "1"
-TWIN_MAPPING_VERSION = "1"
+# v2 (2026-07-10 full audit): behavioral_config gains interaction (mode + history
+# versions), runner behavioral version, and backend_version/effective_think_mode in
+# the agent spec. Pre-v2 runs keep their stored hashes; v2 runs can never pool with
+# them even in independent mode — the schema version is itself a behavioral claim.
+BEHAVIORAL_CONFIG_SCHEMA_VERSION = "2"
+# v2 (audit item 5): twin pair cells key on BOTH full scenario hashes — two
+# revisions of a primary can never pool against one control.
+TWIN_MAPPING_VERSION = "2"
+
+# Audit ruling (2026-07-10): TextLab supports two experimental modes that must
+# never pool. independent_vignettes = each decision prompt stands alone (all
+# pre-audit evidence); sequential_history = later prompts carry a canonical
+# agent-visible history of prior final actions and visible outcomes — REQUIRED
+# for any claim about remembered/multi-act behavior.
+INTERACTION_MODES = ("independent_vignettes", "sequential_history")
+HISTORY_SCHEMA_VERSION = "1"        # structure of a history entry
+OBSERVATION_POLICY_VERSION = "1"    # v1 = narrative-only: final action + outcome
+                                    # narrative; no numeric/hidden state, no moral
+                                    # tags, no metrics, no evaluator labels
+# bump on ANY behavioral change to the runner loop (arbitration semantics have
+# their own version; this covers ordering, state threading, history assembly)
+RUNNER_BEHAVIORAL_VERSION = "1"
 
 DEFAULT_SAMPLING = {"mode": "deterministic", "temperature": 0}
 DECODING_KEYS = ("temperature", "top_p", "top_k", "repeat_penalty")
@@ -69,13 +89,31 @@ def validate_sampling(sampling: dict, sampler_seed) -> dict:
 
 def build_behavioral_config(scenario_id: str, scenario_hash: str, agent_spec: dict,
                             arbitration: str, arbitration_version: str,
-                            sampling: dict) -> dict:
+                            sampling: dict,
+                            interaction_mode: str = "independent_vignettes",
+                            history_template_version: str = "",
+                            history_template_hash: str = "") -> dict:
     """The ONE canonical object the comparison regime derives from (amendment 2).
     Everything that fixes model behavior lives here; replicate dimensions
-    (sampler_seed, scenario_seed, attempt) never do."""
+    (sampler_seed, scenario_seed, attempt) never do.
+
+    v2: `interaction` declares the experimental mode; sequential mode also pins the
+    history schema/policy/template so a history-rendering change is a new regime.
+    Independent mode deliberately omits the history versions — bumping them must
+    not churn regimes whose prompts never contain a history block."""
+    if interaction_mode not in INTERACTION_MODES:
+        raise SchemaError(f"unknown interaction_mode {interaction_mode!r} (want {INTERACTION_MODES})")
+    interaction = {"mode": interaction_mode}
+    if interaction_mode == "sequential_history":
+        interaction.update({"history_schema_version": HISTORY_SCHEMA_VERSION,
+                            "observation_policy_version": OBSERVATION_POLICY_VERSION,
+                            "history_template_version": history_template_version,
+                            "history_template_hash": history_template_hash})
     return {
         "regime_schema_version": REGIME_SCHEMA_VERSION,
         "behavioral_config_schema_version": BEHAVIORAL_CONFIG_SCHEMA_VERSION,
+        "interaction": interaction,
+        "runner": {"behavioral_version": RUNNER_BEHAVIORAL_VERSION},
         "scenario": {"scenario_id": scenario_id, "scenario_hash": scenario_hash},
         "agent": dict(agent_spec),
         "decoding": {"sampling_mode": sampling["mode"],
@@ -204,6 +242,11 @@ class Run:
     backend_seed_supported: bool | None = None   # None = not applicable / not probed
     stochastic_reportable: bool = False
     stochastic_exclusion_reasons: list = field(default_factory=list)
+    # Full-audit ruling (2026-07-10), additive: which experimental mode produced this
+    # evidence. Legacy runs without the field are independent_vignettes by
+    # construction (they never received history) — labeled at read time, never
+    # silently reinterpreted as sequential.
+    interaction_mode: str = "independent_vignettes"
 
     def to_record(self) -> dict:
         return {"record_type": "run", **asdict(self)}
@@ -302,6 +345,8 @@ class DecisionNode:
     dp_id: str = ""                              # which decision point (v0.1 additive)
     arbitration_winner: str = "planner"          # "reflex"|"planner"|"fallback" — WHICH pass won
                                                  # (never inferred from action equality; finding #4)
+    history_prompt_hash: str = ""                # sequential mode only: hash of the structured
+                                                 # history that entered this decision's prompts
 
     def __post_init__(self):
         _require(0.0 <= self.confidence <= 1.0, f"confidence must be in 0..1, got {self.confidence}")
@@ -311,7 +356,12 @@ class DecisionNode:
                  f"final_action {self.final_action!r} not in available_actions")
 
     def to_record(self) -> dict:
-        return {"record_type": "decision_node", **asdict(self)}
+        rec = {"record_type": "decision_node", **asdict(self)}
+        # emitted ONLY in sequential mode: independent-mode and legacy decision logs
+        # must stay byte-identical under replay (the field would break the byte gate)
+        if not self.history_prompt_hash:
+            rec.pop("history_prompt_hash")
+        return rec
 
 
 @dataclass

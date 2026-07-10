@@ -96,7 +96,12 @@ def _fake_ollama_live_run(tmp_path, monkeypatch, seed=42):
         self._current_prompt_key = f"{state.get('dp_id','')}/{'plan' if deliberate else 'reflex'}"
         return agents_mod.LLMAgent._pass(self, state, actions, deliberate)
 
+    def fake_resolve(self):
+        self.backend_version = "fake-0.0"   # audit item 8: resolved pre-hash, no network
+        self._warm = True
+
     monkeypatch.setattr(OllamaAgent, "_fetch_digest", fake_fetch)
+    monkeypatch.setattr(OllamaAgent, "resolve_effective_config", fake_resolve)
     monkeypatch.setattr(OllamaAgent, "_generate", fake_generate)
     monkeypatch.setattr(OllamaAgent, "_pass", fake_pass)
     return run_scenario(CK, "llm:ollama:fakellama:8b", seed, str(tmp_path / "live")), calls
@@ -229,8 +234,10 @@ def test_non_mapping_json_rejected():
 def test_decoder_scan_recovers_first_valid_object():
     two = ('{"note": "not an answer"} '
            '{"action": "refuse", "confidence": 0.9, "reason": "n", "expected_reward": 0}')
+    choice, status = parse_llm_response(two, ACTIONS, parser_version="2")
+    assert status == "invalid_action"      # v2 FROZEN: first valid MAPPING wins deterministically
     choice, status = parse_llm_response(two, ACTIONS)
-    assert status == "invalid_action"      # first valid MAPPING wins deterministically
+    assert status == "ok" and choice.action_id == "refuse"  # v3: the answer-shaped object wins
     junk_then_valid = ('{oops not json} '
                        '{"action": "refuse", "confidence": 0.9, "reason": "n", "expected_reward": 0}')
     choice, status = parse_llm_response(junk_then_valid, ACTIONS)

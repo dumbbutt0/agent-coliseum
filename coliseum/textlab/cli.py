@@ -41,8 +41,11 @@ def cmd_run(args):
         sampling = {"mode": "stochastic", "temperature": args.temperature}
     result = run_scenario(path, args.agent, args.seed, out_root=args.out_root,
                           arbitration=args.arbitration,
-                          sampling=sampling, sampler_seed=args.sampler_seed)
+                          sampling=sampling, sampler_seed=args.sampler_seed,
+                          interaction_mode=args.interaction)
     print(f"run_id : {result.run_id}")
+    if args.interaction != "independent_vignettes":
+        print(f"mode   : {args.interaction}")
     print(f"path   : {' -> '.join(result.final_actions)}")
     print(f"log    : {os.path.join(result.run_dir, 'decisions.jsonl')}")
     if sampling:
@@ -82,7 +85,8 @@ def cmd_metrics(args):
     for d in dirs:
         print("wrote", write_run_metrics(d, args.derived_root))
     print("wrote", write_aggregate(dirs, args.derived_root, mode=args.mode,
-                                   include_non_reportable=args.diagnostics))
+                                   include_non_reportable=args.diagnostics,
+                                   interaction_mode=args.interaction))
 
 
 def cmd_graph(args):
@@ -98,8 +102,9 @@ def cmd_compare(args):
     dirs = _all_run_dirs(args.out_root)
     if not dirs:
         sys.exit("no runs found")
-    agg = aggregate(dirs, mode=args.mode, include_non_reportable=args.diagnostics)
-    print(f"mode: {args.mode}")
+    agg = aggregate(dirs, mode=args.mode, include_non_reportable=args.diagnostics,
+                    interaction_mode=args.interaction)
+    print(f"mode: {args.mode} | interaction: {args.interaction}")
     if args.diagnostics:
         print("!! DIAGNOSTICS MODE: non-admitted runs INCLUDED — not for claims !!\n")
     elif agg["excluded"]:
@@ -152,6 +157,7 @@ def main(argv=None):
     p.add_argument("--graphs-root", default="derived/textlab/graphs")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    interaction_choices = ["independent_vignettes", "sequential_history"]
     s = sub.add_parser("run");     s.set_defaults(fn=cmd_run)
     s.add_argument("--scenario", required=True); s.add_argument("--agent", default="scripted:obedient")
     s.add_argument("--seed", type=int, default=42,
@@ -160,18 +166,25 @@ def main(argv=None):
                    help="backend sampling seed (required when --temperature > 0)")
     s.add_argument("--temperature", type=float, default=0.0)
     s.add_argument("--arbitration", default="planner_priority")
+    s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
+                   help="independent_vignettes = each decision prompt stands alone; "
+                        "sequential_history = later prompts carry prior actions/outcomes")
     s = sub.add_parser("replay");  s.set_defaults(fn=cmd_replay);  s.add_argument("run_id")
     s = sub.add_parser("metrics"); s.set_defaults(fn=cmd_metrics); s.add_argument("run_ids", nargs="*")
     s.add_argument("--mode", default="deterministic",
                    choices=["deterministic", "stochastic", "variants", "full-grid"])
     s.add_argument("--diagnostics", action="store_true",
                    help="include non-admitted runs in the aggregate (labeled; not for claims)")
+    s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
+                   help="which experimental mode to aggregate (modes never pool)")
     s = sub.add_parser("graph");   s.set_defaults(fn=cmd_graph);   s.add_argument("run_ids", nargs="*")
     s = sub.add_parser("compare"); s.set_defaults(fn=cmd_compare)
     s.add_argument("--mode", default="deterministic",
                    choices=["deterministic", "stochastic", "variants", "full-grid"])
     s.add_argument("--diagnostics", action="store_true",
                    help="include non-admitted runs (labeled; not for claims)")
+    s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
+                   help="which experimental mode to aggregate (modes never pool)")
 
     args = p.parse_args(argv)
     args.fn(args)

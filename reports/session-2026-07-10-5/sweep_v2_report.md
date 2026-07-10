@@ -1,5 +1,20 @@
 # Sweep-v2 — the first REPORTABLE cross-model sweep (2026-07-10)
 
+> **Status demotion (owner directive after the full Codex repository audit,
+> 2026-07-10):** sweep-v2 is reclassified as a **legacy exploratory
+> deterministic-decoding dataset** — 105 locally present runs, two prompt variants
+> per scenario/model cell, run in what is now named independent_vignettes mode.
+> It is NOT suitable for current-stack confirmatory claims: its run dirs predate
+> scenario snapshots and the stored behavioral_config, so replay under the current
+> runner REFUSES with CONFIG DRIFT (verified 2026-07-10 — the run identity cannot
+> be reconstructed; evidence preserved, refusal loud); its migrated manifest
+> cannot express regime identity, so the strict loader refuses it (duplicate
+> legacy resume keys); and its raw evidence lives only in the working tree
+> (`logs/runs/` is gitignored), not in the repository. Per-run decisions,
+> captures, and run.json remain locally intact and individually readable. Do not
+> cite this sweep as "fully hardened," "one-command replayable," or reportable
+> under the current stack. Numbers below are kept for the historical record.
+
 **Setup:** identical grid to the pilot (3 digest-pinned models × 7 scenarios × 5 seeds =
 105/105 runs, 0 non-reportable, no interruptions) — now under the Day-4 hardened stack:
 reportable-only admission, cells keyed on (scenario, agent, digest, arbitration), PAIRED

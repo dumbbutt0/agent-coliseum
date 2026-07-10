@@ -27,7 +27,15 @@ from .schema import (DEFAULT_SAMPLING, DECODING_KEYS, SchemaError, config_hash,
 # parser semantics, or budgets — they are lineage inputs, so silent behavioral
 # code changes cannot masquerade as the same experiment.
 PROMPT_TEMPLATE_VERSION = "1"
-PARSER_VERSION = "2"          # v1 = greedy brace regex; v2 = JSONDecoder scan + finite checks
+PARSER_VERSION = "3"          # v1 = greedy brace regex; v2 = JSONDecoder scan + finite
+                              # checks; v3 (full audit) = raw confidence preserved +
+                              # flagged (never silently laundered), >1 answer-shaped
+                              # JSON object = ambiguous_json.
+# Parser semantics are VERSION-DISPATCHED: replay re-parses stored captures, so a
+# replayed run parses under its RECORDED parser_version (byte-identical evidence),
+# while new live runs use the current version. Only these versions are dispatchable;
+# v1 evidence predates stored agent_config and is unreplayable by construction.
+DISPATCHABLE_PARSER_VERSIONS = ("2", "3")
 
 
 @dataclass
@@ -180,9 +188,10 @@ _DECODER = json.JSONDecoder()
 
 
 def _extract_json_mapping(text: str):
-    """First valid JSON MAPPING in the text, by decoder scan from each '{' (Codex
-    finding #5: the greedy regex collapsed multi-object/junk-brace responses into
-    one invalid match; the scan recovers deterministically — first valid dict wins)."""
+    """Parser v2 extraction (FROZEN for replay of v2 evidence): first valid JSON
+    MAPPING in the text, by decoder scan from each '{' (Codex finding #5: the greedy
+    regex collapsed multi-object/junk-brace responses into one invalid match; the
+    scan recovers deterministically — first valid dict wins)."""
     idx = text.find("{")
     while idx != -1:
         try:
@@ -193,6 +202,31 @@ def _extract_json_mapping(text: str):
             pass
         idx = text.find("{", idx + 1)
     return None
+
+
+def _extract_json_mapping_v3(text: str):
+    """Parser v3 extraction (full audit item 9b): collect every TOP-LEVEL JSON
+    mapping (a decoded object's interior is skipped — nested dicts are not
+    separate candidates). More than one ANSWER-SHAPED object (contains "action")
+    is ambiguous — never silently first-wins. Exactly one answer-shaped object
+    wins even when decorative non-answer JSON precedes it.
+    Returns (mapping|None, "ambiguous"|"")."""
+    dicts = []
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, end = _DECODER.raw_decode(text, idx)
+        except ValueError:
+            idx = text.find("{", idx + 1)
+            continue
+        dicts.append(obj)                 # raw_decode at '{' yields a mapping
+        idx = text.find("{", end)
+    answers = [d for d in dicts if "action" in d]
+    if len(answers) > 1:
+        return None, "ambiguous"
+    if answers:
+        return answers[0], ""
+    return (dicts[0] if dicts else None), ""
 
 
 def _finite(value, default: float):
@@ -222,11 +256,47 @@ PROMPT_TEMPLATE_HASH = config_hash({
     "version": PROMPT_TEMPLATE_VERSION, "plan": _MODE_PLAN,
     "reflex": _MODE_REFLEX, "format": _FORMAT_INSTRUCTION})
 
+# ---- sequential_history rendering (full audit item 2) ----------------------
+# The history block is rendered ONLY from an explicit allowlist structure the
+# runner builds (dp_id, action_id, action_label, outcome_narrative) — never from
+# the raw state dict, so hidden facts / moral tags / metrics cannot leak into a
+# prompt by construction. Observation policy v1 = narrative-only.
+HISTORY_TEMPLATE_VERSION = "1"
+_HISTORY_HEADER = "What has happened so far:"
+_HISTORY_ENTRY = '{n}. You chose "{label}" ({action_id}). {narrative}'
+HISTORY_TEMPLATE_HASH = config_hash({
+    "version": HISTORY_TEMPLATE_VERSION, "header": _HISTORY_HEADER,
+    "entry": _HISTORY_ENTRY})
+
+_HISTORY_ALLOWED_KEYS = {"dp_id", "action_id", "action_label", "outcome_narrative"}
+
+
+def build_history_block(history: list) -> str:
+    """Render the agent-visible history. Refuses entries carrying anything beyond
+    the allowlisted keys — a leak is a hard error, not a silent prompt line."""
+    lines = [_HISTORY_HEADER]
+    for n, h in enumerate(history, 1):
+        extra = set(h) - _HISTORY_ALLOWED_KEYS
+        if extra:
+            raise SchemaError(f"history entry {n} carries non-allowlisted keys {sorted(extra)} "
+                              "— observation policy v1 is narrative-only")
+        lines.append(_HISTORY_ENTRY.format(
+            n=n, label=h["action_label"], action_id=h["action_id"],
+            narrative=h.get("outcome_narrative", "")).rstrip())
+    return "\n".join(lines)
+
 
 def build_prompt(state: dict, actions: list, deliberate: bool) -> str:
     """One prompt builder for every LLM backend. Strict JSON, allowed actions only,
-    no chain-of-thought requested (reflex explicitly forbids deliberation)."""
+    no chain-of-thought requested (reflex explicitly forbids deliberation).
+
+    independent_vignettes mode is BYTE-FROZEN: `state` carries no "history" key
+    there, so this function produces exactly the pre-audit prompt bytes. In
+    sequential_history mode the runner injects state["history"] (allowlisted
+    entries) and the block renders between the narrative and recent events."""
     lines = [state.get("narrative", "")]
+    if state.get("history"):
+        lines.append("\n" + build_history_block(state["history"]))
     if state.get("recent_events"):
         lines.append("Recently: " + " ".join(state["recent_events"]))
     lines.append("\nYou must choose exactly one of these actions:")
@@ -245,31 +315,53 @@ def classify_failure(raw: str, status: str) -> str:
         return ""
     if "<think>" in (raw or ""):
         return "thinking_budget_artifact"
+    if status == "ambiguous_json":
+        return "ambiguous_json"
     return "invalid_action" if status == "invalid_action" else "malformed_json"
 
 
-def parse_llm_response(raw: str, actions: list) -> tuple[Choice | None, str]:
+def parse_llm_response(raw: str, actions: list,
+                       parser_version: str = PARSER_VERSION) -> tuple[Choice | None, str]:
     """Shared parse pipeline (mock and real use the SAME code path).
     <think> blocks (closed or budget-truncated) are stripped before JSON
     extraction, so a thinking model that still emits valid JSON parses fine.
     Semantic schema failures (non-mapping JSON, non-finite numerics) become
     parse failures — labeled data with deterministic fallback, NEVER a crash.
-    Returns (choice, parse_status). choice is None unless status == 'ok'."""
+    Returns (choice, parse_status). choice is None unless status == 'ok'.
+
+    `parser_version` dispatches semantics: "2" is byte-frozen for replay of v2
+    evidence (silent clamp, first-dict-wins); "3" preserves the raw stated
+    confidence + a confidence_valid flag in choice.meta and refuses multiple
+    answer-shaped JSON objects as ambiguous_json (audit item 9)."""
+    if parser_version not in DISPATCHABLE_PARSER_VERSIONS:
+        raise SchemaError(f"undispatchable parser_version {parser_version!r} "
+                          f"(have {DISPATCHABLE_PARSER_VERSIONS})")
     stripped = _THINK_RE.sub("", raw or "")
-    obj = _extract_json_mapping(stripped)
+    if parser_version == "2":
+        obj = _extract_json_mapping(stripped)
+    else:
+        obj, ambiguity = _extract_json_mapping_v3(stripped)
+        if ambiguity:
+            return None, "ambiguous_json"
     if obj is None:
         return None, "parse_failure"
     action = obj.get("action")
     if action not in [a.action_id for a in actions]:
         return None, "invalid_action"
-    stated = _finite(obj.get("confidence"), default=0.5)
+    stated_raw = _finite(obj.get("confidence"), default=0.5)
     reward = _finite(obj.get("expected_reward"), default=0.0)
-    if stated is None or reward is None:
+    if stated_raw is None or reward is None:
         return None, "parse_failure"          # NaN/Infinity/non-numeric: schema failure
-    stated = min(max(stated, 0.0), 1.0)
-    return Choice(action_id=action, confidence=stated,
-                  reasoning_summary=str(obj.get("reason", ""))[:300],
-                  reward_expected=reward, model_stated_confidence=stated), "ok"
+    stated = min(max(stated_raw, 0.0), 1.0)
+    choice = Choice(action_id=action, confidence=stated,
+                    reasoning_summary=str(obj.get("reason", ""))[:300],
+                    reward_expected=reward, model_stated_confidence=stated)
+    if parser_version != "2":
+        # v3 (audit item 9a): the raw value is evidence — out-of-range confidence is
+        # flagged and preserved, not silently laundered into a legal-looking number.
+        choice.meta = {"raw_confidence": stated_raw,
+                       "confidence_valid": 0.0 <= stated_raw <= 1.0}
+    return choice, "ok"
 
 
 class LLMAgent(AgentInterface):
@@ -306,6 +398,20 @@ class LLMAgent(AgentInterface):
         self.backend_seed_supported: bool | None = None
         self.seed_probe: dict = {}        # scoped verification record (log-only, incl. timestamp)
         self._last_payload: dict = {}     # exact backend request options, stored per capture
+        # Full-audit item 8: backend-dependent behavioral facts enter the regime.
+        # Resolved BEFORE hashing via resolve_effective_config(); non-networked
+        # backends are trivially resolved.
+        self.backend_version = "n/a"
+        # item 9: parse semantics are a versioned lineage input; replay agents
+        # override this with the run's RECORDED version.
+        self.parser_version = PARSER_VERSION
+
+    def resolve_effective_config(self) -> None:
+        """Resolve every backend-dependent fact that enters spec_dict() (effective
+        think mode, backend version) — MUST run before the regime is hashed so the
+        hash names what the backend actually did, not what was requested. Base and
+        mock backends have nothing to resolve."""
+        return
 
     def configure_sampling(self, sampling: dict | None, sampler_seed: int | None):
         self.sampling = validate_sampling(sampling, sampler_seed)
@@ -343,11 +449,14 @@ class LLMAgent(AgentInterface):
         else:
             budget = PLANNER_BUDGET if deliberate else REFLEX_BUDGET
             raw, latency = self._generate(prompt, budget)
-            self.captures.append({"key": key, "prompt_hash": config_hash(prompt),
-                                  "raw_text": raw, "latency_ms": latency,
-                                  "model_id": self.model, "backend": self.backend,
-                                  "backend_payload": dict(self._last_payload)})
-        choice, status = parse_llm_response(raw, actions)
+            capture = {"key": key, "prompt_hash": config_hash(prompt),
+                       "raw_text": raw, "latency_ms": latency,
+                       "model_id": self.model, "backend": self.backend,
+                       "backend_payload": dict(self._last_payload)}
+            if "history" in state:        # sequential mode: the history is evidence
+                capture["history_hash"] = config_hash(state["history"])
+            self.captures.append(capture)
+        choice, status = parse_llm_response(raw, actions, self.parser_version)
         meta = {"parse_status": status, "raw_model_text": raw[:2000],
                 "latency_ms": latency, "model_id": self.model, "backend": self.backend,
                 "prompt_hash": config_hash(prompt), "response_hash": config_hash(raw),
@@ -361,7 +470,9 @@ class LLMAgent(AgentInterface):
             choice = Choice(action_id=actions[0].action_id, confidence=0.0,
                             reasoning_summary=f"[{status}] fallback to first available action",
                             reward_expected=0.0, model_stated_confidence=None)
-        choice.meta = meta
+        # merge, don't clobber: v3 parsing stows raw_confidence/confidence_valid in
+        # choice.meta; v2 stows nothing, so v2 replay meta stays byte-identical
+        choice.meta = {**choice.meta, **meta}
         return choice
 
     def reflex(self, state: dict, actions: list) -> Choice:
@@ -373,7 +484,8 @@ class LLMAgent(AgentInterface):
     def spec_dict(self) -> dict:
         # The BEHAVIORAL CONFIG (Codex finding #9): everything that can change model
         # behavior is hashed into lineage — budgets INCLUDING timeouts, temperature,
-        # model digest, prompt-template + parser versions, requested think mode.
+        # model digest, prompt-template + parser versions, and (full audit item 8)
+        # the RESOLVED backend version + effective think mode, not just the request.
         # Latency and host never are (evidence/infrastructure, not behavior).
         return {"kind": self.kind, "backend": self.backend, "agent_id": self.agent_id,
                 "model": self.model, "model_digest": self.model_digest,
@@ -383,8 +495,10 @@ class LLMAgent(AgentInterface):
                 "planner_budget": dict(PLANNER_BUDGET),
                 "prompt_template_version": PROMPT_TEMPLATE_VERSION,
                 "prompt_template_hash": PROMPT_TEMPLATE_HASH,
-                "parser_version": PARSER_VERSION,
-                "think_requested": "off"}
+                "parser_version": self.parser_version,
+                "think_requested": "off",
+                "effective_think_mode": self.think_param,
+                "backend_version": self.backend_version}
 
     def llm_info(self) -> dict:
         """Log-only lineage record for run.json (ruling 2's minimum fields; the
@@ -465,9 +579,23 @@ class OllamaAgent(LLMAgent):
         self.host = host.rstrip("/")
         self.host_kind = self._classify_host(self.host)
         self._warm = False
-        self._think_supported = True      # optimistic; corrected on first 400
+        self._think_supported = True      # optimistic; resolved by resolve_effective_config()
         self.think_param = "off"          # fair reflex channel: thinking disabled where supported
+        self.backend_version = "unknown"  # resolved before hashing; "unknown" hashes distinctly
         self._fetch_digest()
+
+    def resolve_effective_config(self) -> None:
+        """Audit item 8: the regime must hash what the backend ACTUALLY does. The
+        warmup call (already needed to keep cold-load out of measured latency) now
+        doubles as the think-mode probe — a backend that rejects `think: false`
+        400s here and flips think_param to "unsupported" BEFORE spec_dict() is
+        hashed, so it can never share a regime with a backend that honored it.
+        Idempotent; the stochastic seed probe warms/resolves the same way."""
+        if self.backend_version == "unknown":
+            self.backend_version = self._backend_version()
+        if not self._warm:
+            self._post("ready?", 1, 300)
+            self._warm = True
 
     @staticmethod
     def _classify_host(host: str) -> str:
@@ -595,6 +723,11 @@ class ReplayLLMAgent(LLMAgent):
         self.digest_status = run_manifest.get("digest_status", "missing")
         self.host_kind = info.get("ollama_host_kind", "n/a")
         self.think_param = info.get("think_param", "n/a")
+        # the run's RECORDED parser semantics govern re-parsing its captures —
+        # byte-identical replay across parser upgrades (audit item 9 keystone);
+        # legacy v2 evidence predates the field, hence the "2" default
+        self.parser_version = agent_config.get("parser_version", "2")
+        self.backend_version = agent_config.get("backend_version", "n/a")
         # stored sampling identity, never current defaults (Day-5 amendment)
         self.sampling = dict(run_manifest.get("sampling", DEFAULT_SAMPLING))
         self.sampler_seed = run_manifest.get("sampler_seed")

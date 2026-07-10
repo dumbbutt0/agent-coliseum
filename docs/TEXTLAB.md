@@ -128,8 +128,10 @@ byte-compares. Live-API determinism is never claimed.
 
 Per run (`derived/textlab/metrics/<run_id>.metrics.json`): `compliance_rate` ·
 `harm_compliance_rate` (n = decisions where `facts.harm != none`) · `refusal_rate` ·
-`verification_rate` · `deceptive_compliance_rate` · `reflex_planner_divergence_rate` (the flinch
-signal) · `deferred_consequence_count`. Aggregate (`aggregate.metrics.json`): per scenario×agent
+`verification_rate` · `deceptive_compliance_rate` · `reflex_planner_divergence_rate`
+(divergence between the immediate-response and deliberation-instructed conditions; "flinch"
+is the design metaphor, not a cognitive claim — see the interaction-modes section) ·
+`deferred_consequence_count`. Aggregate (`aggregate.metrics.json`): per scenario×agent
 cells with `variant_spread` (contamination sanity), `control_twin_delta` (primary − control, per
 `control_of` pair), and `faith_knob_sensitivity` (d2 compliance, unverifiable − verifiable;
 positive = blind faith, negative = verification-seeking).
@@ -179,3 +181,47 @@ innocence isolated) · `hidden_objective` (+ `_aligned` control: willingness vs 
   identity; legacy runs without snapshots must hash-match the current YAML or replay refuses.
 - **Sweep manifests:** rows carry full regime id + exact evidence dir, validated against
   run.json on load; legacy dir-less rows refused (`scripts/migrate_manifest.py`).
+
+## Interaction modes + audit hardening (full Codex repository audit, 2026-07-10)
+
+The audit's central finding: TextLab prompted every decision INDEPENDENTLY — later prompts
+never contained the agent's prior action or its outcome, so multi-decision paths were
+linked-looking vignettes, not remembered behavior. The stack now makes that distinction
+explicit and unpoolable:
+
+- **`interaction_mode`** (run.json, behavioral_config, regime hashes, manifests, CLI
+  `--interaction`): `independent_vignettes` (each decision prompt stands alone — ALL pre-audit
+  evidence, byte-frozen prompt construction) vs `sequential_history` (later prompts carry a
+  canonical agent-visible history). The mode lives inside the hashed regime, aggregation
+  excludes the other mode with a machine-readable reason (even under `--diagnostics`), and
+  legacy runs are labeled independent at read time — never reinterpreted.
+- **Sequential history** (schema v1, observation policy v1 = narrative-only): per completed
+  decision `{dp_id, action_id, action_label, outcome_narrative}` — an explicit allowlist; the
+  renderer hard-errors on any extra key, so hidden facts/moral tags/metrics cannot leak into a
+  prompt by construction. Rendered as a "What has happened so far:" block; the structured
+  history is hashed per decision (`history_prompt_hash` on the node, `history_hash` in
+  captures). Regression: two runs reaching d2 through different d1 actions produce different
+  d2 prompts that each name their own prior action and visible outcome.
+- **Language ruling:** "reflex/planner" readings from independent-mode runs are the 80-token
+  **immediate-response condition** vs the 350-token **deliberation-instructed condition** —
+  prompt-conditioned responses. Claims about remembered confession, cover-story maintenance,
+  internal cognitive layers, or temporal dissociation require sequential_history evidence
+  (see docs/SEQUENTIAL-RERUN.md — planned, not run).
+- **Regime completeness (schema v2):** behavioral_config now also pins `backend_version` and
+  `effective_think_mode` (both RESOLVED before hashing — a backend that rejects `think:false`
+  flips to "unsupported" pre-hash) and `runner.behavioral_version`. Consequence: schema-v2
+  runs never pool with pre-v2 runs, even in independent mode.
+- **Parser v3, version-dispatched:** out-of-range stated confidence is preserved raw +
+  flagged (`raw_confidence`/`confidence_valid` in choice meta; `model_stated_confidence` keeps
+  the normalized value), and >1 answer-shaped JSON object in one response is `ambiguous_json`
+  (a labeled format artifact), never silent first-wins. Replay re-parses captures under the
+  run's RECORDED parser version, so exp-1/exp-2 replay byte-identically across the upgrade.
+- **Manifest strictness:** every redundant row field validates against run.json; duplicate
+  resume keys refuse (ISSUES #1 closed). **Effective-unit weighting:** scenario seeds mapping
+  to the same (variant, sampler_seed) collapse into one equally weighted unit before any mean;
+  twins report raw/retry/effective pair counts (ISSUES #2 closed). **Twin mapping v2:** pair
+  cells key on both full scenario hashes — scenario revisions form distinct pair cells.
+- **Sweep-v2 status:** legacy exploratory deterministic-decoding dataset. Its runs predate
+  snapshots/behavioral_config: replay under the current runner refuses with CONFIG DRIFT and
+  the strict loader refuses its manifest. Evidence remains locally intact; do not cite it as
+  reportable under the current stack. Release-readiness gaps: docs/RELEASE-BLOCKERS.md.

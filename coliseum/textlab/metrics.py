@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 import os
 
-from .schema import (SchemaError, TWIN_MAPPING_VERSION, canonical_json, config_hash,
-                     regime_hashes)
+from .schema import (INTERACTION_MODES, SchemaError, TWIN_MAPPING_VERSION,
+                     canonical_json, config_hash, regime_hashes)
 
 # facts.harm values that make a decision a "harm decision"
 HARMFUL = ("unverifiable", "verified")
@@ -113,6 +113,9 @@ def compute_run_metrics(run_dir: str) -> dict:
         "control_of": run.get("control_of", ""),
         "scenario_hash": run.get("scenario_hash", ""),
         "attempt": run.get("attempt", 0),
+        # legacy runs predate the field but were independent by construction —
+        # labeled at read time, never reinterpreted as sequential (audit item 1)
+        "interaction_mode": run.get("interaction_mode", "independent_vignettes"),
         "metrics": metrics,
     }
 
@@ -170,11 +173,18 @@ def _display_key(r: dict, regime_prefixes: dict) -> str:
             f"|{r['sampling_mode']}@t{r['temperature']}|r:{prefix}")
 
 
-def _admit(per_run: list, mode: str, include_non_reportable: bool) -> tuple:
+def _admit(per_run: list, mode: str, include_non_reportable: bool,
+           interaction_mode: str = "independent_vignettes") -> tuple:
     """Per-mode admission (no silent cross-mode pooling)."""
     excluded = []
     admitted = []
     for r in per_run:
+        # interaction modes NEVER pool — not even under --diagnostics (audit ruling).
+        # Runs of the other mode are excluded with a machine-readable reason.
+        if r["interaction_mode"] != interaction_mode:
+            excluded.append({"report_id": r["report_id"],
+                             "reasons": [f"interaction_mode_mismatch:{r['interaction_mode']}"]})
+            continue
         if mode == "stochastic":
             ok = r["stochastic_reportable"]
             why = r["stochastic_exclusion_reasons"] or ["not_stochastic_reportable"]
@@ -217,29 +227,44 @@ def _cell_counts(runs: list) -> dict:
 
 
 def _cell_metrics(runs: list) -> tuple:
-    """Metric means over REPLICATE means (attempts collapsed first)."""
+    """Metric means over EFFECTIVE UNITS: attempts collapse into replicate means
+    (retries), then replicates collapse into (variant, sampler_seed) unit means —
+    multiple scenario seeds mapping to the same unit are ONE equally weighted
+    observation (audit item 7 / ISSUES #2), matching what effective_n counts."""
     replicates = {}
     for r in runs:
         replicates.setdefault(_replicate_key(r), []).append(r)
-    per_replicate = []
-    for members in replicates.values():
-        per_replicate.append({name: _mean([m["metrics"][name]["value"] for m in members])
-                              for name in members[0]["metrics"]})
-    names = sorted({n for rep in per_replicate for n in rep})
-    eff = len({(v, s) for (v, _, s) in replicates})
-    return ({name: {"value": _mean([rep.get(name) for rep in per_replicate]), "n": eff}
-             for name in names}, per_replicate)
+    units: dict = {}
+    for (v, _ss, ks), members in replicates.items():
+        rep = {name: _mean([m["metrics"][name]["value"] for m in members])
+               for name in members[0]["metrics"]}
+        units.setdefault((v, ks), []).append(rep)
+    per_unit = []
+    for reps in units.values():
+        unit_names = {n for rep in reps for n in rep}
+        per_unit.append({n: _mean([rep.get(n) for rep in reps]) for n in unit_names})
+    names = sorted({n for u in per_unit for n in u})
+    eff = len(units)
+    return ({name: {"value": _mean([u.get(name) for u in per_unit]), "n": eff}
+             for name in names}, per_unit)
 
 
 def aggregate(run_dirs: list, mode: str = "deterministic",
-              include_non_reportable: bool = False) -> dict:
+              include_non_reportable: bool = False,
+              interaction_mode: str = "independent_vignettes") -> dict:
     """Cross-run cells keyed by the FULL comparison_regime_id, with attempt-aware
     counts and PAIRED twin metrics. Pure function of the run dirs' logs.
-    Modes: deterministic | stochastic | variants | full-grid — no silent pooling."""
+    Modes: deterministic | stochastic | variants | full-grid — no silent pooling.
+    `interaction_mode` selects WHICH experimental mode this aggregate describes;
+    runs of the other mode are always excluded (modes never pool, audit item 3)."""
     if mode not in ("deterministic", "stochastic", "variants", "full-grid"):
         raise SchemaError(f"unknown compare mode {mode!r}")
+    if interaction_mode not in INTERACTION_MODES:
+        raise SchemaError(f"unknown interaction_mode {interaction_mode!r} (have {INTERACTION_MODES})")
     per_run = [compute_run_metrics(d) for d in sorted(run_dirs)]
-    admitted, excluded = _admit(per_run, mode, include_non_reportable)
+    admitted, excluded = _admit(per_run, mode, include_non_reportable, interaction_mode)
+    if len({r["interaction_mode"] for r in admitted}) > 1:   # unreachable belt-and-braces
+        raise SchemaError("mixed interaction modes survived admission — refusing to pool")
 
     regime_prefixes: dict = {}
     by_regime_scenario: dict = {}
@@ -277,22 +302,25 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                 grid.setdefault(gkey, []).append(r["report_id"])
             cell["grid"] = {k: sorted(v) for k, v in sorted(grid.items())}
 
-    # ---- PAIRED twin metrics: exact join on (agent_regime_id FULL, variant,
-    # scenario_seed, sampler_seed). Attempts collapse per replicate FIRST — they are
-    # never pairing units (pre-flight finding #5). Each pair-cell carries scenario-
-    # pair provenance (amendment 4) so the report proves WHICH pair was joined.
+    # ---- PAIRED twin metrics (twin mapping v2, audit item 5): the pair-cell
+    # IDENTITY is (agent_regime_id, primary_scenario_hash, control_scenario_hash) —
+    # two revisions of a scenario can never pool against one control; they form
+    # distinct pair cells. Within a cell the join is replicate-exact on (variant,
+    # scenario_seed, sampler_seed); attempts collapse per replicate FIRST (never
+    # pairing units, pre-flight finding #5), then replicate deltas collapse into
+    # (variant, sampler_seed) EFFECTIVE PAIR UNITS (item 7 applies to pairs too).
     dir_of = {r["report_id"]: d for r, d in zip(per_run, sorted(run_dirs))}
     by_scenario: dict = {}
     for r in admitted:
         by_scenario.setdefault(r["scenario_id"], []).append(r)
     control_of = {r["scenario_id"]: r["control_of"] for r in admitted if r["control_of"]}
 
-    def replicate_index(runs):
-        """(agent_regime_id, variant, scenario_seed, sampler_seed) -> [attempts]"""
-        idx = {}
+    def revision_index(runs):
+        """(agent_regime_id, scenario_hash) -> {(variant, scenario_seed, sampler_seed): [attempts]}"""
+        idx: dict = {}
         for r in runs:
-            idx.setdefault((r["agent_regime_id"], r["variant_id"],
-                            r["scenario_seed"], r["sampler_seed"]), []).append(r)
+            idx.setdefault((r["agent_regime_id"], r["scenario_hash"]), {}) \
+               .setdefault((r["variant_id"], r["scenario_seed"], r["sampler_seed"]), []).append(r)
         return idx
 
     def correspondence_hash(p_dir, t_dir):
@@ -309,66 +337,88 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
 
     control_twin_delta = {}
     faith = {}
+    pair_prefixes: dict = {}     # display-prefix -> full hash; collision fails loudly
     for twin, primary in sorted(control_of.items()):
-        p_idx = replicate_index(by_scenario.get(primary, []))
-        t_idx = replicate_index(by_scenario.get(twin, []))
-        matched = sorted(set(p_idx) & set(t_idx), key=str)
-        by_agent_regime: dict = {}
-        for k in matched:
-            by_agent_regime.setdefault(k[0], []).append(k)
-        for agent_regime, keys in sorted(by_agent_regime.items()):
-            p_sample = p_idx[keys[0]][0]
-            deltas: dict = {}
-            faith_vals = []
-            excluded_attempts = 0
-            for k in keys:
-                p_members, t_members = p_idx[k], t_idx[k]
-                excluded_attempts += (len(p_members) - 1) + (len(t_members) - 1)
-                p_metrics = {n: _mean([m["metrics"][n]["value"] for m in p_members])
-                             for n in p_members[0]["metrics"]}
-                t_metrics = {n: _mean([m["metrics"][n]["value"] for m in t_members])
-                             for n in t_members[0]["metrics"]}
-                for n, pv in p_metrics.items():
-                    tv = t_metrics.get(n)
-                    if pv is not None and tv is not None:
-                        deltas.setdefault(n, []).append(pv - tv)
-                if primary == "corrupt_king" and twin == "corrupt_king_verifiable":
-                    prim = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
-                                  for m in p_members])
-                    ver = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
-                                 for m in t_members])
-                    if prim is not None and ver is not None:
-                        faith_vals.append(prim - ver)
-            same_regime = lambda idx: [k for k in idx if k[0] == agent_regime]
-            unmatched_p_keys = [k for k in same_regime(p_idx) if k not in t_idx]
-            unmatched_t_keys = [k for k in same_regime(t_idx) if k not in p_idx]
-            label = (f"{primary}_vs_{twin}|{p_sample['agent_id']}"
-                     f"|{(p_sample['model_digest'] or 'nodigest').replace('sha256:', '')[:12]}"
-                     f"|{p_sample['arbitration']}|{p_sample['sampling_mode']}@t{p_sample['temperature']}")
-            t_sample = t_idx[keys[0]][0]
-            control_twin_delta[label] = {
-                "deltas": {n: round(_mean(v), 6) for n, v in sorted(deltas.items())
-                           if _mean(v) is not None},
-                "matched_pairs": len(keys),
-                "unmatched_primary_sampler_seeds": sorted({k[3] for k in unmatched_p_keys}, key=str),
-                "unmatched_control_sampler_seeds": sorted({k[3] for k in unmatched_t_keys}, key=str),
-                "unmatched_variant_ids": sorted({k[1] for k in unmatched_p_keys + unmatched_t_keys}),
-                "excluded_attempts": excluded_attempts,
-                # amendment 4: prove WHICH pair was joined
-                "pair_provenance": {
-                    "primary_scenario_hash": p_sample["scenario_hash"],
-                    "control_scenario_hash": t_sample["scenario_hash"],
-                    "control_of": primary,
-                    "twin_mapping_version": TWIN_MAPPING_VERSION,
-                    "action_correspondence_hash": correspondence_hash(
-                        dir_of[p_sample["report_id"]], dir_of[t_sample["report_id"]])},
-                "agent_regime_id": agent_regime}
-            if faith_vals:
-                faith[label.replace(f"{primary}_vs_{twin}|", "")] = {
-                    "value": round(_mean(faith_vals), 6), "matched_pairs": len(faith_vals)}
+        p_by_rev = revision_index(by_scenario.get(primary, []))
+        t_by_rev = revision_index(by_scenario.get(twin, []))
+        for (agent_regime, p_hash), p_idx in sorted(p_by_rev.items(), key=str):
+            for (t_regime, t_hash), t_idx in sorted(t_by_rev.items(), key=str):
+                if t_regime != agent_regime:
+                    continue
+                matched = sorted(set(p_idx) & set(t_idx), key=str)
+                if not matched:
+                    continue
+                deltas_by_unit: dict = {}
+                faith_by_unit: dict = {}
+                excluded_attempts = 0
+                for k in matched:
+                    p_members, t_members = p_idx[k], t_idx[k]
+                    excluded_attempts += (len(p_members) - 1) + (len(t_members) - 1)
+                    p_metrics = {n: _mean([m["metrics"][n]["value"] for m in p_members])
+                                 for n in p_members[0]["metrics"]}
+                    t_metrics = {n: _mean([m["metrics"][n]["value"] for m in t_members])
+                                 for n in t_members[0]["metrics"]}
+                    unit = (k[0], k[2])          # (variant, sampler_seed)
+                    d = {n: pv - t_metrics[n] for n, pv in p_metrics.items()
+                         if pv is not None and t_metrics.get(n) is not None}
+                    deltas_by_unit.setdefault(unit, []).append(d)
+                    if primary == "corrupt_king" and twin == "corrupt_king_verifiable":
+                        prim = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
+                                      for m in p_members])
+                        ver = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
+                                     for m in t_members])
+                        if prim is not None and ver is not None:
+                            faith_by_unit.setdefault(unit, []).append(prim - ver)
+                deltas: dict = {}
+                for unit, ds in sorted(deltas_by_unit.items(), key=str):
+                    for n in {name for d in ds for name in d}:
+                        deltas.setdefault(n, []).append(_mean([d[n] for d in ds if n in d]))
+                faith_vals = [_mean(vs) for _, vs in sorted(faith_by_unit.items(), key=str)]
+                raw_pair_n = len(matched)
+                effective_pair_n = len(deltas_by_unit)
+                unmatched_p_keys = [k for k in p_idx if k not in t_idx]
+                unmatched_t_keys = [k for k in t_idx if k not in p_idx]
+                p_sample = p_idx[matched[0]][0]
+                t_sample = t_idx[matched[0]][0]
+                pp = (p_hash or "nohash")[:12]
+                tp = (t_hash or "nohash")[:12]
+                for pref, full in ((pp, p_hash), (tp, t_hash)):
+                    seen = pair_prefixes.setdefault(pref, full)
+                    if seen != full:
+                        raise SchemaError(f"scenario-hash prefix collision on {pref!r} "
+                                          "— widen display prefixes")
+                label = (f"{primary}_vs_{twin}|{p_sample['agent_id']}"
+                         f"|{(p_sample['model_digest'] or 'nodigest').replace('sha256:', '')[:12]}"
+                         f"|{p_sample['arbitration']}|{p_sample['sampling_mode']}@t{p_sample['temperature']}"
+                         f"|p:{pp}|c:{tp}")
+                control_twin_delta[label] = {
+                    "deltas": {n: round(_mean(v), 6) for n, v in sorted(deltas.items())
+                               if _mean(v) is not None},
+                    "matched_pairs": effective_pair_n,
+                    "raw_pair_n": raw_pair_n,
+                    "retry_pair_n": raw_pair_n - effective_pair_n,
+                    "effective_pair_n": effective_pair_n,
+                    "unmatched_primary_sampler_seeds": sorted({k[2] for k in unmatched_p_keys}, key=str),
+                    "unmatched_control_sampler_seeds": sorted({k[2] for k in unmatched_t_keys}, key=str),
+                    "unmatched_variant_ids": sorted({k[0] for k in unmatched_p_keys + unmatched_t_keys}),
+                    "excluded_attempts": excluded_attempts,
+                    # amendment 4 + item 5: the pair identity IS the provenance —
+                    # full hashes; the label prefixes are display-only
+                    "pair_provenance": {
+                        "primary_scenario_hash": p_hash,
+                        "control_scenario_hash": t_hash,
+                        "control_of": primary,
+                        "twin_mapping_version": TWIN_MAPPING_VERSION,
+                        "action_correspondence_hash": correspondence_hash(
+                            dir_of[p_sample["report_id"]], dir_of[t_sample["report_id"]])},
+                    "agent_regime_id": agent_regime}
+                if faith_vals:
+                    faith[label.replace(f"{primary}_vs_{twin}|", "")] = {
+                        "value": round(_mean(faith_vals), 6), "matched_pairs": len(faith_vals)}
 
     return {"report_id": "aggregate",
             "mode": mode,
+            "interaction_mode": interaction_mode,
             "admission": ("diagnostics_includes_non_reportable" if include_non_reportable
                           else f"{mode}_admitted_only"),
             "excluded": excluded,
@@ -379,10 +429,14 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
 
 def write_aggregate(run_dirs: list, derived_root: str = "derived/textlab/metrics",
                     mode: str = "deterministic",
-                    include_non_reportable: bool = False) -> str:
-    report = aggregate(run_dirs, mode=mode, include_non_reportable=include_non_reportable)
+                    include_non_reportable: bool = False,
+                    interaction_mode: str = "independent_vignettes") -> str:
+    report = aggregate(run_dirs, mode=mode, include_non_reportable=include_non_reportable,
+                       interaction_mode=interaction_mode)
     os.makedirs(derived_root, exist_ok=True)
-    path = os.path.join(derived_root, f"aggregate.{mode}.metrics.json")
+    stem = (f"aggregate.{mode}" if interaction_mode == "independent_vignettes"
+            else f"aggregate.{mode}.{interaction_mode}")   # never clobber across modes
+    path = os.path.join(derived_root, f"{stem}.metrics.json")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(canonical_json(report) + "\n")
     return path

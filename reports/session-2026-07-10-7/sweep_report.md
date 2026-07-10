@@ -1,5 +1,13 @@
 # Exp-1: Generalized gemma3 reversal failed cross-variant replication (2026-07-10)
 
+> **Audit amendment (owner directive after the full Codex repository audit,
+> 2026-07-10; results unchanged):** this experiment ran in what is now named
+> **independent_vignettes mode** — later prompts did NOT include the agent's prior
+> actions or outcomes. "Reflex/planner" below = the 80-token immediate-response
+> condition vs the 350-token deliberation-instructed condition, two separately
+> prompted calls on the same decision text; readings are prompt-conditioned
+> responses, never remembered sequential behavior or internal cognitive layers.
+
 > **Wording amendment (2026-07-10, owner):** Exp-1 does NOT prove the original reversal
 > never occurs. It shows the reversal **failed to generalize** from the v1_cistern wording
 > (where it was observed deterministically) to the v0_granary wording under sampler

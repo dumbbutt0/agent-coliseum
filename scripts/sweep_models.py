@@ -32,27 +32,64 @@ _ATTEMPT_RE = re.compile(r"\.a(\d+)$")
 
 
 def manifest_load(path: str, out_root: str) -> dict:
-    """(regime_id, scenario_seed, sampler_seed) -> validated row. Refuses ambiguity."""
+    """(regime_id, scenario_seed, sampler_seed) -> validated row.
+
+    Full-row validation (audit item 6, closes ISSUES.md #1): EVERY redundant field
+    a row carries must agree with its run.json evidence — a manifest can no longer
+    assert anything its evidence contradicts. Duplicate resume keys are REFUSED
+    outright (no last-row-wins); so are dir/attempt mismatches and legacy dir-less
+    rows."""
     done = {}
     if not os.path.exists(path):
         return done
     with open(path, encoding="utf-8") as fh:
         for i, line in enumerate(fh):
             rec = json.loads(line)
+            where = f"{path}:{i + 1}"
             if "dir" not in rec:
                 raise SchemaError(
-                    f"{path}:{i + 1}: legacy manifest row without an exact evidence dir — "
+                    f"{where}: legacy manifest row without an exact evidence dir — "
                     "REFUSED (run scripts/migrate_manifest.py or use a fresh manifest)")
             run_dir = os.path.join(out_root, rec["dir"])
             manifest_file = os.path.join(run_dir, "run.json")
             if not os.path.exists(manifest_file):
-                raise SchemaError(f"{path}:{i + 1}: evidence dir missing run.json: {run_dir}")
+                raise SchemaError(f"{where}: evidence dir missing run.json: {run_dir}")
             run = json.load(open(manifest_file, encoding="utf-8"))
-            if run["run_id"] != rec["run_id"]:
-                raise SchemaError(f"{path}:{i + 1}: run_id mismatch vs evidence "
-                                  f"({rec['run_id']} vs {run['run_id']})")
+            expected = {
+                "run_id": run["run_id"],
+                "regime_id": run.get("comparison_regime_id", ""),
+                "digest": run.get("agent_config", {}).get("model_digest", ""),
+                "scenario": run["scenario_id"],
+                "scenario_hash": run.get("scenario_hash", ""),
+                "seed": run["seed"],
+                "scenario_seed": run.get("scenario_seed", run["seed"]),
+                "sampler_seed": run.get("sampler_seed"),
+                "variant_id": run["variant_id"],
+                "temperature": run.get("sampling", {}).get("temperature", 0),
+                "sampling_mode": run.get("sampling", {}).get("mode", "deterministic"),
+                "arbitration": run.get("arbitration", "planner_priority"),
+                "reportable": run.get("reportable", True),
+                "stochastic_reportable": run.get("stochastic_reportable", False),
+                "interaction_mode": run.get("interaction_mode", "independent_vignettes"),
+            }
+            for field_name, want in expected.items():
+                if field_name in rec and rec[field_name] != want:
+                    raise SchemaError(f"{where}: {field_name} mismatch vs evidence "
+                                      f"({rec[field_name]!r} vs {want!r})")
+            # dir <-> run_id/attempt coherence (numeric parse only; finding: .a10 < .a2)
+            m = _ATTEMPT_RE.search(rec["dir"])
+            dir_attempt = int(m.group(1)) if m else 0
+            if _ATTEMPT_RE.sub("", rec["dir"]) != run["run_id"]:
+                raise SchemaError(f"{where}: dir {rec['dir']!r} does not name its run_id "
+                                  f"{run['run_id']!r}")
+            if run.get("attempt", 0) != dir_attempt:
+                raise SchemaError(f"{where}: dir attempt .a{dir_attempt} disagrees with "
+                                  f"run.json attempt {run.get('attempt', 0)}")
             regime = rec.get("regime_id") or run.get("comparison_regime_id", "")
             key = (regime, rec.get("scenario_seed", rec.get("seed")), rec.get("sampler_seed"))
+            if key in done:
+                raise SchemaError(f"{where}: duplicate resume key {key} — REFUSED "
+                                  "(no last-row-wins; deduplicate the manifest)")
             done[key] = rec
     return done
 
@@ -100,8 +137,11 @@ def main():
             print(f"!! {model}: digest could not be pinned — model SKIPPED", flush=True)
             continue
         probe.configure_sampling(sampling, sampler_seeds[0])
+        # resolve backend version + effective think mode BEFORE computing the resume
+        # regime — the probe's spec must hash exactly like the runtime agents' (item 8)
+        probe.resolve_effective_config()
         print(f"== {model}  digest={probe.model_digest[:20]}  family={probe.model_family} "
-              f"host={probe.host}  mode={mode}", flush=True)
+              f"host={probe.host}  backend={probe.backend_version}  mode={mode}", flush=True)
         for scenario_name in scenarios:
             path = os.path.join(args.config_dir, f"{scenario_name}.yaml")
             scen = load_scenario(path)
@@ -135,6 +175,7 @@ def main():
                                "dir": os.path.basename(r.run_dir),
                                "reportable": r.run.reportable,
                                "stochastic_reportable": r.run.stochastic_reportable,
+                               "interaction_mode": r.run.interaction_mode,
                                "path": r.final_actions}
                         manifest.write(json.dumps(row) + "\n")
                         manifest.flush()

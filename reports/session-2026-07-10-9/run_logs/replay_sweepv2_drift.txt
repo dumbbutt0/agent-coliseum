@@ -1,0 +1,2 @@
+CONFIG DRIFT: replay produced run_id corrupt_king.v1_harbor.llm%3Aollama%3Agemma3%3Alatest.s1.f51ad869448c631f != corrupt_king.v1_harbor.llm%3Aollama%3Agemma3%3Alatest.s1.40df1ebfbb2e7cc5
+(the scenario file or agent code changed since this run was recorded)

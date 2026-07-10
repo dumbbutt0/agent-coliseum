@@ -21,11 +21,13 @@ import urllib.parse
 
 from ..logging_substrate import RunLogger
 from ..seeding import seed_everything
-from .agents import AgentInterface, LLMAgent, agent_from_manifest, make_agent
+from .agents import (HISTORY_TEMPLATE_HASH, HISTORY_TEMPLATE_VERSION,
+                     AgentInterface, LLMAgent, agent_from_manifest, make_agent)
 from .scenario import load_scenario, pick_variant, scenario_from_snapshot
-from .schema import (DecisionNode, EventDelta, MemoryUpdate, Outcome, Run,
-                     SchemaError, apply_delta, build_behavioral_config,
-                     canonical_json, config_hash, regime_hashes, validate_sampling)
+from .schema import (INTERACTION_MODES, DecisionNode, EventDelta, MemoryUpdate,
+                     Outcome, Run, SchemaError, apply_delta,
+                     build_behavioral_config, canonical_json, config_hash,
+                     regime_hashes, validate_sampling)
 
 # Ruling 1 (2026-07-10): personas RECOMMEND (reflex + plan, both preserved);
 # the harness ARBITRATES and records which named rule selected the final action.
@@ -121,10 +123,17 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                  arbitration: str = "planner_priority",
                  replay_from: str | None = None,
                  sampling: dict | None = None,
-                 sampler_seed: int | None = None) -> RunResult:
+                 sampler_seed: int | None = None,
+                 interaction_mode: str = "independent_vignettes") -> RunResult:
     """`seed` is the SCENARIO seed (variant selection). `sampler_seed` + `sampling`
     control backend sampling: deterministic temp-0 by default; stochastic requires
     temperature > 0 and an explicit sampler_seed (replicates must be identifiable).
+
+    `interaction_mode` (full-audit ruling): independent_vignettes = every decision
+    prompt stands alone (pre-audit behavior, byte-frozen); sequential_history =
+    later prompts carry the agent-visible history of prior final actions and
+    visible outcomes. The mode lives inside the hashed behavioral_config, so the
+    two can never share a comparison regime.
 
     `replay_from`: path to a prior LLM run dir. The replay agent's ENTIRE identity
     comes from that run's manifest; the scenario comes from the run's stored
@@ -132,6 +141,8 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
     integrity-checked and served verbatim — byte-identical to the live original."""
     if arbitration not in ARBITRATION_RULES:
         raise SchemaError(f"unknown arbitration rule {arbitration!r} (have {sorted(ARBITRATION_RULES)})")
+    if interaction_mode not in INTERACTION_MODES:
+        raise SchemaError(f"unknown interaction_mode {interaction_mode!r} (have {INTERACTION_MODES})")
     arbitrate = ARBITRATION_RULES[arbitration]
 
     if replay_from is not None:
@@ -172,10 +183,13 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
         agent = agent_from_manifest(original)
         agent.load_replay([json.loads(line) for line in cap_bytes.decode("utf-8").splitlines()
                            if line.strip()])
-        # replicate identity from the manifest, never current defaults
+        # replicate identity from the manifest, never current defaults — including
+        # the interaction mode: a legacy run without the field was independent by
+        # construction and is never silently reinterpreted as sequential
         sampling = dict(original.get("sampling", {"mode": "deterministic", "temperature": 0}))
         sampler_seed = original.get("sampler_seed")
         seed = original["seed"]
+        interaction_mode = original.get("interaction_mode", "independent_vignettes")
     else:
         scenario = load_scenario(scenario_path)
         agent: AgentInterface = make_agent(agent_spec)
@@ -190,6 +204,10 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
             agent.verify_seeded_sampling()
     elif isinstance(agent, LLMAgent) and replay_from is None:
         agent.configure_sampling(sampling, sampler_seed)
+    if isinstance(agent, LLMAgent) and replay_from is None:
+        # audit item 8: effective think mode + backend version resolve BEFORE the
+        # regime hash — the hash names what the backend actually did
+        agent.resolve_effective_config()
 
     seed_everything(seed)
     variant = pick_variant(scenario, seed)
@@ -201,7 +219,10 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
     else:
         behavioral_config = build_behavioral_config(
             scenario.scenario_id, scenario.behavioral_hash(), agent.spec_dict(),
-            arbitration, ARBITRATION_VERSION, sampling)
+            arbitration, ARBITRATION_VERSION, sampling,
+            interaction_mode=interaction_mode,
+            history_template_version=HISTORY_TEMPLATE_VERSION,
+            history_template_hash=HISTORY_TEMPLATE_HASH)
     comparison_regime_id, agent_regime_id = regime_hashes(behavioral_config)
 
     run_hash = config_hash({"behavioral_config": behavioral_config,
@@ -248,12 +269,14 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
               scenario_seed=seed, sampler_seed=sampler_seed, sampling=sampling,
               backend_seed_supported=getattr(agent, "backend_seed_supported", None),
               stochastic_reportable=(not reasons),
-              stochastic_exclusion_reasons=reasons)
+              stochastic_exclusion_reasons=reasons,
+              interaction_mode=interaction_mode)
 
     dps = {dp.dp_id: dp for dp in scenario.decision_points}
     state = dict(scenario.initial_state)
     pending = []                 # [{due, narrative, state_delta}] — deferred consequences
     final_actions = []
+    history = []                 # sequential mode: allowlisted agent-visible entries only
     timestep = 0
     dp_id = scenario.decision_points[0].dp_id
 
@@ -282,6 +305,14 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                             "recent_events": recent_events, "facts": dp.facts,
                             "authority_pressure": dp.authority_pressure,
                             "risk_level": dp.risk_level, "time_pressure": dp.time_pressure}
+            if interaction_mode == "sequential_history":
+                # the ONLY channel by which prior decisions reach a later prompt —
+                # explicit allowlisted entries, hashed as evidence. Independent mode
+                # never sets the key, so its state/prompt bytes are pre-audit frozen.
+                state_before["history"] = [dict(h) for h in history]
+                history_prompt_hash = config_hash(history)
+            else:
+                history_prompt_hash = ""
             actions = [scenario.actions[aid] for aid in dp.available_actions]
 
             reflex = agent.reflex(state_before, actions)
@@ -322,13 +353,18 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                 planner_latency_ms=planner.meta.get("latency_ms", 0.0),
                 planner_consulted=True,
                 arbitration_rule=arbitration, dp_id=dp.dp_id,
-                arbitration_winner=arbitration_winner)
+                arbitration_winner=arbitration_winner,
+                history_prompt_hash=history_prompt_hash)
 
             log.log("decision_node", **node.to_record())
             log.log("outcome", **outcome.to_record())
             log.log("memory_update",
                     **MemoryUpdate(run_id=run_id, timestep=timestep, summary=memory).to_record())
 
+            if interaction_mode == "sequential_history":
+                history.append({"dp_id": dp.dp_id, "action_id": final.action_id,
+                                "action_label": scenario.actions[final.action_id].label,
+                                "outcome_narrative": rule.get("narrative", "")})
             state = state_after
             final_actions.append(final.action_id)
             timestep += 1
