@@ -54,24 +54,34 @@ def run_graph(run_dir: str) -> dict:
 
 
 def merged_graph(run_dirs: list) -> dict:
-    """All runs overlaid on decision points; edge weight = traversal count."""
+    """All runs overlaid on decision points; edge weights are interaction-mode-local.
+
+    A merged graph is an aggregate view, so its counters must obey the same hard
+    separation as metric cells.  The interaction mode is therefore part of every
+    edge identity; legacy runs without a mode are explicitly independent rather
+    than being silently pooled with sequential runs. Merged graphs intentionally
+    remain overlays across agents/regimes *within* one interaction mode.
+    """
     scenario_ids, agents = set(), set()
     weights: dict = {}
     for run_dir in sorted(run_dirs):
         run, dnodes = _read_nodes(run_dir)
         scenario_ids.add(run["scenario_id"])
         agents.add(run["agent_id"])
+        interaction_mode = run.get("interaction_mode", "independent_vignettes")
         for a, b in zip(dnodes, dnodes[1:]):
-            key = (a.get("dp_id", f"t{a['timestep']}"), a["final_action"],
+            key = (interaction_mode, a.get("dp_id", f"t{a['timestep']}"), a["final_action"],
                    b.get("dp_id", f"t{b['timestep']}"))
             weights[key] = weights.get(key, 0) + 1
         if dnodes:
             last = dnodes[-1]
-            key = (last.get("dp_id", f"t{last['timestep']}"), last["final_action"], "end")
+            key = (interaction_mode, last.get("dp_id", f"t{last['timestep']}"),
+                   last["final_action"], "end")
             weights[key] = weights.get(key, 0) + 1
-    dp_ids = sorted({k[0] for k in weights} | {k[2] for k in weights})
-    edges = [{"from": f, "action": a, "to": t, "weight": w}
-             for (f, a, t), w in sorted(weights.items())]
+    dp_ids = sorted({k[1] for k in weights} | {k[3] for k in weights})
+    edges = [{"interaction_mode": mode,
+              "from": f, "action": a, "to": t, "weight": w}
+             for (mode, f, a, t), w in sorted(weights.items())]
     return {"graph": "merged", "scenario_ids": sorted(scenario_ids),
             "agent_ids": sorted(agents), "nodes": dp_ids, "edges": edges}
 
@@ -88,11 +98,18 @@ def to_dot(graph: dict) -> str:
         for e in graph["edges"]:
             lines.append(f'  "{e["from"]}" -> "{e["to"]}" [label="{e["action"]}"];')
     else:
-        for dp in graph["nodes"]:
-            shape = "doublecircle" if dp == "end" else "box"
-            lines.append(f'  "{dp}" [shape={shape}];')
+        modes = sorted({e.get("interaction_mode", "independent_vignettes")
+                        for e in graph["edges"]})
+        for mode in modes:
+            for dp in graph["nodes"]:
+                shape = "doublecircle" if dp == "end" else "box"
+                lines.append(f'  "{mode}|{dp}" [shape={shape}, label="{dp}"];')
         for e in graph["edges"]:
-            lines.append(f'  "{e["from"]}" -> "{e["to"]}" [label="{e["action"]} x{e["weight"]}", penwidth={min(1 + e["weight"] * 0.5, 5)}];')
+            # Node IDs include the full aggregate bucket so DOT renderers cannot
+            # visually re-pool edges that JSON keeps separate.
+            bucket = e.get("interaction_mode", "independent_vignettes")
+            src, dst = f'{bucket}|{e["from"]}', f'{bucket}|{e["to"]}'
+            lines.append(f'  "{src}" -> "{dst}" [label="{e["action"]} x{e["weight"]}", penwidth={min(1 + e["weight"] * 0.5, 5)}];')
     lines.append("}")
     return "\n".join(lines) + "\n"
 

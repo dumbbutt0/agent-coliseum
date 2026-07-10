@@ -226,11 +226,8 @@ def _cell_counts(runs: list) -> dict:
             "effective_n": len({(v, s) for (v, _, s) in replicates})}
 
 
-def _cell_metrics(runs: list) -> tuple:
-    """Metric means over EFFECTIVE UNITS: attempts collapse into replicate means
-    (retries), then replicates collapse into (variant, sampler_seed) unit means —
-    multiple scenario seeds mapping to the same unit are ONE equally weighted
-    observation (audit item 7 / ISSUES #2), matching what effective_n counts."""
+def _effective_unit_metrics(runs: list) -> dict:
+    """(variant, sampler_seed) -> metrics after attempt/replicate collapse."""
     replicates = {}
     for r in runs:
         replicates.setdefault(_replicate_key(r), []).append(r)
@@ -239,14 +236,34 @@ def _cell_metrics(runs: list) -> tuple:
         rep = {name: _mean([m["metrics"][name]["value"] for m in members])
                for name in members[0]["metrics"]}
         units.setdefault((v, ks), []).append(rep)
-    per_unit = []
-    for reps in units.values():
+    per_unit = {}
+    for key, reps in units.items():
         unit_names = {n for rep in reps for n in rep}
-        per_unit.append({n: _mean([rep.get(n) for rep in reps]) for n in unit_names})
+        per_unit[key] = {n: _mean([rep.get(n) for rep in reps]) for n in unit_names}
+    return per_unit
+
+
+def _cell_metrics(runs: list) -> tuple:
+    """Metric means over EFFECTIVE UNITS: attempts collapse into replicate means
+    (retries), then replicates collapse into (variant, sampler_seed) unit means —
+    multiple scenario seeds mapping to the same unit are ONE equally weighted
+    observation (audit item 7 / ISSUES #2), matching what effective_n counts."""
+    unit_metrics = _effective_unit_metrics(runs)
+    per_unit = list(unit_metrics.values())
     names = sorted({n for u in per_unit for n in u})
-    eff = len(units)
-    return ({name: {"value": _mean([u.get(name) for u in per_unit]), "n": eff}
+    return ({name: {"value": _mean([u.get(name) for u in per_unit]),
+                    "n": sum(u.get(name) is not None for u in per_unit)}
              for name in names}, per_unit)
+
+
+def _variant_spread(runs: list) -> dict:
+    """Per-variant means with one vote per effective unit."""
+    spread: dict = {}
+    for (variant_id, _sampler_seed), unit in _effective_unit_metrics(runs).items():
+        for name, value in unit.items():
+            spread.setdefault(name, {}).setdefault(variant_id, []).append(value)
+    return {name: {variant: _mean(values) for variant, values in sorted(per_variant.items())}
+            for name, per_variant in sorted(spread.items())}
 
 
 def aggregate(run_dirs: list, mode: str = "deterministic",
@@ -276,10 +293,6 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
         r0 = runs[0]
         key = _display_key(r0, regime_prefixes)
         metrics, _ = _cell_metrics(runs)
-        variant_spread: dict = {}
-        for r in runs:
-            for name, m in r["metrics"].items():
-                variant_spread.setdefault(name, {}).setdefault(r["variant_id"], []).append(m["value"])
         cells[key] = {
             "comparison_regime_id": regime_id, "agent_regime_id": r0["agent_regime_id"],
             "scenario_id": r0["scenario_id"], "agent_id": r0["agent_id"],
@@ -292,8 +305,9 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                                      if r["sampler_seed"] is not None}),
             "counts": _cell_counts(runs),
             "metrics": metrics,
-            "variant_spread": {name: {v: _mean(vals) for v, vals in sorted(per_var.items())}
-                               for name, per_var in sorted(variant_spread.items())}}
+            # Diagnostic means use the same effective units as the headline cell;
+            # retries and duplicate scenario seeds cannot regain weight here.
+            "variant_spread": _variant_spread(runs)}
     if mode == "full-grid":
         for key, cell in cells.items():
             grid = {}
@@ -394,6 +408,8 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                 control_twin_delta[label] = {
                     "deltas": {n: round(_mean(v), 6) for n, v in sorted(deltas.items())
                                if _mean(v) is not None},
+                    "delta_effective_n": {n: sum(v is not None for v in values)
+                                          for n, values in sorted(deltas.items())},
                     "matched_pairs": effective_pair_n,
                     "raw_pair_n": raw_pair_n,
                     "retry_pair_n": raw_pair_n - effective_pair_n,

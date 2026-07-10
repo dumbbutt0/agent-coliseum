@@ -21,7 +21,8 @@ import coliseum.textlab.agents as agents_mod
 from coliseum.textlab.agents import (HISTORY_TEMPLATE_HASH, HISTORY_TEMPLATE_VERSION,
                                      MockLLMAgent, build_history_block, build_prompt,
                                      classify_failure, parse_llm_response)
-from coliseum.textlab.metrics import _cell_counts, _cell_metrics, aggregate, compute_run_metrics
+from coliseum.textlab.metrics import (_cell_counts, _cell_metrics, _variant_spread,
+                                     aggregate, compute_run_metrics)
 from coliseum.textlab.runner import ARBITRATION_VERSION, run_scenario
 from coliseum.textlab.schema import (DEFAULT_SAMPLING, SchemaError,
                                      build_behavioral_config, config_hash, regime_hashes)
@@ -272,7 +273,8 @@ def test_twin_pairing_separates_scenario_revisions(tmp_path):
 
 def _mock_row(run_dir):
     run = json.load(open(os.path.join(run_dir, "run.json")))
-    return {"regime_id": run["comparison_regime_id"], "model": "mock",
+    return {"regime_id": run["comparison_regime_id"],
+            "model": run["agent_config"]["model"],
             "scenario": run["scenario_id"], "scenario_seed": run["scenario_seed"],
             "sampler_seed": run["sampler_seed"], "variant_id": run["variant_id"],
             "temperature": run["sampling"].get("temperature", 0),
@@ -294,7 +296,8 @@ def test_manifest_full_row_validation_and_duplicate_refusal(tmp_path):
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     assert len(sweep_models.manifest_load(str(path), out_root)) == 1   # clean row loads
 
-    for field_name, bad in [("digest", "sha256:wrong"), ("temperature", 0.7),
+    for field_name, bad in [("model", "wrong-model"), ("path", ["wrong-action"]),
+                            ("digest", "sha256:wrong"), ("temperature", 0.7),
                             ("scenario_hash", "f" * 64), ("variant_id", "v9_bogus"),
                             ("sampling_mode", "stochastic"), ("arbitration", "other_rule"),
                             ("interaction_mode", "sequential_history")]:
@@ -305,6 +308,14 @@ def test_manifest_full_row_validation_and_duplicate_refusal(tmp_path):
 
     # duplicate resume keys refuse — even byte-identical rows (no last-row-wins)
     path.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(SchemaError, match="duplicate resume key"):
+        sweep_models.manifest_load(str(path), out_root)
+
+    # Optional row fields cannot alter the canonical evidence-derived key.
+    omitted_identity = {k: v for k, v in row.items()
+                        if k not in ("scenario_seed", "sampler_seed")}
+    path.write_text(json.dumps(row) + "\n" + json.dumps(omitted_identity) + "\n",
+                    encoding="utf-8")
     with pytest.raises(SchemaError, match="duplicate resume key"):
         sweep_models.manifest_load(str(path), out_root)
 
@@ -337,6 +348,26 @@ def test_scenario_seeds_collapse_into_one_effective_unit():
     counts = _cell_counts(runs)
     assert counts["effective_n"] == 2 and counts["raw_attempt_n"] == 3
     assert counts["unique_scenario_seed_n"] == 3
+
+
+def test_variant_spread_and_metric_n_use_contributing_effective_units():
+    runs = [_synth("v0", 1, None, 1.0),
+            _synth("v0", 3, None, 0.0),
+            _synth("v1", 2, None, 1.0)]
+    # A missing metric unit is excluded from that metric's n, not labeled as a
+    # contributing observation merely because the cell has another metric.
+    runs[2]["metrics"]["optional_rate"] = {"value": None, "n": 0}
+    runs[0]["metrics"]["optional_rate"] = {"value": 1.0, "n": 1}
+    runs[1]["metrics"]["optional_rate"] = {"value": 1.0, "n": 1}
+    metrics, _ = _cell_metrics(runs)
+    assert metrics["optional_rate"] == {"value": 1.0, "n": 1}
+
+    weighted = [_synth("v0", 1, 11, 1.0),
+                _synth("v0", 3, 11, 0.0),
+                _synth("v0", 2, 12, 1.0)]
+    # k11 is one unit at .5 and k12 one unit at 1.0 -> .75. A raw-row
+    # diagnostic would incorrectly report 2/3.
+    assert _variant_spread(weighted)["compliance_rate"]["v0"] == 0.75
 
 
 def test_pair_counts_report_scenario_seed_collapse(tmp_path):

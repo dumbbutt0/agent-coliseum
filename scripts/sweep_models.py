@@ -55,9 +55,18 @@ def manifest_load(path: str, out_root: str) -> dict:
             if not os.path.exists(manifest_file):
                 raise SchemaError(f"{where}: evidence dir missing run.json: {run_dir}")
             run = json.load(open(manifest_file, encoding="utf-8"))
+            decision_path = []
+            decisions_file = os.path.join(run_dir, "decisions.jsonl")
+            if os.path.exists(decisions_file):
+                with open(decisions_file, encoding="utf-8") as decisions:
+                    for decision_line in decisions:
+                        event = json.loads(decision_line)
+                        if event.get("kind") == "decision_node":
+                            decision_path.append(event["data"]["final_action"])
             expected = {
                 "run_id": run["run_id"],
                 "regime_id": run.get("comparison_regime_id", ""),
+                "model": run.get("agent_config", {}).get("model", ""),
                 "digest": run.get("agent_config", {}).get("model_digest", ""),
                 "scenario": run["scenario_id"],
                 "scenario_hash": run.get("scenario_hash", ""),
@@ -71,6 +80,7 @@ def manifest_load(path: str, out_root: str) -> dict:
                 "reportable": run.get("reportable", True),
                 "stochastic_reportable": run.get("stochastic_reportable", False),
                 "interaction_mode": run.get("interaction_mode", "independent_vignettes"),
+                "path": decision_path,
             }
             for field_name, want in expected.items():
                 if field_name in rec and rec[field_name] != want:
@@ -85,8 +95,12 @@ def manifest_load(path: str, out_root: str) -> dict:
             if run.get("attempt", 0) != dir_attempt:
                 raise SchemaError(f"{where}: dir attempt .a{dir_attempt} disagrees with "
                                   f"run.json attempt {run.get('attempt', 0)}")
-            regime = rec.get("regime_id") or run.get("comparison_regime_id", "")
-            key = (regime, rec.get("scenario_seed", rec.get("seed")), rec.get("sampler_seed"))
+            # Resume identity comes only from validated evidence, never optional
+            # row fields. Omitting a field therefore cannot create a second key
+            # for the same run and bypass duplicate refusal.
+            key = (run.get("comparison_regime_id", ""),
+                   run.get("scenario_seed", run["seed"]),
+                   run.get("sampler_seed"))
             if key in done:
                 raise SchemaError(f"{where}: duplicate resume key {key} — REFUSED "
                                   "(no last-row-wins; deduplicate the manifest)")

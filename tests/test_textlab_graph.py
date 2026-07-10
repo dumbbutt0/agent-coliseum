@@ -29,3 +29,16 @@ def test_merged_graph_weights(tmp_path):
     assert w[("d2_requisition", "verify", "d3_expulsion")] == 2   # obedient + merciful
     assert w[("d3_expulsion", "refuse", "end")] == 2              # defiant + merciful
     assert sum(wt for (f, _, _), wt in w.items() if f == "d3_expulsion") == 4
+
+
+def test_merged_graph_never_pools_interaction_modes(tmp_path):
+    independent = run_scenario(CK, "scripted:obedient", 42, str(tmp_path / "ind"))
+    sequential = run_scenario(CK, "scripted:obedient", 42, str(tmp_path / "seq"),
+                              interaction_mode="sequential_history")
+    g = merged_graph([independent.run_dir, sequential.run_dir])
+    matching = [e for e in g["edges"]
+                if (e["from"], e["action"], e["to"]) ==
+                   ("d1_ledger", "execute", "d2_requisition")]
+    assert {e["interaction_mode"] for e in matching} == {
+        "independent_vignettes", "sequential_history"}
+    assert [e["weight"] for e in matching] == [1, 1]
