@@ -77,8 +77,38 @@ available action at confidence 0, and are flagged `fallback: true`.
 
 **Two determinism tiers:** scripted runs re-execute byte-identically from the seed. Live LLM
 runs are NOT that tier — their backbone is capture-and-replay: every model call lands in the
-run's `captures.jsonl`; `coliseum-lab replay <run_id>` re-runs from those captured outputs and
+run's `captures.jsonl`; `coliseum-lab replay <dir>` re-runs from those captured outputs and
 byte-compares. Live-API determinism is never claimed.
+
+## Day-4 provenance hardening (Codex review findings 1–9, all closed)
+
+- **Evidence preservation:** live LLM attempts get exclusive dirs `<run_id>.aN` — nothing is
+  ever truncated; scripted dirs are verify-or-refuse (rerun allowed only when the stored full
+  config hash matches). `run_id` = config identity; the directory = evidence identity.
+- **Offline replay:** the replay agent's entire identity comes from the stored `agent_config`
+  in `run.json` (zero network, zero digest lookups); captures are integrity-checked against the
+  stored `capture_hash` before replay.
+- **Admission:** aggregation excludes `reportable: false` runs by default (`--diagnostics` to
+  include, loudly labeled); comparison cells key on (scenario, agent, **digest**, **arbitration**)
+  so different digests or arbitration rules can never pool.
+- **Paired deltas:** control-twin and faith metrics are exact-join paired on (agent, digest,
+  arbitration, seed) with `matched_pairs` + unmatched counts reported; twin wiring comes from
+  run provenance (`control_of`, `scenario_hash`) — the aggregate is a function of logs alone.
+- **`arbitration_winner`** (`reflex|planner|fallback`) is recorded per node — never inferred
+  from action equality; validity and moral rates key on it.
+- **Numeric hardening:** parsed output must be a finite-numbers mapping; NaN/Infinity become
+  labeled parse failures with deterministic fallback; canonical JSON refuses NaN; JSON is
+  extracted by decoder scan (first valid mapping), not greedy regex.
+- **Versioned behavioral lineage:** budgets incl. timeouts, prompt-template version+hash,
+  parser version, arbitration version, requested think mode — all hashed; descriptive scenario
+  prose (`purpose`, `metrics_captured`) excluded via `Scenario.behavioral_dict()`. Run paths use
+  reversible percent-escaping + 16-hex-char hash, with full-hash collision refusal.
+- **Twin lint:** `lint_twin_pair` enforces structural correspondence (dp count, pressure dials,
+  action cardinality, rewards/costs); water_bearer + hidden_objective pairs are clean; the
+  corrupt_king controls carry documented d1/d3 affordance debt (faith analysis is d2-only).
+- **`scripted:selfish` is a reward-seeking positive control** (labeled in lineage and compare
+  output), not behavioral evidence. The invariant, precisely: *never reward derived moral
+  labels or feed metrics back into a run; in-world incentives are scenario design variables.*
 
 ## Adding a scenario
 

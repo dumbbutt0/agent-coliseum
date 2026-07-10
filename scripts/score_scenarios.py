@@ -41,7 +41,7 @@ def main():
 
     for d in run_dirs:
         write_run_metrics(d)
-    write_aggregate(run_dirs, config_dir=args.config_dir)
+    write_aggregate(run_dirs)
     write_graphs(run_dirs)
     print("derived/textlab/ rebuilt (metrics + graphs)\n")
     cli.main(["--out-root", args.out_root, "--config-dir", args.config_dir, "compare"])

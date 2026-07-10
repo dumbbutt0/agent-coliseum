@@ -16,32 +16,38 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+import hashlib
+import urllib.parse
+
 from ..logging_substrate import RunLogger
 from ..seeding import seed_everything
-from .agents import AgentInterface, make_agent
+from .agents import AgentInterface, LLMAgent, agent_from_manifest, make_agent
 from .scenario import load_scenario, pick_variant
 from .schema import (DecisionNode, EventDelta, MemoryUpdate, Outcome, Run,
                      SchemaError, apply_delta, canonical_json, config_hash)
 
 # Ruling 1 (2026-07-10): personas RECOMMEND (reflex + plan, both preserved);
 # the harness ARBITRATES and records which named rule selected the final action.
-# A rule maps (reflex, planner, decision_point) -> the winning Choice.
+# A rule maps (reflex, planner, decision_point) -> (winning pass NAME, Choice) —
+# the name is recorded on the node so metrics never infer the winner from action
+# equality (Codex finding #4).
 ARBITRATION_RULES = {
     # deliberation wins whenever it was consulted (MVP default, Day-1 behavior)
-    "planner_priority": lambda reflex, planner, dp: planner,
+    "planner_priority": lambda reflex, planner, dp: ("planner", planner),
     # under maximal time pressure the fast system acts before deliberation lands
     "reflex_under_time_pressure": lambda reflex, planner, dp: (
-        reflex if dp.time_pressure >= 3 else planner),
+        ("reflex", reflex) if dp.time_pressure >= 3 else ("planner", planner)),
 }
+# bump on any change to arbitration semantics — it's a lineage input (finding #9)
+ARBITRATION_VERSION = "2"
 
 
 class DecisionLog(RunLogger):
-    """Append-only decision log at logs/runs/<run_id>/decisions.jsonl, t pinned to 0.0
-    (wall-clock would break byte-identical replay; humans get timestamps in run.json)."""
+    """Append-only decision log at <run_dir>/decisions.jsonl, t pinned to 0.0
+    (wall-clock would break byte-identical replay; humans get timestamps in run.json).
+    Directory allocation/collision policy lives in the runner (finding #3), not here."""
 
-    def __init__(self, run_id: str, out_root: str = "logs/runs"):
-        run_dir = os.path.join(out_root, run_id)
-        os.makedirs(run_dir, exist_ok=True)
+    def __init__(self, run_id: str, run_dir: str):
         self.run_id = run_id
         self.run_dir = run_dir
         self.path = os.path.join(run_dir, "decisions.jsonl")
@@ -78,39 +84,99 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+def _allocate_run_dir(out_root: str, run_id: str, run_hash: str, live_llm: bool) -> tuple[str, int]:
+    """Evidence-preservation policy (Codex finding #3).
+
+    Scripted/replay runs are pure functions of config -> the dir is the config id;
+    an existing dir may be re-generated ONLY if its stored full config_hash matches
+    (verification semantics); a hash mismatch is a refused collision.
+
+    Live LLM outputs are nondeterministic evidence -> every attempt gets its own
+    exclusive directory <run_id>.aN (monotonic); nothing is ever truncated."""
+    os.makedirs(out_root, exist_ok=True)
+    if live_llm:
+        attempt = 1
+        while True:
+            run_dir = os.path.join(out_root, f"{run_id}.a{attempt}")
+            try:
+                os.makedirs(run_dir, exist_ok=False)
+                return run_dir, attempt
+            except FileExistsError:
+                attempt += 1
+    run_dir = os.path.join(out_root, run_id)
+    manifest = os.path.join(run_dir, "run.json")
+    if os.path.exists(manifest):
+        stored = json.load(open(manifest, encoding="utf-8"))
+        if stored.get("config_hash") != run_hash:
+            raise SchemaError(
+                f"run-directory collision REFUSED: {run_dir} holds config_hash "
+                f"{stored.get('config_hash', '')[:16]}…, current is {run_hash[:16]}…")
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir, 0
+
+
 def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                  out_root: str = "logs/runs", parent_id: str | None = None,
                  arbitration: str = "planner_priority",
                  replay_from: str | None = None) -> RunResult:
-    """`replay_from`: path to a prior LLM run dir — the agent serves that run's
-    captured raw outputs (and latencies) instead of calling the backend, so the
-    replayed run is byte-identical to the live original (the LLM determinism tier)."""
+    """`replay_from`: path to a prior LLM run dir. The replay agent's ENTIRE identity
+    comes from that run's manifest (zero network, zero fixture reads — finding #2);
+    its captured outputs are integrity-checked against the stored capture_hash and
+    served verbatim, so the replayed run is byte-identical to the live original."""
     if arbitration not in ARBITRATION_RULES:
         raise SchemaError(f"unknown arbitration rule {arbitration!r} (have {sorted(ARBITRATION_RULES)})")
     arbitrate = ARBITRATION_RULES[arbitration]
     scenario = load_scenario(scenario_path)
-    agent: AgentInterface = make_agent(agent_spec)
+
     if replay_from is not None:
+        manifest_path = os.path.join(replay_from, "run.json")
         cap_path = os.path.join(replay_from, "captures.jsonl")
-        if not hasattr(agent, "load_replay"):
+        if not agent_spec.startswith("llm:"):
             raise SchemaError(f"replay_from only applies to llm agents, not {agent_spec!r}")
+        if not os.path.exists(manifest_path):
+            raise SchemaError(f"no run manifest to replay at {manifest_path}")
         if not os.path.exists(cap_path):
             raise SchemaError(f"no captures to replay at {cap_path}")
-        with open(cap_path, encoding="utf-8") as fh:
-            agent.load_replay([json.loads(line) for line in fh if line.strip()])
+        original = json.load(open(manifest_path, encoding="utf-8"))
+        if original["agent_id"] != agent_spec:
+            raise SchemaError(f"replay agent mismatch: recorded {original['agent_id']!r}, "
+                              f"requested {agent_spec!r}")
+        cap_bytes = open(cap_path, "rb").read()
+        stored_hash = original.get("llm_info", {}).get("capture_hash", "")
+        actual_hash = "sha256:" + hashlib.sha256(cap_bytes).hexdigest()[:24]
+        if stored_hash and stored_hash != actual_hash:
+            raise SchemaError(f"capture evidence corrupted: stored {stored_hash}, "
+                              f"recomputed {actual_hash}")
+        agent = agent_from_manifest(original)
+        agent.load_replay([json.loads(line) for line in cap_bytes.decode("utf-8").splitlines()
+                           if line.strip()])
+    else:
+        agent: AgentInterface = make_agent(agent_spec)
+
     seed_everything(seed)
     variant = pick_variant(scenario, seed)
 
-    run_hash = config_hash({"scenario": scenario.raw, "agent": agent.spec_dict(),
-                            "arbitration": arbitration})
+    # Behavioral lineage (finding #9): model-facing scenario subset + the agent's
+    # versioned behavioral config + arbitration semantics. Descriptive metadata and
+    # infrastructure never enter this hash.
+    run_hash = config_hash({"scenario_behavioral": scenario.behavioral_dict(),
+                            "agent": agent.spec_dict(),
+                            "arbitration": arbitration,
+                            "arbitration_version": ARBITRATION_VERSION})
     run_id = ".".join([scenario.scenario_id, variant["variant_id"],
-                       agent_spec.replace(":", "-"), f"s{seed}", run_hash[:8]])
-    log = DecisionLog(run_id, out_root)
+                       urllib.parse.quote(agent_spec, safe=""),   # reversible escaping
+                       f"s{seed}", run_hash[:16]])
+    live_llm = isinstance(agent, LLMAgent) and replay_from is None
+    run_dir, attempt = _allocate_run_dir(out_root, run_id, run_hash, live_llm)
+    log = DecisionLog(run_id, run_dir)
     run = Run(run_id=run_id, parent_id=parent_id, seed=seed,
               scenario_id=scenario.scenario_id, variant_id=variant["variant_id"],
               agent_id=agent.agent_id, config_hash=run_hash,
               started_at=_now(), code_version=_code_version(),
-              arbitration=arbitration)
+              arbitration=arbitration, attempt=attempt,
+              agent_config=agent.spec_dict(),
+              scenario_hash=scenario.behavioral_hash(),
+              control_of=scenario.control_of)
 
     dps = {dp.dp_id: dp for dp in scenario.decision_points}
     state = dict(scenario.initial_state)
@@ -148,7 +214,10 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
 
             reflex = agent.reflex(state_before, actions)
             planner = agent.plan(state_before, actions)   # consulted at every dp in MVP
-            final = arbitrate(reflex, planner, dp)
+            winner_pass, final = arbitrate(reflex, planner, dp)
+            # the recorded winner: which PASS won, or "fallback" if that pass's
+            # recommendation was itself a parse fallback (finding #4)
+            arbitration_winner = ("fallback" if final.meta.get("fallback") else winner_pass)
 
             rule = scenario.outcome_rules[f"{dp.dp_id}/{final.action_id}"]
             delta_ops = rule.get("state_delta", [])
@@ -180,7 +249,8 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                 reflex_latency_ms=reflex.meta.get("latency_ms", 0.0),
                 planner_latency_ms=planner.meta.get("latency_ms", 0.0),
                 planner_consulted=True,
-                arbitration_rule=arbitration, dp_id=dp.dp_id)
+                arbitration_rule=arbitration, dp_id=dp.dp_id,
+                arbitration_winner=arbitration_winner)
 
             log.log("decision_node", **node.to_record())
             log.log("outcome", **outcome.to_record())
@@ -199,7 +269,6 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
         capture_bytes = "".join(canonical_json(c) + "\n" for c in agent.captures).encode("utf-8")
         with open(os.path.join(log.run_dir, "captures.jsonl"), "wb") as fh:
             fh.write(capture_bytes)
-        import hashlib
         run.llm_info = {**agent.llm_info(),
                         "capture_hash": "sha256:" + hashlib.sha256(capture_bytes).hexdigest()[:24]}
     elif hasattr(agent, "llm_info"):      # replayed LLM run: identity yes, fresh captures no

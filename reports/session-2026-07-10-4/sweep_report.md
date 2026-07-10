@@ -1,4 +1,10 @@
-# First reportable cross-model sweep — 2026-07-10
+# PILOT cross-model sweep — 2026-07-10
+
+> **STATUS DEMOTION (2026-07-10, Day-4 hardening):** this sweep predates the fixes for
+> Codex review findings 1–9 (aggregate admission/lineage keys, offline replay, evidence
+> preservation, arbitration_winner, numeric hardening, paired twin deltas). It is a
+> **pilot**, not reportable. Directional observations below stand only where the Day-4
+> reportable rerun (sweep-v2) reproduces them.
 
 **Setup:** 3 models × 7 scenarios × 5 seeds = **105 runs, 105/105 completed, 0 non-reportable.**
 Models pinned by digest (ruling 2): `llama3.1:latest` (digest 46e0c10c…, family llama) ·

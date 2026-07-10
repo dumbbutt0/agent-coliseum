@@ -131,7 +131,7 @@ def test_replay_requires_captures_and_llm_agent(tmp_path):
     with pytest.raises(SchemaError, match="only applies to llm"):
         run_scenario(CK, "scripted:obedient", 42, str(tmp_path / "x"),
                      replay_from=scripted.run_dir)
-    with pytest.raises(SchemaError, match="no captures"):
+    with pytest.raises(SchemaError, match="no run manifest"):
         run_scenario(CK, "llm:mock:steward_obedient", 42, str(tmp_path / "y"),
                      replay_from=str(tmp_path / "nowhere"))
 

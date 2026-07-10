@@ -74,7 +74,8 @@ def cmd_metrics(args):
         sys.exit("no runs found")
     for d in dirs:
         print("wrote", write_run_metrics(d, args.derived_root))
-    print("wrote", write_aggregate(dirs, args.derived_root, args.config_dir))
+    print("wrote", write_aggregate(dirs, args.derived_root,
+                                   include_non_reportable=args.diagnostics))
 
 
 def cmd_graph(args):
@@ -90,12 +91,19 @@ def cmd_compare(args):
     dirs = _all_run_dirs(args.out_root)
     if not dirs:
         sys.exit("no runs found")
-    agg = aggregate(dirs, args.config_dir)
+    agg = aggregate(dirs, include_non_reportable=args.diagnostics)
+    if args.diagnostics:
+        print("!! DIAGNOSTICS MODE: non-reportable runs INCLUDED — not for claims !!\n")
+    elif agg["excluded_non_reportable"]:
+        print(f"(excluded {len(agg['excluded_non_reportable'])} non-reportable runs; "
+              f"--diagnostics to include)\n")
     metric_names = sorted({m for c in agg["cells"].values() for m in c["metrics"]})
-    header = ["scenario|agent"] + [m.replace("_rate", "").replace("_", " ") for m in metric_names]
+    header = ["scenario|agent|digest|arb"] + [m.replace("_rate", "").replace("_", " ")
+                                              for m in metric_names]
     rows = [header]
     for key, cell in agg["cells"].items():
-        row = [key]
+        label = key + (" [reward-control]" if cell["persona_role"] == "reward_seeking_control" else "")
+        row = [label]
         for m in metric_names:
             v = cell["metrics"].get(m, {}).get("value")
             row.append("-" if v is None else f"{v:.2f}")
@@ -104,14 +112,15 @@ def cmd_compare(args):
     for r in rows:
         print("  ".join(s.ljust(w) for s, w in zip(r, widths)))
     if agg["faith_knob_sensitivity"]:
-        print("\nfaith_knob_sensitivity (d2 compliance, unverifiable - verifiable; + = blind faith):")
+        print("\nfaith_knob_sensitivity (paired, d2-only; + = blind faith):")
         for agent, v in agg["faith_knob_sensitivity"].items():
-            print(f"  {agent}: {v:+.2f}")
+            print(f"  {agent}: {v['value']:+.2f} (matched_pairs={v['matched_pairs']})")
     if agg["control_twin_delta"]:
-        print("\ncontrol_twin_delta (primary - control):")
-        for pair, deltas in agg["control_twin_delta"].items():
-            interesting = {k: v for k, v in deltas.items() if v}
-            print(f"  {pair}: {interesting or 'no differences'}")
+        print("\ncontrol_twin_delta (paired, primary - control):")
+        for pair, d in agg["control_twin_delta"].items():
+            interesting = {k: v for k, v in d["deltas"].items() if v}
+            print(f"  {pair}: {interesting or 'no differences'} "
+                  f"(pairs={d['matched_pairs']}, unmatched={d['unmatched_primary']}+{d['unmatched_control']})")
 
 
 def main(argv=None):
@@ -129,8 +138,12 @@ def main(argv=None):
     s.add_argument("--arbitration", default="planner_priority")
     s = sub.add_parser("replay");  s.set_defaults(fn=cmd_replay);  s.add_argument("run_id")
     s = sub.add_parser("metrics"); s.set_defaults(fn=cmd_metrics); s.add_argument("run_ids", nargs="*")
+    s.add_argument("--diagnostics", action="store_true",
+                   help="include non-reportable runs in the aggregate (labeled; not for claims)")
     s = sub.add_parser("graph");   s.set_defaults(fn=cmd_graph);   s.add_argument("run_ids", nargs="*")
     s = sub.add_parser("compare"); s.set_defaults(fn=cmd_compare)
+    s.add_argument("--diagnostics", action="store_true",
+                   help="include non-reportable runs (labeled; not for claims)")
 
     args = p.parse_args(argv)
     args.fn(args)

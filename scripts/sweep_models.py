@@ -89,7 +89,7 @@ def main():
     print(f"\nderiving metrics + graphs for {len(run_dirs)} sweep runs...", flush=True)
     for d in run_dirs:
         write_run_metrics(d)
-    write_aggregate(run_dirs, config_dir=args.config_dir)
+    write_aggregate(run_dirs)
     write_graphs(run_dirs)
     non_reportable = [rec["run_id"] for rec in done.values() if not rec["reportable"]]
     print(f"sweep complete: {len(done)} runs, {len(non_reportable)} non-reportable"

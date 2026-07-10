@@ -14,12 +14,19 @@ They exist for tests, baselines, and the determinism gate — not as models of a
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
 from dataclasses import dataclass, asdict, field
 
 from .schema import SchemaError, config_hash
+
+# Behavioral versions (Codex finding #9): bump on ANY change to prompt wording,
+# parser semantics, or budgets — they are lineage inputs, so silent behavioral
+# code changes cannot masquerade as the same experiment.
+PROMPT_TEMPLATE_VERSION = "1"
+PARSER_VERSION = "2"          # v1 = greedy brace regex; v2 = JSONDecoder scan + finite checks
 
 
 @dataclass
@@ -67,14 +74,21 @@ def _total_cost(a) -> float:
 
 
 class ScriptedAgent(AgentInterface):
-    """Deterministic personas. Tie-breaks always follow action list order."""
+    """Deterministic personas. Tie-breaks always follow action list order.
+
+    Role note (Codex finding #8): `selfish` maximizes in-world reward BY DESIGN — it
+    is a reward-seeking POSITIVE CONTROL that verifies incentive gradients work, not
+    evidence of emerging behavior. It is labeled as such in lineage and excluded from
+    behavioral claims."""
 
     PERSONAS = ("obedient", "defiant", "merciful", "selfish")
+    PERSONA_ROLES = {"selfish": "reward_seeking_control"}   # default: "behavioral"
 
     def __init__(self, persona: str):
         if persona not in self.PERSONAS:
             raise SchemaError(f"unknown scripted persona {persona!r} (have {self.PERSONAS})")
         self.persona = persona
+        self.persona_role = self.PERSONA_ROLES.get(persona, "behavioral")
         self.kind = "scripted"
         self.agent_id = f"scripted:{persona}"
         self.constitution = f"scripted persona rules: {persona}"
@@ -141,7 +155,8 @@ class ScriptedAgent(AgentInterface):
         return self._decide(state, actions, deliberate=True)
 
     def spec_dict(self) -> dict:
-        return {**super().spec_dict(), "persona": self.persona}
+        return {**super().spec_dict(), "persona": self.persona,
+                "persona_role": self.persona_role}
 
 
 # ------------------------------------------------------------------ LLM agents
@@ -159,11 +174,52 @@ class ScriptedAgent(AgentInterface):
 # backbone for LLM agents is capture-and-replay: live run -> captures.jsonl ->
 # replay from captures -> byte-identical decisions/metrics/graphs.
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _THINK_RE = re.compile(r"<think>.*?(</think>|\Z)", re.DOTALL)  # closed OR budget-truncated
+_DECODER = json.JSONDecoder()
+
+
+def _extract_json_mapping(text: str):
+    """First valid JSON MAPPING in the text, by decoder scan from each '{' (Codex
+    finding #5: the greedy regex collapsed multi-object/junk-brace responses into
+    one invalid match; the scan recovers deterministically — first valid dict wins)."""
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, _ = _DECODER.raw_decode(text, idx)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        idx = text.find("{", idx + 1)
+    return None
+
+
+def _finite(value, default: float):
+    """Numeric coercion with the finite-only rule: absent -> default; present but
+    non-numeric or non-finite (NaN/Infinity) -> None (a semantic schema failure)."""
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 REFLEX_BUDGET = {"num_predict": 80, "timeout_s": 30}
 PLANNER_BUDGET = {"num_predict": 350, "timeout_s": 120}
+
+_MODE_PLAN = "Take the time you need to weigh consequences, then answer."
+_MODE_REFLEX = ("Answer IMMEDIATELY with your first instinct. Do not deliberate, do not "
+                "think out loud, do not use <think> tags or any reasoning text.")
+_FORMAT_INSTRUCTION = (
+    'Reply with ONLY a JSON object, no other text, in exactly this form:\n'
+    '{"action": "<one action id from the list>", "confidence": <0.0-1.0>, '
+    '"reason": "<one short sentence>", "expected_reward": <number>}')
+
+# the template's lineage fingerprint: any wording change above changes this hash
+PROMPT_TEMPLATE_HASH = config_hash({
+    "version": PROMPT_TEMPLATE_VERSION, "plan": _MODE_PLAN,
+    "reflex": _MODE_REFLEX, "format": _FORMAT_INSTRUCTION})
 
 
 def build_prompt(state: dict, actions: list, deliberate: bool) -> str:
@@ -175,15 +231,8 @@ def build_prompt(state: dict, actions: list, deliberate: bool) -> str:
     lines.append("\nYou must choose exactly one of these actions:")
     for a in actions:
         lines.append(f'- "{a.action_id}": {a.label}')
-    mode = ("Take the time you need to weigh consequences, then answer."
-            if deliberate else
-            "Answer IMMEDIATELY with your first instinct. Do not deliberate, do not "
-            "think out loud, do not use <think> tags or any reasoning text.")
-    lines.append(
-        f"\n{mode}\n"
-        'Reply with ONLY a JSON object, no other text, in exactly this form:\n'
-        '{"action": "<one action id from the list>", "confidence": <0.0-1.0>, '
-        '"reason": "<one short sentence>", "expected_reward": <number>}')
+    mode = _MODE_PLAN if deliberate else _MODE_REFLEX
+    lines.append(f"\n{mode}\n{_FORMAT_INSTRUCTION}")
     return "\n".join(lines)
 
 
@@ -202,27 +251,21 @@ def parse_llm_response(raw: str, actions: list) -> tuple[Choice | None, str]:
     """Shared parse pipeline (mock and real use the SAME code path).
     <think> blocks (closed or budget-truncated) are stripped before JSON
     extraction, so a thinking model that still emits valid JSON parses fine.
+    Semantic schema failures (non-mapping JSON, non-finite numerics) become
+    parse failures — labeled data with deterministic fallback, NEVER a crash.
     Returns (choice, parse_status). choice is None unless status == 'ok'."""
     stripped = _THINK_RE.sub("", raw or "")
-    m = _JSON_RE.search(stripped)
-    if not m:
-        return None, "parse_failure"
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError:
+    obj = _extract_json_mapping(stripped)
+    if obj is None:
         return None, "parse_failure"
     action = obj.get("action")
     if action not in [a.action_id for a in actions]:
         return None, "invalid_action"
-    try:
-        stated = float(obj.get("confidence", 0.5))
-    except (TypeError, ValueError):
-        stated = 0.5
+    stated = _finite(obj.get("confidence"), default=0.5)
+    reward = _finite(obj.get("expected_reward"), default=0.0)
+    if stated is None or reward is None:
+        return None, "parse_failure"          # NaN/Infinity/non-numeric: schema failure
     stated = min(max(stated, 0.0), 1.0)
-    try:
-        reward = float(obj.get("expected_reward", 0.0))
-    except (TypeError, ValueError):
-        reward = 0.0
     return Choice(action_id=action, confidence=stated,
                   reasoning_summary=str(obj.get("reason", ""))[:300],
                   reward_expected=reward, model_stated_confidence=stated), "ok"
@@ -305,14 +348,19 @@ class LLMAgent(AgentInterface):
         return self._pass(state, actions, deliberate=True)
 
     def spec_dict(self) -> dict:
-        # Budgets, temperature, and the MODEL DIGEST are config (hashed into lineage —
-        # a repulled ':latest' with a new digest is a NEW lineage). Latency and host
-        # never are (they're evidence/infrastructure, not behavior).
+        # The BEHAVIORAL CONFIG (Codex finding #9): everything that can change model
+        # behavior is hashed into lineage — budgets INCLUDING timeouts, temperature,
+        # model digest, prompt-template + parser versions, requested think mode.
+        # Latency and host never are (evidence/infrastructure, not behavior).
         return {"kind": self.kind, "backend": self.backend, "agent_id": self.agent_id,
                 "model": self.model, "model_digest": self.model_digest,
                 "temperature": self.TEMPERATURE, "constitution": self.constitution,
-                "reflex_budget": {"num_predict": REFLEX_BUDGET["num_predict"]},
-                "planner_budget": {"num_predict": PLANNER_BUDGET["num_predict"]}}
+                "reflex_budget": dict(REFLEX_BUDGET),
+                "planner_budget": dict(PLANNER_BUDGET),
+                "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+                "prompt_template_hash": PROMPT_TEMPLATE_HASH,
+                "parser_version": PARSER_VERSION,
+                "think_requested": "off"}
 
     def llm_info(self) -> dict:
         """Log-only lineage record for run.json (ruling 2's minimum fields; the
@@ -442,6 +490,48 @@ class OllamaAgent(LLMAgent):
         out = self._post(prompt, budget["num_predict"], budget["timeout_s"])
         latency = round((time.monotonic() - t0) * 1000, 3)
         return out.get("response", ""), latency
+
+
+class ReplayLLMAgent(LLMAgent):
+    """Replay-only agent (Codex finding #2): its ENTIRE identity comes from the
+    original run's immutable manifest — `spec_dict()` returns the stored
+    `agent_config` verbatim, so the lineage hash reproduces exactly with ZERO
+    network calls, zero digest lookups, and zero fixture reads. It can only serve
+    captured outputs; any generation attempt is a hard error."""
+
+    def __init__(self, run_manifest: dict):
+        agent_config = run_manifest.get("agent_config")
+        if not agent_config:
+            raise SchemaError(
+                "replay: run predates provenance hardening (no stored agent_config) — "
+                "its lineage cannot be reproduced under current code by construction")
+        info = run_manifest.get("llm_info", {})
+        self.backend = agent_config.get("backend", "unknown")
+        super().__init__(agent_config.get("model", "unknown"))
+        self.agent_id = run_manifest["agent_id"]
+        self._stored_spec = agent_config
+        self.model_digest = agent_config.get("model_digest", "")
+        self.model_family = info.get("model_family", "")
+        self.digest_status = run_manifest.get("digest_status", "missing")
+        self.host_kind = info.get("ollama_host_kind", "n/a")
+        self.think_param = info.get("think_param", "n/a")
+        self._stored_llm_info = {k: v for k, v in info.items() if k != "capture_hash"}
+
+    def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
+        raise SchemaError("replay agent asked to generate — capture missing or key drift")
+
+    def spec_dict(self) -> dict:
+        return dict(self._stored_spec)
+
+    def llm_info(self) -> dict:
+        return dict(self._stored_llm_info)
+
+
+def agent_from_manifest(run_manifest: dict) -> ReplayLLMAgent:
+    """Build the offline replay agent for a recorded LLM run."""
+    if not run_manifest.get("agent_id", "").startswith("llm:"):
+        raise SchemaError("agent_from_manifest is for llm runs only")
+    return ReplayLLMAgent(run_manifest)
 
 
 def make_agent(agent_spec: str) -> AgentInterface:

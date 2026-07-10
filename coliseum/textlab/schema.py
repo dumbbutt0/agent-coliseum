@@ -32,8 +32,11 @@ class SchemaError(ValueError):
 
 
 def canonical_json(obj) -> str:
-    """Stable serialization: sorted keys, no whitespace. The hashing substrate."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Stable serialization: sorted keys, no whitespace, finite numbers only
+    (allow_nan=False — NaN/Infinity must be caught upstream as parse failures,
+    never serialized; Codex finding #5). The hashing substrate."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False)
 
 
 def config_hash(obj) -> str:
@@ -125,6 +128,11 @@ class Run:
     llm_info: dict = field(default_factory=dict)
     reportable: bool = True
     digest_status: str = "n/a"   # "ok" | "missing" | "n/a"
+    # Day-4 hardening (Codex findings #2/#3/#6/#9), all additive:
+    attempt: int = 0             # live LLM attempt number; 0 = scripted/replay
+    agent_config: dict = field(default_factory=dict)   # the EXACT spec_dict that was hashed
+    scenario_hash: str = ""      # behavioral-subset hash of the scenario
+    control_of: str = ""         # twin wiring persisted in provenance (aggregate reads logs only)
 
     def to_record(self) -> dict:
         return {"record_type": "run", **asdict(self)}
@@ -179,6 +187,19 @@ class Scenario:
     control_of: str = ""         # scenario_id this is a control twin of ("" = primary)
     raw: dict = field(default_factory=dict, repr=False)
 
+    BEHAVIORAL_KEYS = ("scenario_id", "initial_state", "actions",
+                       "decision_points", "variants", "outcome_rules")
+
+    def behavioral_dict(self) -> dict:
+        """The model-facing subset that enters lineage hashes (Codex finding #9):
+        descriptive metadata (purpose, metrics_captured, archetype, control_of,
+        comments) must not churn behavioral lineage — only content the agent can
+        see or that changes outcomes belongs here."""
+        return {k: self.raw[k] for k in self.BEHAVIORAL_KEYS if k in self.raw}
+
+    def behavioral_hash(self) -> str:
+        return config_hash(self.behavioral_dict())
+
 
 # ---------------------------------------------------------------- per-step records
 
@@ -208,6 +229,8 @@ class DecisionNode:
     planner_consulted: bool
     arbitration_rule: str = "planner_priority"   # ruling 1: WHY final_action won
     dp_id: str = ""                              # which decision point (v0.1 additive)
+    arbitration_winner: str = "planner"          # "reflex"|"planner"|"fallback" — WHICH pass won
+                                                 # (never inferred from action equality; finding #4)
 
     def __post_init__(self):
         _require(0.0 <= self.confidence <= 1.0, f"confidence must be in 0..1, got {self.confidence}")

@@ -119,3 +119,45 @@ def load_scenario(path: str) -> Scenario:
 def pick_variant(scenario: Scenario, seed: int) -> dict:
     """Seed-selected paraphrase variant — logged on the Run so it's always attributable."""
     return scenario.variants[seed % len(scenario.variants)]
+
+
+def lint_twin_pair(primary: Scenario, twin: Scenario) -> list:
+    """Structural lint for a control twin (Codex finding #7): a twin must change ONE
+    variable, so its decision structure must match the primary. Returns issue strings
+    (empty = structurally clean). Whole-run twin deltas are only interpretable for
+    clean pairs; mismatched pairs must restrict analysis to matched steps."""
+    issues = []
+    pid, tid = primary.scenario_id, twin.scenario_id
+    if twin.control_of != pid:
+        issues.append(f"{tid}: control_of != {pid!r}")
+    if len(primary.decision_points) != len(twin.decision_points):
+        issues.append(f"dp count differs: {len(primary.decision_points)} vs {len(twin.decision_points)}")
+        return issues
+    for pdp, tdp in zip(primary.decision_points, twin.decision_points):
+        where = f"{pdp.dp_id}/{tdp.dp_id}"
+        for dial in ("authority_pressure", "risk_level", "time_pressure"):
+            if getattr(pdp, dial) != getattr(tdp, dial):
+                issues.append(f"{where}: {dial} differs "
+                              f"({getattr(pdp, dial)} vs {getattr(tdp, dial)})")
+        if len(pdp.available_actions) != len(tdp.available_actions):
+            issues.append(f"{where}: action cardinality differs "
+                          f"({len(pdp.available_actions)} vs {len(tdp.available_actions)})")
+            continue
+        for pa, ta in zip(pdp.available_actions, tdp.available_actions):
+            p_act, t_act = primary.actions[pa], twin.actions[ta]
+            if p_act.visible_reward != t_act.visible_reward:
+                issues.append(f"{where}: {pa}->{ta} visible_reward differs")
+            if p_act.costs != t_act.costs:
+                issues.append(f"{where}: {pa}->{ta} costs differ")
+            if p_act.moral_tags != t_act.moral_tags:
+                # tag differences can BE the manipulated variable (e.g. the same
+                # removal is harm in water_bearer, not in the saboteur twin) —
+                # semantic note, not a structural violation
+                issues.append(f"note: {where}: {pa}->{ta} moral_tags differ "
+                              f"({p_act.moral_tags} vs {t_act.moral_tags})")
+    return issues
+
+
+def structural_issues(issues: list) -> list:
+    """The lint failures that invalidate whole-run twin deltas (notes excluded)."""
+    return [i for i in issues if not i.startswith("note:")]
