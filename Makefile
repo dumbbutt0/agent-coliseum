@@ -10,11 +10,13 @@ textlab-smoke:  ## textlab: full pytest suite + one scripted corrupt_king run (d
 textlab-llm-smoke:  ## textlab: LLM path — mock fixture run always; real Ollama run if the server is up
 	python3 -m pytest tests/test_textlab_llm.py -q
 	python3 scripts/run_scenario.py --scenario corrupt_king --agent llm:mock:steward_obedient --seed 42
-	@if curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then \
-		echo "== ollama up: running $(OLLAMA_MODEL) (override with OLLAMA_MODEL=...) =="; \
+	@HOST=$${OLLAMA_HOST:-http://localhost:11434}; \
+	if curl -sf --max-time 2 $$HOST/api/tags >/dev/null 2>&1 && \
+	   curl -sf --max-time 2 $$HOST/api/tags | grep -q "\"$(OLLAMA_MODEL)\""; then \
+		echo "== ollama up at $$HOST: running $(OLLAMA_MODEL) (override with OLLAMA_MODEL=... OLLAMA_HOST=...) =="; \
 		python3 scripts/run_scenario.py --scenario corrupt_king --agent llm:ollama:$(OLLAMA_MODEL) --seed 42; \
 	else \
-		echo "== ollama not reachable on localhost:11434 — skipped real-model run =="; \
+		echo "== ollama/$(OLLAMA_MODEL) not reachable at $$HOST — skipped real-model run =="; \
 	fi
 graph:  ## regenerate derived views (social graph + technique catalog) from logs
 	python -c "from coliseum.derive_graph import build; build(); print('derived/ rebuilt from logs/')"

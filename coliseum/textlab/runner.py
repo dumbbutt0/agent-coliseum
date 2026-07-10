@@ -196,9 +196,17 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
     run.status = "completed"
     # live LLM calls -> captures.jsonl, the replay substrate (absent for scripted/replayed runs)
     if getattr(agent, "captures", None):
-        with open(os.path.join(log.run_dir, "captures.jsonl"), "w", encoding="utf-8") as fh:
-            for cap in agent.captures:
-                fh.write(canonical_json(cap) + "\n")
+        capture_bytes = "".join(canonical_json(c) + "\n" for c in agent.captures).encode("utf-8")
+        with open(os.path.join(log.run_dir, "captures.jsonl"), "wb") as fh:
+            fh.write(capture_bytes)
+        import hashlib
+        run.llm_info = {**agent.llm_info(),
+                        "capture_hash": "sha256:" + hashlib.sha256(capture_bytes).hexdigest()[:24]}
+    elif hasattr(agent, "llm_info"):      # replayed LLM run: identity yes, fresh captures no
+        run.llm_info = agent.llm_info()
+    if hasattr(agent, "digest_status"):   # ruling 2: no digest, not reportable
+        run.digest_status = agent.digest_status
+        run.reportable = agent.digest_status == "ok"
     with open(os.path.join(log.run_dir, "run.json"), "w", encoding="utf-8") as fh:
         json.dump(run.to_record(), fh, indent=2, sort_keys=True)
         fh.write("\n")

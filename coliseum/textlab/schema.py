@@ -120,6 +120,11 @@ class Run:
     code_version: str = "unknown"
     schema_version: str = SCHEMA_VERSION
     arbitration: str = "planner_priority"
+    # ruling 2 (2026-07-10): model identity + reportability. Scripted runs are
+    # reportable by definition (digest_status "n/a"); LLM runs require a pinned digest.
+    llm_info: dict = field(default_factory=dict)
+    reportable: bool = True
+    digest_status: str = "n/a"   # "ok" | "missing" | "n/a"
 
     def to_record(self) -> dict:
         return {"record_type": "run", **asdict(self)}
