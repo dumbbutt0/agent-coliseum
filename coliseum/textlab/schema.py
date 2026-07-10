@@ -7,12 +7,24 @@ fast/slow prerequisite: temporal-dissociation reads stay computable after the fa
 Determinism contract: `run_id` and `config_hash` are pure functions of their inputs —
 no wall-clock, no randomness — so the same (scenario, agent, seed) always names and
 produces the same run.
+
+SCHEMA v0.1 IS FROZEN (owner ruling, 2026-07-10): changes may only ADD fields with
+defaults; renaming/removing/retyping a field requires bumping SCHEMA_VERSION.
+Two rulings are baked in:
+  1. Arbitration — reflex, planner, and final action are separate forever; every
+     DecisionNode records the `arbitration_rule` that selected the final action.
+  2. Delta state — explicit delta ops are the source of truth; absolute state
+     (`state_after`) is a derived reconstruction layer, recomputable by folding
+     `initial_state` through every op in the log.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import dataclass, field, asdict
+
+
+SCHEMA_VERSION = "0.1"
 
 
 class SchemaError(ValueError):
@@ -36,6 +48,39 @@ def _require(cond: bool, msg: str):
 
 def _check_level(value, name: str):
     _require(isinstance(value, int) and 0 <= value <= 3, f"{name} must be an int in 0..3, got {value!r}")
+
+
+# ------------------------------------------------------------------ delta ops
+# Ruling 2 (2026-07-10): every state change is an explicit op; prose never
+# secretly mutates the world. Ops: {"field": str, "op": "set"|"add", "value": num|str|bool}
+
+DELTA_OPS = ("set", "add")
+
+
+def validate_delta(ops, where: str = "state_delta"):
+    _require(isinstance(ops, list), f"{where} must be a LIST of delta ops, got {type(ops).__name__}")
+    for i, op in enumerate(ops):
+        _require(isinstance(op, dict) and {"field", "op", "value"} <= set(op),
+                 f"{where}[{i}] needs field/op/value, got {op!r}")
+        _require(op["op"] in DELTA_OPS, f"{where}[{i}]: unknown op {op['op']!r} (want {DELTA_OPS})")
+        if op["op"] == "add":
+            _require(isinstance(op["value"], (int, float)) and not isinstance(op["value"], bool),
+                     f"{where}[{i}]: 'add' needs a numeric value, got {op['value']!r}")
+    return ops
+
+
+def apply_delta(state: dict, ops: list) -> dict:
+    """Fold delta ops into a NEW state dict (the reconstruction layer)."""
+    out = dict(state)
+    for op in validate_delta(ops):
+        if op["op"] == "set":
+            out[op["field"]] = op["value"]
+        else:  # add
+            base = out.get(op["field"], 0)
+            _require(isinstance(base, (int, float)) and not isinstance(base, bool),
+                     f"cannot 'add' to non-numeric state field {op['field']!r} = {base!r}")
+            out[op["field"]] = base + op["value"]
+    return out
 
 
 # ---------------------------------------------------------------- agents & runs
@@ -71,8 +116,10 @@ class Run:
     started_at: str = ""
     finished_at: str = ""
     status: str = "running"      # "running" | "completed" | "failed"
-    metrics: dict = field(default_factory=dict)   # filled by the Day-2 metrics engine
+    metrics: dict = field(default_factory=dict)   # RESERVED — post-hoc metrics live in derived/, never rewritten here
     code_version: str = "unknown"
+    schema_version: str = SCHEMA_VERSION
+    arbitration: str = "planner_priority"
 
     def to_record(self) -> dict:
         return {"record_type": "run", **asdict(self)}
@@ -148,12 +195,14 @@ class DecisionNode:
     authority_pressure: int
     risk_level: int
     reward_expected: float       # agent-stated
-    outcome: dict                # {narrative, state_delta}
-    state_after: dict
+    outcome: dict                # {narrative, state_delta: [ops]}
+    state_after: dict            # DERIVED snapshot (fold of initial_state + all ops) — convenience, not truth
     memory_update: str
     reflex_latency_ms: float
     planner_latency_ms: float
     planner_consulted: bool
+    arbitration_rule: str = "planner_priority"   # ruling 1: WHY final_action won
+    dp_id: str = ""                              # which decision point (v0.1 additive)
 
     def __post_init__(self):
         _require(0.0 <= self.confidence <= 1.0, f"confidence must be in 0..1, got {self.confidence}")
@@ -171,12 +220,32 @@ class Outcome:
     run_id: str
     timestep: int
     action_id: str
-    state_delta: dict
+    state_delta: list            # explicit delta ops — the truth layer (ruling 2)
     narrative: str               # agent-facing result text (contamination-linted)
-    consequences_deferred: list = field(default_factory=list)  # [{after, narrative, state_delta}]
+    consequences_deferred: list = field(default_factory=list)  # [{after, narrative, state_delta: [ops]}]
+
+    def __post_init__(self):
+        validate_delta(self.state_delta, "Outcome.state_delta")
 
     def to_record(self) -> dict:
         return {"record_type": "outcome", **asdict(self)}
+
+
+@dataclass
+class EventDelta:
+    """A world-originated state change (e.g. a matured deferred consequence) —
+    logged as its own event so nothing mutates state outside the record stream."""
+    run_id: str
+    timestep: int
+    source: str                  # "world" | an actor/role name
+    state_delta: list            # explicit delta ops
+    narrative: str = ""
+
+    def __post_init__(self):
+        validate_delta(self.state_delta, "EventDelta.state_delta")
+
+    def to_record(self) -> dict:
+        return {"record_type": "event_delta", **asdict(self)}
 
 
 @dataclass
@@ -210,7 +279,8 @@ class MetricReport:
 
 RECORD_TYPES = {
     "agent": AgentSpec, "run": Run, "action": Action, "decision_node": DecisionNode,
-    "outcome": Outcome, "memory_update": MemoryUpdate, "metric_report": MetricReport,
+    "outcome": Outcome, "event_delta": EventDelta, "memory_update": MemoryUpdate,
+    "metric_report": MetricReport,
 }
 
 

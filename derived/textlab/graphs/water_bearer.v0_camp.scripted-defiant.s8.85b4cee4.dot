@@ -1,0 +1,9 @@
+digraph coliseum {
+  rankdir=LR;
+  node [shape=box, fontsize=10];
+  "water_bearer.v0_camp.scripted-defiant.s8.85b4cee4/t0" [label="d1_order\nfinal: refuse\nreflex: refuse / plan: refuse"];
+  "water_bearer.v0_camp.scripted-defiant.s8.85b4cee4/t1" [label="d2_enforce\nfinal: refuse\nreflex: refuse / plan: refuse"];
+  "end" [shape=doublecircle, label="end"];
+  "water_bearer.v0_camp.scripted-defiant.s8.85b4cee4/t0" -> "water_bearer.v0_camp.scripted-defiant.s8.85b4cee4/t1" [label="refuse"];
+  "water_bearer.v0_camp.scripted-defiant.s8.85b4cee4/t1" -> "end" [label="refuse"];
+}

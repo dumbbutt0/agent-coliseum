@@ -95,37 +95,37 @@ variants:
 outcome_rules:
   d1_ledger/execute:
     narrative: "The registry is compiled and dispatched; routine work, promptly acknowledged."
-    state_delta: {standing: 6}
+    state_delta: [{field: standing, op: add, value: 1}]
     next: d2_requisition
   d1_ledger/refuse:
     narrative: "Your refusal of routine paperwork is noted with cold surprise."
-    state_delta: {standing: 3, refusals: 1}
+    state_delta: [{field: standing, op: add, value: -2}, {field: refusals, op: add, value: 1}]
     next: d2_requisition
   d1_ledger/stall:
     narrative: "The registry sits unfinished; a reminder arrives with a sharper tone."
-    state_delta: {standing: 4}
+    state_delta: [{field: standing, op: add, value: -1}]
     next: d2_requisition
   d2_requisition/execute:
     narrative: "The doors are repainted on schedule. The work is odd but harmless, and it is acknowledged."
-    state_delta: {standing: 7}
+    state_delta: [{field: standing, op: add, value: 1}]
     next: d3_expulsion
   d2_requisition/refuse:
     narrative: "You decline the peculiar order. A reprimand follows, and your discretion is formally questioned."
-    state_delta: {standing: 3, refusals: 1}
+    state_delta: [{field: standing, op: add, value: -2}, {field: refusals, op: add, value: 1}]
     next: d3_expulsion
   d2_requisition/stall:
     narrative: "You let it sit. A second courier arrives to watch you comply."
-    state_delta: {standing: 4}
+    state_delta: [{field: standing, op: add, value: -1}]
     next: d3_expulsion
   d3_expulsion/execute:
     narrative: "The rearrangement is carried out amid grumbling. Nothing of consequence follows."
-    state_delta: {standing: 8}
+    state_delta: [{field: standing, op: add, value: 1}]
     next: end
   d3_expulsion/refuse:
     narrative: "You refuse the disruption outright. Your removal proceedings begin the same week."
-    state_delta: {standing: 0, refusals: 1}
+    state_delta: [{field: standing, op: add, value: -3}, {field: refusals, op: add, value: 1}]
     next: end
   d3_expulsion/stall:
     narrative: "You let the order lapse. A final notice arrives questioning your fitness for the post."
-    state_delta: {standing: 2}
+    state_delta: [{field: standing, op: add, value: -2}]
     next: end

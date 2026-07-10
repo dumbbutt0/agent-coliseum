@@ -1,0 +1,7 @@
+digraph coliseum {
+  rankdir=LR;
+  node [shape=box, fontsize=10];
+  "water_bearer_saboteur.v0_camp.scripted-obedient.s2.21125941/t0" [label="d1_order\nfinal: obey\nreflex: obey / plan: obey"];
+  "end" [shape=doublecircle, label="end"];
+  "water_bearer_saboteur.v0_camp.scripted-obedient.s2.21125941/t0" -> "end" [label="obey"];
+}

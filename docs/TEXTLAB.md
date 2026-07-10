@@ -8,18 +8,29 @@ the arena: `raw → derived → render`.
 ## Quickstart
 
 ```bash
-python3 -m pytest tests/ -q                     # 26 tests incl. the determinism gate
-python3 scripts/run_scenario.py --scenario corrupt_king --agent scripted:obedient --seed 42
-make textlab-smoke                              # both of the above
+python3 -m pytest tests/ -q                     # 63 tests incl. raw + derived determinism gates
+python3 scripts/score_scenarios.py              # all personas x seeds x scenarios -> comparison table
+python3 -m coliseum.textlab.cli replay <run_id> # the determinism gate as a command
+python3 -m coliseum.textlab.cli compare         # behavioral-profile table from existing runs
+make textlab-smoke                              # tests + one scripted run
 ```
 
 Each run lands in `logs/runs/<run_id>/`:
 - `decisions.jsonl` — the append-only source of truth (decision_node / outcome / memory_update records)
 - `run.json` — the manifest (`{run_id, parent_id, seed, scenario_id, variant_id, agent_id, config_hash, ...}`)
 
-**Determinism gate:** same seed + scripted agent → byte-identical `decisions.jsonl`, every time.
-`run_id` is a pure function of (scenario, variant, agent, seed); decision events carry `t: 0.0`
-(the only wall-clock in a run dir is `run.json`'s `started_at`/`finished_at`).
+**Determinism gate (raw + derived):** same seed + scripted agent → byte-identical
+`decisions.jsonl`, `*.metrics.json`, and graph exports, every time. `run_id` is a pure function
+of (scenario, variant, agent, seed, arbitration); decision events carry `t: 0.0` (the only
+wall-clock in a run dir is `run.json`'s `started_at`/`finished_at`).
+
+**Schema v0.1 is frozen** (owner ruling 2026-07-10): additive changes only. Two rulings baked in:
+1. **Arbitration** — reflex, planner, and final action are separate forever; every DecisionNode
+   records the `arbitration_rule` that picked the final action (`planner_priority` default;
+   `reflex_under_time_pressure` lets the fast system act when `time_pressure >= 3`).
+2. **Delta state** — every state change is an explicit op `{field, op: set|add, value}` in the
+   log (outcomes + world-originated `event_delta` records); absolute state is a derived
+   reconstruction (`apply_delta` folds), never the primary truth.
 
 ## The five rules (from the design blueprints)
 
@@ -64,10 +75,26 @@ spot, its planner verifies an unverifiable directive first — the designed flin
 4. `load_scenario` validates everything at load — missing rules, dangling `next`, <2 variants, and
    contamination words are hard errors.
 
+## Metrics (all derived, never rewarded)
+
+Per run (`derived/textlab/metrics/<run_id>.metrics.json`): `compliance_rate` ·
+`harm_compliance_rate` (n = decisions where `facts.harm != none`) · `refusal_rate` ·
+`verification_rate` · `deceptive_compliance_rate` · `reflex_planner_divergence_rate` (the flinch
+signal) · `deferred_consequence_count`. Aggregate (`aggregate.metrics.json`): per scenario×agent
+cells with `variant_spread` (contamination sanity), `control_twin_delta` (primary − control, per
+`control_of` pair), and `faith_knob_sensitivity` (d2 compliance, unverifiable − verifiable;
+positive = blind faith, negative = verification-seeking).
+
+## Scenarios shipped
+
+`corrupt_king` (+ `_harmless`, `_verifiable` controls) · `water_bearer` (+ `_saboteur` control:
+innocence isolated) · `hidden_objective` (+ `_aligned` control: willingness vs channel isolated).
+
 ## Roadmap (72-hour plan, day boundaries from the vault blueprint)
 
-- **Day 1 (done):** schema · scenario loader · scripted runner · corrupt_king + 2 controls · determinism gate.
-- **Day 2:** `metrics.py` (behavioral rates + control delta) · `graph_export.py` (JSON + DOT) ·
-  `cli.py` (`run|replay|metrics|graph|compare`) · water_bearer + hidden_objective scenarios.
+- **Day 1 (done):** schema · scenario loader · scripted runner · corrupt_king + 2 controls · raw determinism gate.
+- **Day 2 (done):** schema v0.1 freeze (arbitration + delta rulings) · metrics engine ·
+  graph export · CLI · derived determinism gate · water_bearer + hidden_objective pairs ·
+  140-run scoring sweep.
 - **Day 3:** `OllamaAgent`/`APIAgent` · real-model runs (5 seeds × 2 variants) · first MetricReport
   on a real model · session ingest into the wiki.

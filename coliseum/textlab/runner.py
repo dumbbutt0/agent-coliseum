@@ -20,8 +20,19 @@ from ..logging_substrate import RunLogger
 from ..seeding import seed_everything
 from .agents import AgentInterface, make_agent
 from .scenario import load_scenario, pick_variant
-from .schema import (DecisionNode, MemoryUpdate, Outcome, Run, canonical_json,
-                     config_hash)
+from .schema import (DecisionNode, EventDelta, MemoryUpdate, Outcome, Run,
+                     SchemaError, apply_delta, canonical_json, config_hash)
+
+# Ruling 1 (2026-07-10): personas RECOMMEND (reflex + plan, both preserved);
+# the harness ARBITRATES and records which named rule selected the final action.
+# A rule maps (reflex, planner, decision_point) -> the winning Choice.
+ARBITRATION_RULES = {
+    # deliberation wins whenever it was consulted (MVP default, Day-1 behavior)
+    "planner_priority": lambda reflex, planner, dp: planner,
+    # under maximal time pressure the fast system acts before deliberation lands
+    "reflex_under_time_pressure": lambda reflex, planner, dp: (
+        reflex if dp.time_pressure >= 3 else planner),
+}
 
 
 class DecisionLog(RunLogger):
@@ -68,20 +79,26 @@ def _now() -> str:
 
 
 def run_scenario(scenario_path: str, agent_spec: str, seed: int,
-                 out_root: str = "logs/runs", parent_id: str | None = None) -> RunResult:
+                 out_root: str = "logs/runs", parent_id: str | None = None,
+                 arbitration: str = "planner_priority") -> RunResult:
+    if arbitration not in ARBITRATION_RULES:
+        raise SchemaError(f"unknown arbitration rule {arbitration!r} (have {sorted(ARBITRATION_RULES)})")
+    arbitrate = ARBITRATION_RULES[arbitration]
     scenario = load_scenario(scenario_path)
     agent: AgentInterface = make_agent(agent_spec)
     seed_everything(seed)
     variant = pick_variant(scenario, seed)
 
-    run_hash = config_hash({"scenario": scenario.raw, "agent": agent.spec_dict()})
+    run_hash = config_hash({"scenario": scenario.raw, "agent": agent.spec_dict(),
+                            "arbitration": arbitration})
     run_id = ".".join([scenario.scenario_id, variant["variant_id"],
                        agent_spec.replace(":", "-"), f"s{seed}", run_hash[:8]])
     log = DecisionLog(run_id, out_root)
     run = Run(run_id=run_id, parent_id=parent_id, seed=seed,
               scenario_id=scenario.scenario_id, variant_id=variant["variant_id"],
               agent_id=agent.agent_id, config_hash=run_hash,
-              started_at=_now(), code_version=_code_version())
+              started_at=_now(), code_version=_code_version(),
+              arbitration=arbitration)
 
     dps = {dp.dp_id: dp for dp in scenario.decision_points}
     state = dict(scenario.initial_state)
@@ -94,12 +111,17 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
         while dp_id != "end":
             dp = dps[dp_id]
 
-            # deferred consequences land before the agent sees the state
+            # deferred consequences land before the agent sees the state — each one
+            # logged as its own event_delta (ruling 2: nothing mutates state off-record)
             matured = [c for c in pending if c["due"] <= timestep]
             pending = [c for c in pending if c["due"] > timestep]
             recent_events = []
             for c in matured:
-                state.update(c.get("state_delta", {}))
+                ops = c.get("state_delta", [])
+                state = apply_delta(state, ops)
+                log.log("event_delta", **EventDelta(
+                    run_id=run_id, timestep=timestep, source="world",
+                    state_delta=ops, narrative=c.get("narrative", "")).to_record())
                 if c.get("narrative"):
                     recent_events.append(c["narrative"])
 
@@ -113,11 +135,12 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
             actions = [scenario.actions[aid] for aid in dp.available_actions]
 
             reflex = agent.reflex(state_before, actions)
-            planner = agent.plan(state_before, actions)
-            final = planner      # MVP: planner consulted at every decision point
+            planner = agent.plan(state_before, actions)   # consulted at every dp in MVP
+            final = arbitrate(reflex, planner, dp)
 
             rule = scenario.outcome_rules[f"{dp.dp_id}/{final.action_id}"]
-            state_after = {**state, **rule.get("state_delta", {})}
+            delta_ops = rule.get("state_delta", [])
+            state_after = apply_delta(state, delta_ops)   # derived snapshot; ops are the truth
             for cons in rule.get("consequences_deferred", []):
                 pending.append({"due": timestep + cons["after"],
                                 "narrative": cons.get("narrative", ""),
@@ -125,7 +148,7 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
             memory = f"[t{timestep}] {rule.get('narrative', '')}".strip()
 
             outcome = Outcome(run_id=run_id, timestep=timestep, action_id=final.action_id,
-                              state_delta=rule.get("state_delta", {}),
+                              state_delta=delta_ops,
                               narrative=rule.get("narrative", ""),
                               consequences_deferred=rule.get("consequences_deferred", []))
             node = DecisionNode(
@@ -140,7 +163,8 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                 reward_expected=final.reward_expected,
                 outcome={"narrative": outcome.narrative, "state_delta": outcome.state_delta},
                 state_after=state_after, memory_update=memory,
-                reflex_latency_ms=0.0, planner_latency_ms=0.0, planner_consulted=True)
+                reflex_latency_ms=0.0, planner_latency_ms=0.0, planner_consulted=True,
+                arbitration_rule=arbitration, dp_id=dp.dp_id)
 
             log.log("decision_node", **node.to_record())
             log.log("outcome", **outcome.to_record())

@@ -15,7 +15,7 @@ import re
 
 import yaml
 
-from .schema import Action, DecisionPoint, Scenario, SchemaError
+from .schema import Action, DecisionPoint, Scenario, SchemaError, validate_delta
 
 # Word-boundary matches, case-insensitive. Extend as new archetypes join the pack.
 CONTAMINATION_WORDS = [
@@ -90,6 +90,7 @@ def load_scenario(path: str) -> Scenario:
                 raise SchemaError(f"{where}: no outcome rule for {key!r}")
             rule = outcome_rules[key]
             lint_agent_facing(rule.get("narrative", ""), f"{where}.outcome_rules.{key}.narrative")
+            validate_delta(rule.get("state_delta", []), f"{where}.outcome_rules.{key}.state_delta")
             nxt = rule.get("next", dp.next_default)
             if nxt != "end" and nxt not in dp_ids:
                 raise SchemaError(f"{where}.outcome_rules.{key}: next -> unknown dp {nxt!r}")
@@ -97,6 +98,7 @@ def load_scenario(path: str) -> Scenario:
                 if "after" not in cons:
                     raise SchemaError(f"{where}.outcome_rules.{key}: deferred consequence needs 'after' (timesteps)")
                 lint_agent_facing(cons.get("narrative", ""), f"{where}.outcome_rules.{key}.deferred")
+                validate_delta(cons.get("state_delta", []), f"{where}.outcome_rules.{key}.deferred.state_delta")
 
     return Scenario(
         scenario_id=scenario_id,

@@ -79,6 +79,64 @@ def test_run_manifest(tmp_path):
     assert run["config_hash"] and run["agent_id"] == "scripted:defiant"
 
 
+def test_arbitration_recorded_and_lineage_sensitive(tmp_path):
+    a = run_scenario(CK, "scripted:obedient", seed=42, out_root=str(tmp_path / "a"))
+    for n in read_nodes(a.run_dir):
+        assert n["arbitration_rule"] == "planner_priority"
+    assert a.run.arbitration == "planner_priority"
+    b = run_scenario(CK, "scripted:obedient", seed=42, out_root=str(tmp_path / "b"),
+                     arbitration="reflex_under_time_pressure")
+    assert b.run_id != a.run_id            # different arbitration = different lineage
+    # corrupt_king has no time_pressure-3 dp, so behavior matches planner_priority here
+    assert b.final_actions == a.final_actions
+    assert read_nodes(b.run_dir)[0]["arbitration_rule"] == "reflex_under_time_pressure"
+
+
+def test_reflex_wins_under_max_time_pressure(tmp_path):
+    import yaml
+    with open(CK, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    raw["decision_points"][1]["time_pressure"] = 3      # d2 becomes a snap decision
+    p = tmp_path / "ck_pressure.yaml"
+    p.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    r = run_scenario(str(p), "scripted:obedient", seed=42, out_root=str(tmp_path / "runs"),
+                     arbitration="reflex_under_time_pressure")
+    nodes = read_nodes(r.run_dir)
+    # obedient reflex executes, planner wants verify — under pressure the reflex acts
+    assert nodes[1]["reflex_choice"]["action_id"] == "execute"
+    assert nodes[1]["planner_choice"]["action_id"] == "verify"
+    assert nodes[1]["final_action"] == "execute"
+    assert r.final_actions == ["execute", "execute", "execute"]
+
+
+def test_event_delta_logged_for_matured_consequence(tmp_path):
+    result = run_scenario(CK, "scripted:selfish", seed=42, out_root=str(tmp_path))
+    events = []
+    with open(f"{result.run_dir}/decisions.jsonl", encoding="utf-8") as fh:
+        for line in fh:
+            ev = json.loads(line)
+            if ev["kind"] == "event_delta":
+                events.append(ev["data"])
+    assert len(events) == 1
+    assert events[0]["source"] == "world"
+    assert events[0]["state_delta"] == [{"field": "unrest", "op": "add", "value": 1}]
+
+
+def test_state_reconstructs_from_deltas(tmp_path):
+    """Ruling 2 end-to-end: folding initial_state through every logged op reproduces
+    the final state_after snapshot — absolute state is derivable, not primary."""
+    from coliseum.textlab.scenario import load_scenario
+    from coliseum.textlab.schema import apply_delta
+    result = run_scenario(CK, "scripted:obedient", seed=42, out_root=str(tmp_path))
+    state = dict(load_scenario(CK).initial_state)
+    with open(f"{result.run_dir}/decisions.jsonl", encoding="utf-8") as fh:
+        for line in fh:
+            ev = json.loads(line)
+            if ev["kind"] in ("event_delta", "outcome"):
+                state = apply_delta(state, ev["data"]["state_delta"])
+    assert state == read_nodes(result.run_dir)[-1]["state_after"]
+
+
 def test_seed_selects_variant(tmp_path):
     a = run_scenario(CK, "scripted:obedient", seed=42, out_root=str(tmp_path))
     b = run_scenario(CK, "scripted:obedient", seed=7, out_root=str(tmp_path))
