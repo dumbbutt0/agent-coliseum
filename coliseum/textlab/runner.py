@@ -1,0 +1,160 @@
+"""The scenario runner: state -> reflex + plan -> resolve -> log, until "end".
+
+Determinism contract (the Rung-0 gate for this harness):
+  - run_id is a pure function of (scenario, variant, agent, seed) — no clock, no pid.
+  - decision events are written with t=0.0; the ONLY wall-clock fields in a run
+    directory are run.json's started_at/finished_at (excluded from the byte gate).
+  - scripted agents report fixed 0.0 latencies; measured latencies begin with LLM
+    agents, where nondeterminism is expected and the gate doesn't apply.
+Same seed + scripted agent => byte-identical decisions.jsonl on every machine.
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import subprocess
+from dataclasses import dataclass
+
+from ..logging_substrate import RunLogger
+from ..seeding import seed_everything
+from .agents import AgentInterface, make_agent
+from .scenario import load_scenario, pick_variant
+from .schema import (DecisionNode, MemoryUpdate, Outcome, Run, canonical_json,
+                     config_hash)
+
+
+class DecisionLog(RunLogger):
+    """Append-only decision log at logs/runs/<run_id>/decisions.jsonl, t pinned to 0.0
+    (wall-clock would break byte-identical replay; humans get timestamps in run.json)."""
+
+    def __init__(self, run_id: str, out_root: str = "logs/runs"):
+        run_dir = os.path.join(out_root, run_id)
+        os.makedirs(run_dir, exist_ok=True)
+        self.run_id = run_id
+        self.run_dir = run_dir
+        self.path = os.path.join(run_dir, "decisions.jsonl")
+        self._seq = 0
+        self._fh = open(self.path, "w", encoding="utf-8")
+
+    def log(self, kind: str, **data):
+        ev = {"run_id": self.run_id, "seq": self._seq, "kind": kind, "t": 0.0, "data": data}
+        self._fh.write(canonical_json(ev) + "\n")
+        self._fh.flush()
+        self._seq += 1
+        return ev
+
+
+@dataclass
+class RunResult:
+    run_id: str
+    run_dir: str
+    final_actions: list          # action_id per decision point, in order
+    run: Run
+
+
+def _code_version() -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=5,
+                              cwd=os.path.dirname(os.path.abspath(__file__))
+                              ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def run_scenario(scenario_path: str, agent_spec: str, seed: int,
+                 out_root: str = "logs/runs", parent_id: str | None = None) -> RunResult:
+    scenario = load_scenario(scenario_path)
+    agent: AgentInterface = make_agent(agent_spec)
+    seed_everything(seed)
+    variant = pick_variant(scenario, seed)
+
+    run_hash = config_hash({"scenario": scenario.raw, "agent": agent.spec_dict()})
+    run_id = ".".join([scenario.scenario_id, variant["variant_id"],
+                       agent_spec.replace(":", "-"), f"s{seed}", run_hash[:8]])
+    log = DecisionLog(run_id, out_root)
+    run = Run(run_id=run_id, parent_id=parent_id, seed=seed,
+              scenario_id=scenario.scenario_id, variant_id=variant["variant_id"],
+              agent_id=agent.agent_id, config_hash=run_hash,
+              started_at=_now(), code_version=_code_version())
+
+    dps = {dp.dp_id: dp for dp in scenario.decision_points}
+    state = dict(scenario.initial_state)
+    pending = []                 # [{due, narrative, state_delta}] — deferred consequences
+    final_actions = []
+    timestep = 0
+    dp_id = scenario.decision_points[0].dp_id
+
+    with log:
+        while dp_id != "end":
+            dp = dps[dp_id]
+
+            # deferred consequences land before the agent sees the state
+            matured = [c for c in pending if c["due"] <= timestep]
+            pending = [c for c in pending if c["due"] > timestep]
+            recent_events = []
+            for c in matured:
+                state.update(c.get("state_delta", {}))
+                if c.get("narrative"):
+                    recent_events.append(c["narrative"])
+
+            narrative = variant["decision_texts"][dp.dp_id]
+            if timestep == 0 and variant.get("intro"):
+                narrative = variant["intro"] + "\n\n" + narrative
+            state_before = {**state, "narrative": narrative,
+                            "recent_events": recent_events, "facts": dp.facts,
+                            "authority_pressure": dp.authority_pressure,
+                            "risk_level": dp.risk_level, "time_pressure": dp.time_pressure}
+            actions = [scenario.actions[aid] for aid in dp.available_actions]
+
+            reflex = agent.reflex(state_before, actions)
+            planner = agent.plan(state_before, actions)
+            final = planner      # MVP: planner consulted at every decision point
+
+            rule = scenario.outcome_rules[f"{dp.dp_id}/{final.action_id}"]
+            state_after = {**state, **rule.get("state_delta", {})}
+            for cons in rule.get("consequences_deferred", []):
+                pending.append({"due": timestep + cons["after"],
+                                "narrative": cons.get("narrative", ""),
+                                "state_delta": cons.get("state_delta", {})})
+            memory = f"[t{timestep}] {rule.get('narrative', '')}".strip()
+
+            outcome = Outcome(run_id=run_id, timestep=timestep, action_id=final.action_id,
+                              state_delta=rule.get("state_delta", {}),
+                              narrative=rule.get("narrative", ""),
+                              consequences_deferred=rule.get("consequences_deferred", []))
+            node = DecisionNode(
+                run_id=run_id, agent_id=agent.agent_id, scenario_id=scenario.scenario_id,
+                timestep=timestep, state_before=state_before,
+                available_actions=list(dp.available_actions),
+                reflex_choice=reflex.to_dict(), planner_choice=planner.to_dict(),
+                final_action=final.action_id, confidence=final.confidence,
+                reasoning_summary=final.reasoning_summary,
+                moral_tags=list(scenario.actions[final.action_id].moral_tags),
+                authority_pressure=dp.authority_pressure, risk_level=dp.risk_level,
+                reward_expected=final.reward_expected,
+                outcome={"narrative": outcome.narrative, "state_delta": outcome.state_delta},
+                state_after=state_after, memory_update=memory,
+                reflex_latency_ms=0.0, planner_latency_ms=0.0, planner_consulted=True)
+
+            log.log("decision_node", **node.to_record())
+            log.log("outcome", **outcome.to_record())
+            log.log("memory_update",
+                    **MemoryUpdate(run_id=run_id, timestep=timestep, summary=memory).to_record())
+
+            state = state_after
+            final_actions.append(final.action_id)
+            timestep += 1
+            dp_id = rule.get("next", dp.next_default)
+
+    run.finished_at = _now()
+    run.status = "completed"
+    with open(os.path.join(log.run_dir, "run.json"), "w", encoding="utf-8") as fh:
+        json.dump(run.to_record(), fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    return RunResult(run_id=run_id, run_dir=log.run_dir, final_actions=final_actions, run=run)

@@ -10,7 +10,10 @@ numpy>=1.26
 # supersuit>=3.9
 # torch                # already installed on this machine: 2.12.0+cu130
 
+# textlab (the text-scenario behavioral lab): scenarios are YAML, tests are pytest.
+pyyaml>=6.0
+pytest>=8.0        # dev
+
 # Experiment tracking / config (add when useful):
 # wandb>=0.17
 # tensorboard>=2.16
-# pyyaml>=6.0
