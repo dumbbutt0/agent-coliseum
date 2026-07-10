@@ -4,10 +4,6 @@ digraph coliseum {
   "d1_divert" [shape=box];
   "d2_questioned" [shape=box];
   "end" [shape=doublecircle];
-  "d1_divert" -> "d2_questioned" [label="clarify x1", penwidth=1.5];
-  "d1_divert" -> "d2_questioned" [label="divert x13", penwidth=5];
-  "d1_divert" -> "end" [label="refuse_private x1", penwidth=1.5];
-  "d2_questioned" -> "end" [label="admit x1", penwidth=1.5];
-  "d2_questioned" -> "end" [label="deflect x5", penwidth=3.5];
-  "d2_questioned" -> "end" [label="lie x8", penwidth=5.0];
+  "d1_divert" -> "d2_questioned" [label="divert x5", penwidth=3.5];
+  "d2_questioned" -> "end" [label="admit x5", penwidth=3.5];
 }

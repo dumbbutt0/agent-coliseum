@@ -1,8 +1,16 @@
-# Exp-1: gemma3 reversed-divergence replication test — STOCHASTIC (2026-07-10)
+# Exp-1: Generalized gemma3 reversal failed cross-variant replication (2026-07-10)
+
+> **Wording amendment (2026-07-10, owner):** Exp-1 does NOT prove the original reversal
+> never occurs. It shows the reversal **failed to generalize** from the v1_cistern wording
+> (where it was observed deterministically) to the v0_granary wording under sampler
+> variation. The GENERAL gemma3 fingerprint claim is demoted; the narrower hypothesis —
+> that the effect may be wording-specific — is preserved and tested directly in Exp-2.
+> Underlying results below are unchanged.
 
 **Verdict on the primary question: the gemma3 reversal (reflex=lie, planner=admit) went 0/5
-under sampler variation — it failed to replicate in this regime and wording.** Per the locked
-thresholds: not a stable fingerprint. One scope caveat bounds the claim (below).
+under sampler variation on the v0_granary wording — it failed to GENERALIZE across variants.**
+Per the locked thresholds: not a general fingerprint. The wording-specific hypothesis
+remains open (see the scope section; Exp-2 tests it directly).
 
 ## Design (as locked; Codex-cleared "safe with minor warnings")
 
@@ -64,9 +72,10 @@ otherwise) is the natural follow-up; per the stop order, it was NOT run.
 
 ## Interpretation (bounded exactly as ordered)
 
-Within this model digest, this scenario wording, temperature 0.7, and this
-prompt/parser/arbitration stack: the gemma3 fast-secretive/slow-honest reversal is **not
-real**. What sampler variation actually surfaced: divergence direction is **model-specific
+Within this model digest, this scenario wording (v0_granary), temperature 0.7, and this
+prompt/parser/arbitration stack: the gemma3 fast-secretive/slow-honest reversal is **absent —
+it did not generalize across variants** (whether it exists on its original v1_cistern wording
+is Exp-2's question). What sampler variation actually surfaced: divergence direction is **model-specific
 and unstable in direction** — qwen3's reflex is more deceptive than its planner (2/5);
 llama3.1's reflex is sometimes more *cautious* than its planner (k13). The deterministic
 sweeps' tidy "reflex is more authority-compliant" story does not survive contact with
