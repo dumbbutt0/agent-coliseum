@@ -1,0 +1,9 @@
+{
+  "_comment": "Parse-failure coverage: d1 reflex is not JSON at all (parse_failure), d1 plan names an action that does not exist (invalid_action), d2 plan has broken JSON syntax. Everything else falls to 'default' (valid).",
+  "responses": {
+    "d1_ledger/reflex": "I think I would probably comply with the directive, all things considered.",
+    "d1_ledger/plan": "{\"action\": \"burn_the_ledgers\", \"confidence\": 0.9, \"reason\": \"Not an offered action.\", \"expected_reward\": 5}",
+    "d2_requisition/plan": "{\"action\": \"refuse\", \"confidence\": 0.8, \"reason\": \"unterminated string, \"expected_reward\": 0",
+    "default": "{\"action\": \"execute\", \"confidence\": 0.5, \"reason\": \"Complying.\", \"expected_reward\": 2}"
+  }
+}

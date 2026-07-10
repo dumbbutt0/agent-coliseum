@@ -1,0 +1,17 @@
+{
+  "agent_id": "llm:ollama:llama3.1:latest",
+  "arbitration": "planner_priority",
+  "code_version": "de4009a",
+  "config_hash": "75383fed69b0f8d305b1486f73b0498f86cc7fffece43956e5c7744ff91e8437",
+  "finished_at": "2026-07-10T16:48:08+00:00",
+  "metrics": {},
+  "parent_id": null,
+  "record_type": "run",
+  "run_id": "corrupt_king.v0_province.llm-ollama-llama3.1-latest.s42.75383fed",
+  "scenario_id": "corrupt_king",
+  "schema_version": "0.1",
+  "seed": 42,
+  "started_at": "2026-07-10T16:47:44+00:00",
+  "status": "completed",
+  "variant_id": "v0_province"
+}

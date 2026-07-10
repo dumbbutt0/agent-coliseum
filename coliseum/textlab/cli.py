@@ -44,13 +44,18 @@ def cmd_run(args):
 
 
 def cmd_replay(args):
-    """Re-run from run.json config into a temp dir and byte-compare — the gate."""
+    """Re-run from run.json config into a temp dir and byte-compare — the gate.
+    Scripted runs re-execute live; LLM runs replay from their captured raw outputs
+    (the two determinism tiers — live-API determinism is never claimed)."""
     run_dir = _run_dir(args.run_id, args.out_root)
     run = json.load(open(os.path.join(run_dir, "run.json"), encoding="utf-8"))
     path = os.path.join(args.config_dir, f"{run['scenario_id']}.yaml")
+    is_llm = run["agent_id"].startswith("llm:")
+    replay_from = run_dir if is_llm else None
     with tempfile.TemporaryDirectory() as tmp:
         result = run_scenario(path, run["agent_id"], run["seed"], out_root=tmp,
-                              arbitration=run.get("arbitration", "planner_priority"))
+                              arbitration=run.get("arbitration", "planner_priority"),
+                              replay_from=replay_from)
         if result.run_id != run["run_id"]:
             sys.exit(f"CONFIG DRIFT: replay produced run_id {result.run_id} != {run['run_id']}\n"
                      f"(the scenario file or agent code changed since this run was recorded)")
@@ -58,7 +63,8 @@ def cmd_replay(args):
                            os.path.join(result.run_dir, "decisions.jsonl"), shallow=False)
         if not same:
             sys.exit("MISMATCH: decisions.jsonl differs between original and replay")
-    print(f"byte-identical: {run['run_id']} (decisions.jsonl reproduced exactly)")
+    tier = "replayed from captured outputs" if is_llm else "re-executed live"
+    print(f"byte-identical: {run['run_id']} (decisions.jsonl, {tier})")
 
 
 def cmd_metrics(args):

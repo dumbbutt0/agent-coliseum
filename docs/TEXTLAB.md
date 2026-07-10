@@ -56,10 +56,29 @@ wall-clock in a run dir is `run.json`'s `started_at`/`finished_at`).
 
 ## Agents
 
-Spec strings: `scripted:<persona>` (obedient · defiant · merciful · selfish — deterministic rules
-over each decision's `facts` and the actions' `moral_tags`), `ollama:<model>` and `api:<model>`
-(Day 3, currently stubs). The `obedient` persona is built to diverge: its reflex complies on the
-spot, its planner verifies an unverifiable directive first — the designed flinch for tests.
+Spec strings:
+- `scripted:<persona>` — obedient · defiant · merciful · selfish; deterministic rules over each
+  decision's `facts` and the actions' `moral_tags`. The gold deterministic baseline. The
+  `obedient` persona is built to diverge: reflex complies on the spot, planner verifies first.
+- `llm:mock:<fixture>` — the full LLM code path (prompting, parsing, capture, fallback) served
+  from `tests/fixtures/llm/<fixture>.json`. Scripted-tier deterministic; no network.
+- `llm:ollama:<model>` — real model via Ollama. Host from `$OLLAMA_HOST` (e.g.
+  `OLLAMA_HOST=http://10.0.0.8:11434` to serve minds from the Mac over LAN) or localhost.
+
+**LLM rulings (owner, 2026-07-10):** (1) the reflex is the SAME model under pressure — tiny
+token budget (80 vs 350), answer-first prompt, strict JSON, short timeout — not a smaller model;
+(2) wall-clock latency is log-only evidence on the DecisionNode, never in the lineage hash;
+(3) stated confidence is stored as `model_stated_confidence` per recommendation and never
+arbitrates unless a future rule explicitly uses it.
+
+**Parse failures are data:** invalid JSON / unknown actions record `parse_status`
+(`parse_failure` | `invalid_action`) with the raw text, fall back deterministically to the first
+available action at confidence 0, and are flagged `fallback: true`.
+
+**Two determinism tiers:** scripted runs re-execute byte-identically from the seed. Live LLM
+runs are NOT that tier — their backbone is capture-and-replay: every model call lands in the
+run's `captures.jsonl`; `coliseum-lab replay <run_id>` re-runs from those captured outputs and
+byte-compares. Live-API determinism is never claimed.
 
 ## Adding a scenario
 
@@ -96,5 +115,8 @@ innocence isolated) · `hidden_objective` (+ `_aligned` control: willingness vs 
 - **Day 2 (done):** schema v0.1 freeze (arbitration + delta rulings) · metrics engine ·
   graph export · CLI · derived determinism gate · water_bearer + hidden_objective pairs ·
   140-run scoring sweep.
-- **Day 3:** `OllamaAgent`/`APIAgent` · real-model runs (5 seeds × 2 variants) · first MetricReport
-  on a real model · session ingest into the wiki.
+- **Day 3 (done):** LLM agent family (mock + Ollama, shared parse pipeline) · parse-failure
+  handling · capture-and-replay tier · `make textlab-llm-smoke` · first real-model run
+  (llama3.1 via the Mac: `execute → verify → refuse`, zero reflex/planner divergence).
+- **Next:** real-model sweep (5 seeds × 2 variants × scenarios) · aggregate cells keyed on
+  arbitration · APIAgent · then new scenarios (betrayal_reversal, regicide_protocol).

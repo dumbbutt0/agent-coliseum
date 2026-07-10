@@ -80,12 +80,24 @@ def _now() -> str:
 
 def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                  out_root: str = "logs/runs", parent_id: str | None = None,
-                 arbitration: str = "planner_priority") -> RunResult:
+                 arbitration: str = "planner_priority",
+                 replay_from: str | None = None) -> RunResult:
+    """`replay_from`: path to a prior LLM run dir — the agent serves that run's
+    captured raw outputs (and latencies) instead of calling the backend, so the
+    replayed run is byte-identical to the live original (the LLM determinism tier)."""
     if arbitration not in ARBITRATION_RULES:
         raise SchemaError(f"unknown arbitration rule {arbitration!r} (have {sorted(ARBITRATION_RULES)})")
     arbitrate = ARBITRATION_RULES[arbitration]
     scenario = load_scenario(scenario_path)
     agent: AgentInterface = make_agent(agent_spec)
+    if replay_from is not None:
+        cap_path = os.path.join(replay_from, "captures.jsonl")
+        if not hasattr(agent, "load_replay"):
+            raise SchemaError(f"replay_from only applies to llm agents, not {agent_spec!r}")
+        if not os.path.exists(cap_path):
+            raise SchemaError(f"no captures to replay at {cap_path}")
+        with open(cap_path, encoding="utf-8") as fh:
+            agent.load_replay([json.loads(line) for line in fh if line.strip()])
     seed_everything(seed)
     variant = pick_variant(scenario, seed)
 
@@ -128,7 +140,7 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
             narrative = variant["decision_texts"][dp.dp_id]
             if timestep == 0 and variant.get("intro"):
                 narrative = variant["intro"] + "\n\n" + narrative
-            state_before = {**state, "narrative": narrative,
+            state_before = {**state, "narrative": narrative, "dp_id": dp.dp_id,
                             "recent_events": recent_events, "facts": dp.facts,
                             "authority_pressure": dp.authority_pressure,
                             "risk_level": dp.risk_level, "time_pressure": dp.time_pressure}
@@ -163,7 +175,11 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
                 reward_expected=final.reward_expected,
                 outcome={"narrative": outcome.narrative, "state_delta": outcome.state_delta},
                 state_after=state_after, memory_update=memory,
-                reflex_latency_ms=0.0, planner_latency_ms=0.0, planner_consulted=True,
+                # ruling 2 (Day 3): latency is LOG-ONLY behavioral evidence — recorded
+                # here, never part of the lineage hash (scripted agents report 0.0)
+                reflex_latency_ms=reflex.meta.get("latency_ms", 0.0),
+                planner_latency_ms=planner.meta.get("latency_ms", 0.0),
+                planner_consulted=True,
                 arbitration_rule=arbitration, dp_id=dp.dp_id)
 
             log.log("decision_node", **node.to_record())
@@ -178,6 +194,11 @@ def run_scenario(scenario_path: str, agent_spec: str, seed: int,
 
     run.finished_at = _now()
     run.status = "completed"
+    # live LLM calls -> captures.jsonl, the replay substrate (absent for scripted/replayed runs)
+    if getattr(agent, "captures", None):
+        with open(os.path.join(log.run_dir, "captures.jsonl"), "w", encoding="utf-8") as fh:
+            for cap in agent.captures:
+                fh.write(canonical_json(cap) + "\n")
     with open(os.path.join(log.run_dir, "run.json"), "w", encoding="utf-8") as fh:
         json.dump(run.to_record(), fh, indent=2, sort_keys=True)
         fh.write("\n")
