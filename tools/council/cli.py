@@ -285,13 +285,26 @@ def cmd_cancel(args) -> int:
 
 
 def cmd_identity_init(args) -> int:
-    """Create the owner's S/KEY token chain and PIN its tip into the event
-    chain (self-pinning — this event creates the authority it pins)."""
+    """Bootstrap the owner's S/KEY token chain. Order (cycle-1 blockers
+    2+3): enrollment anchor check FIRST (a root-owned, agent-unwritable
+    secret — the first writer can never be an agent), then the PIN event,
+    then the verifier install. Any pre-pin failure leaves no verifier;
+    a crash between pin and install fails closed and is repaired by
+    identity-restore-from-pin."""
     cfg, root = _cfg(args)
     if args.role != "human":
         raise SchemaViolation("identity-init is an owner action: "
                               "--role human")
+    if identity.read_verifier(root) is not None:
+        raise SchemaViolation("identity already initialized — use rotation")
     import getpass
+    if getattr(args, "enrollment_token_file", None):
+        with open(args.enrollment_token_file, encoding="utf-8") as fh:
+            enrollment_token = fh.read().strip()
+    else:
+        enrollment_token = getpass.getpass(
+            "enrollment token (owner-provisioned anchor): ")
+    identity.check_enrollment(enrollment_token)
     if getattr(args, "passphrase_file", None):
         with open(args.passphrase_file, encoding="utf-8") as fh:
             passphrase = fh.read().strip()
@@ -299,8 +312,8 @@ def cmd_identity_init(args) -> int:
         passphrase = getpass.getpass("new owner passphrase: ")
         if getpass.getpass("repeat passphrase: ") != passphrase:
             raise SchemaViolation("passphrases do not match")
-    verifier = identity.init_identity(root, passphrase,
-                                      chain_length=args.chain_length)
+    verifier = identity.prepare_identity(passphrase,
+                                         chain_length=args.chain_length)
     payload = {"schema_version": "identity.v1",
                "tip_hex": verifier["tip_hex"],
                "counter": verifier["counter"],
@@ -310,6 +323,7 @@ def cmd_identity_init(args) -> int:
     event = events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
                                 "human", IDENTITY_RID, cfg.repo_roots[0],
                                 NULL_COMMIT, payload)
+    identity.install_verifier(root, verifier)
     print(f"identity initialized: {verifier['counter']} one-time tokens; "
           f"tip pinned by event {event['event_id']}. Every human-authority "
           "event now requires a token (passphrase prompt).")
@@ -350,27 +364,14 @@ def cmd_identity_restore_from_pin(args) -> int:
     if args.role != "human":
         raise SchemaViolation("identity-restore-from-pin is an owner "
                               "action: --role human")
-    pin_event = None
-    for event in events.read_chain(root):
-        if event["event_type"] in ("HUMAN_IDENTITY_INITIALIZED",
-                                   "HUMAN_IDENTITY_ROTATED"):
-            pin_event = event
-    if pin_event is None:
-        raise SchemaViolation("no identity pin in the chain — use "
-                              "identity-init")
-    payload = pin_event["payload"]
-    now = storage.utc_now()
-    verifier = {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
-                "salt_hex": payload["salt_hex"],
-                "pbkdf2_iterations": payload["pbkdf2_iterations"],
-                "chain_length": payload["chain_length"],
-                "counter": payload["counter"],
-                "tip_hex": payload["tip_hex"],
-                "created_utc": now, "updated_utc": now}
-    identity._write_verifier(root, verifier)
-    print(f"verifier restored from event {pin_event['event_id']} "
-          f"({verifier['counter']} tokens; tokens spent after that pin "
-          "were burned and stay burned — the counter restarts at the pin)")
+    # cycle-1 blocker 1: NEVER restore to the pin itself — replay every
+    # post-pin burn from the chain so spent tokens stay spent; any
+    # inconsistent history refuses before a single byte is written
+    verifier = identity.derive_current_from_chain(events.read_chain(root))
+    identity.install_verifier(root, verifier, allow_overwrite=True)
+    print(f"verifier restored by chain replay: counter "
+          f"{verifier['counter']} (every token burned in the chain stays "
+          "burned; the tip is the LAST recorded burn, not the pin)")
     return 0
 
 
@@ -535,6 +536,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("identity-init")
     p.add_argument("--chain-length", type=int, default=10_000)
     p.add_argument("--passphrase-file", dest="passphrase_file", default=None,
+                   help="tests/scripting only; interactive getpass otherwise")
+    p.add_argument("--enrollment-token-file", dest="enrollment_token_file",
+                   default=None,
                    help="tests/scripting only; interactive getpass otherwise")
 
     sub.add_parser("identity-status")

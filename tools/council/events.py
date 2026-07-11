@@ -152,6 +152,15 @@ def _verify_human_token(root: str, chain: list, event: dict) -> None:
     verifier_exists = identity.read_verifier(root) is not None
     if pin is None and not verifier_exists:
         return  # pre-cutover legacy behavior
+    if pin is None and verifier_exists:
+        # cycle-1 blocker 2: a verifier without its chain pin is NEVER
+        # authority — a crashed/refused bootstrap must complete (or be
+        # removed by the owner) before any token event lands
+        raise CouncilError(
+            "identity verifier exists without a chain pin — bootstrap "
+            "incomplete; token-required events fail closed (re-run "
+            "identity-init after removing the orphan verifier, or "
+            "complete the pin)")
     payload = event["payload"]
     expected = identity.binding_hash(
         etype, event["request_id"], event["target_commit"],

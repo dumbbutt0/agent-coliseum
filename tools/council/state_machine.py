@@ -169,12 +169,17 @@ def check(event: dict, requests: dict) -> None:
 def apply(event: dict, requests: dict) -> dict:
     """Fold one event into the projection (caller ran check())."""
     rid = event["request_id"]
-    req = requests.setdefault(rid, _blank_request())
     etype = event["event_type"]
+    if etype in STATELESS_EVENTS:
+        # control/identity/watcher events never materialize a phantom
+        # request — they annotate an existing one at most
+        if rid in requests:
+            requests[rid]["history"].append(event["event_id"])
+            requests[rid]["last_event_id"] = event["event_id"]
+        return requests
+    req = requests.setdefault(rid, _blank_request())
     req["history"].append(event["event_id"])
     req["last_event_id"] = event["event_id"]
-    if etype in STATELESS_EVENTS:
-        return requests
     if etype == "AUTONOMY_PAUSED":
         req["state"] = AUTONOMY_PAUSED
         return requests

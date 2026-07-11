@@ -173,9 +173,30 @@ Generic `cli record` emits ONLY non-authority bookkeeping
 (`BUILD_STARTED`, `BUILD_READY`, `FIX_STARTED`, `WATCHER_ERROR`,
 `AUTONOMY_PAUSED`).
 
+Bootstrap trust anchor (cycle-2 blocker 3): the FIRST identity on a root
+may not be established by whoever writes first. `identity-init` requires
+an enrollment token whose sha256 (domain `council:enrollment:v1`) lives
+at the FIXED path `/etc/coliseum/enrollment.sha256` — root-owned and
+agent-unwritable, provisioned ONCE by the owner:
+
+    # choose a secret; remember it (it is asked at identity-init)
+    printf 'council:enrollment:v1\0%s' 'YOUR-SECRET' | sha256sum
+    sudo mkdir -p /etc/coliseum
+    echo '<that hash>' | sudo tee /etc/coliseum/enrollment.sha256
+    sudo chmod 0644 /etc/coliseum/enrollment.sha256
+
+No anchor file → identity-init fails closed (no automated bootstrap path
+exists). The OS boundary is root vs the agent user: if agents hold
+passwordless sudo, there is no boundary — a documented requirement.
+Bootstrap ordering is pin-before-install: the PIN event lands first,
+then the verifier file; any pre-pin failure leaves no verifier, and a
+verifier without a chain pin authorizes NOTHING. Recovery
+(`identity-restore-from-pin`) derives the CURRENT state by replaying
+every post-pin burn from the chain — spent tokens stay spent.
+
 Bootstrap on a fresh (fail-closed) root, owner-attended:
-`cli --role human identity-init` then
-`cli --role human status-set --status active`.
+`cli --role human identity-init` (enrollment token + new passphrase)
+then `cli --role human status-set --status active`.
 
 ## Protocol integrity
 

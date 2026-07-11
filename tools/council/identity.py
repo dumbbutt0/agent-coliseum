@@ -116,13 +116,45 @@ def _write_verifier(root: str, verifier: dict) -> None:
     storage.atomic_write_json(verifier_path(root), verifier)
 
 
-def init_identity(root: str, passphrase: str,
-                  chain_length: int = DEFAULT_CHAIN_LENGTH,
-                  iterations: int = DEFAULT_ITERATIONS) -> dict:
-    """Create the chain and store the tip verifier. Refuses to overwrite —
-    rotation is the only sanctioned replacement (identity-rotate)."""
-    if os.path.exists(verifier_path(root)):
-        raise IdentityError("identity already initialized — use rotation")
+# FIXED path (never env-driven — an env override would be agent-forgeable):
+# a root-owned, agent-unwritable sha256 of the owner's enrollment token.
+# Provisioned ONCE by the owner with sudo; identity bootstrap REFUSES
+# without it (cycle-1 blocker 3: the first writer must not own the
+# council). The OS boundary is root vs the agent user; an owner whose
+# agents hold passwordless sudo has no boundary — documented requirement.
+ENROLLMENT_HASH_FILE = "/etc/coliseum/enrollment.sha256"
+ENROLLMENT_DOMAIN = b"council:enrollment:v1\x00"
+
+
+def enrollment_hash(token: str) -> str:
+    return hashlib.sha256(
+        ENROLLMENT_DOMAIN + token.encode("utf-8")).hexdigest()
+
+
+def check_enrollment(token: str) -> None:
+    """Bootstrap trust anchor: the supplied token must hash to the value
+    in the root-owned enrollment file. Missing file = enrollment not
+    provisioned = fail closed (no automated path may bootstrap)."""
+    try:
+        with open(ENROLLMENT_HASH_FILE, encoding="utf-8") as fh:
+            want = fh.read().strip().lower()
+    except OSError:
+        raise IdentityError(
+            f"enrollment anchor {ENROLLMENT_HASH_FILE} is not provisioned "
+            "— the owner creates it ONCE with sudo (see docs/AUTONOMY.md); "
+            "identity bootstrap fails closed without it")
+    if len(want) != 64 or any(c not in "0123456789abcdef" for c in want):
+        raise IdentityError("enrollment anchor content is not a sha256")
+    if enrollment_hash(token or "") != want:
+        raise IdentityError("enrollment token does not match the anchor")
+
+
+def prepare_identity(passphrase: str,
+                     chain_length: int = DEFAULT_CHAIN_LENGTH,
+                     iterations: int = DEFAULT_ITERATIONS) -> dict:
+    """Compute a fresh chain IN MEMORY — nothing is written. The caller
+    appends the pin event first, then install_verifier (cycle-1 blocker 2:
+    a verifier must never exist without its chain pin)."""
     if not passphrase:
         raise IdentityError("empty passphrase refused")
     if chain_length < 2:
@@ -131,11 +163,31 @@ def init_identity(root: str, passphrase: str,
     seed = derive_seed(passphrase, salt, iterations)
     tip = chain_value(seed, chain_length)
     now = storage.utc_now()
-    verifier = {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
-                "salt_hex": salt.hex(), "pbkdf2_iterations": iterations,
-                "chain_length": chain_length, "counter": chain_length,
-                "tip_hex": tip.hex(), "created_utc": now,
-                "updated_utc": now}
+    return {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
+            "salt_hex": salt.hex(), "pbkdf2_iterations": iterations,
+            "chain_length": chain_length, "counter": chain_length,
+            "tip_hex": tip.hex(), "created_utc": now, "updated_utc": now}
+
+
+def install_verifier(root: str, verifier: dict,
+                     allow_overwrite: bool = False) -> None:
+    """Write the verifier AFTER its pin event exists in the chain."""
+    _validate_verifier(verifier)
+    if not allow_overwrite and os.path.exists(verifier_path(root)):
+        raise IdentityError("identity already initialized — use rotation")
+    _write_verifier(root, verifier)
+
+
+def init_identity(root: str, passphrase: str,
+                  chain_length: int = DEFAULT_CHAIN_LENGTH,
+                  iterations: int = DEFAULT_ITERATIONS) -> dict:
+    """TEST/legacy helper: prepare + install in one step WITHOUT a chain
+    pin. Production bootstrap goes through cli identity-init (enrollment
+    anchor + pin-before-install); an unpinned verifier grants NO token
+    authority (events._verify_human_token refuses it)."""
+    if os.path.exists(verifier_path(root)):
+        raise IdentityError("identity already initialized — use rotation")
+    verifier = prepare_identity(passphrase, chain_length, iterations)
     _write_verifier(root, verifier)
     return verifier
 
@@ -231,6 +283,68 @@ def verify_historical_token(token: dict, pinned_tip_hex: str,
         return False
     return chain_value(bytes.fromhex(token["preimage_hex"]),
                        steps).hex() == pinned_tip_hex
+
+
+def derive_current_from_chain(chain: list) -> dict:
+    """Rebuild the CURRENT verifier by replaying every post-pin token burn
+    recorded in the chain (cycle-1 blocker 1: restoring to the original
+    pin would revive every spent token — their preimages are public in
+    the chain). Each burn must descend strictly: counter exactly one
+    below, preimage hashing to the running tip. ANY inconsistency raises
+    before a caller writes anything."""
+    pin_event = None
+    for event in chain:
+        if event["event_type"] in ("HUMAN_IDENTITY_INITIALIZED",
+                                   "HUMAN_IDENTITY_ROTATED"):
+            pin_event = event
+    if pin_event is None:
+        raise IdentityError("no identity pin in the chain — use "
+                            "identity-init")
+    payload = pin_event["payload"]
+    tip = payload["tip_hex"]
+    counter = payload["counter"]
+    past_pin = False
+    for event in chain:
+        if event is pin_event:
+            past_pin = True
+            continue
+        if not past_pin:
+            continue
+        token = event.get("payload", {}).get("human_token")
+        if not isinstance(token, dict):
+            continue
+        preimage_hex = token.get("preimage_hex")
+        token_counter = token.get("counter")
+        if not isinstance(preimage_hex, str) \
+                or not isinstance(token_counter, int) \
+                or isinstance(token_counter, bool):
+            raise IdentityError(
+                f"malformed historical token in event {event['event_id']} "
+                "— recovery refuses; owner review required")
+        if token_counter != counter - 1:
+            raise IdentityError(
+                f"historical burn in event {event['event_id']} is out of "
+                f"order (counter {token_counter}, expected {counter - 1}) "
+                "— recovery refuses")
+        try:
+            preimage = bytes.fromhex(preimage_hex)
+        except ValueError:
+            raise IdentityError(
+                f"historical token in event {event['event_id']} is not "
+                "hex — recovery refuses")
+        if _h(preimage).hex() != tip:
+            raise IdentityError(
+                f"historical token in event {event['event_id']} does not "
+                "descend from the running tip — recovery refuses")
+        tip = preimage_hex
+        counter = token_counter
+    now = storage.utc_now()
+    return {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
+            "salt_hex": payload["salt_hex"],
+            "pbkdf2_iterations": payload["pbkdf2_iterations"],
+            "chain_length": payload["chain_length"],
+            "counter": counter, "tip_hex": tip,
+            "created_utc": now, "updated_utc": now}
 
 
 def latest_pin(chain: list):

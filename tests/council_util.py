@@ -25,12 +25,23 @@ def make_root(tmp_path) -> str:
     with open(os.path.join(root, "log.md"), "w", encoding="utf-8") as fh:
         fh.write("STATUS: active\n\n# test council log\n")
     # H1: control.json is the authoritative run state (fail-closed when
-    # absent) and human events require identity tokens once a verifier
-    # exists — every test root gets both, matching a bootstrapped council
+    # absent) and human events require identity tokens — every test root
+    # gets a FULLY bootstrapped identity (pin event #1 + verifier),
+    # matching production: an unpinned verifier grants no authority.
     storage.write_control(root, "active", [], "test root", None)
-    identity.init_identity(root, TEST_PASSPHRASE,
-                           chain_length=TEST_CHAIN_LENGTH,
-                           iterations=TEST_ITERATIONS)
+    verifier = identity.prepare_identity(TEST_PASSPHRASE,
+                                         chain_length=TEST_CHAIN_LENGTH,
+                                         iterations=TEST_ITERATIONS)
+    boot_cfg = Config(council_root=root, repo_roots=(root,), role="human")
+    events.append_event(
+        root, boot_cfg, "HUMAN_IDENTITY_INITIALIZED", "human",
+        "council-identity", root, "0" * 40,
+        {"schema_version": "identity.v1", "tip_hex": verifier["tip_hex"],
+         "counter": verifier["counter"],
+         "chain_length": verifier["chain_length"],
+         "salt_hex": verifier["salt_hex"],
+         "pbkdf2_iterations": verifier["pbkdf2_iterations"]})
+    identity.install_verifier(root, verifier)
     return root
 
 

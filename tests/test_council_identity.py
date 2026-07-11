@@ -349,6 +349,17 @@ def test_cli_approve_mints_and_burns_token(env):
     locking.release(ctx["lock"])
 
 
+def _enrollment(tmp_path, monkeypatch, token="owner-enrollment-secret"):
+    """A provisioned enrollment anchor (root-owned in production; tmp
+    here) + the matching token file."""
+    anchor = tmp_path / "enrollment.sha256"
+    anchor.write_text(identity.enrollment_hash(token))
+    monkeypatch.setattr(identity, "ENROLLMENT_HASH_FILE", str(anchor))
+    token_file = tmp_path / "enrollment-token.txt"
+    token_file.write_text(token)
+    return str(token_file)
+
+
 def test_cli_identity_init_and_status_and_rotate(tmp_path, monkeypatch):
     root = str(tmp_path / "fresh")
     os.makedirs(root)
@@ -356,11 +367,13 @@ def test_cli_identity_init_and_status_and_rotate(tmp_path, monkeypatch):
     repo, head = make_repo(tmp_path)
     monkeypatch.setenv("COUNCIL_ROOT", root)
     monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    etok = _enrollment(tmp_path, monkeypatch)
     pw = tmp_path / "pw.txt"
     pw.write_text(TEST_PASSPHRASE)
     # fresh root is fail-closed; identity-init is a bootstrap event
     rc = cli.main(["--role", "human", "identity-init", "--chain-length",
-                   "16", "--passphrase-file", str(pw)])
+                   "16", "--passphrase-file", str(pw),
+                   "--enrollment-token-file", etok])
     assert rc == 0
     assert cli.main(["identity-status"]) == 0
     chain = events.read_chain(root)
@@ -396,6 +409,165 @@ def test_cli_identity_restore_from_pin(env):
     assert cli.main(["identity-status"]) == 0
     restored = identity.read_verifier(root)
     assert restored["tip_hex"] == verifier["tip_hex"]
+
+
+# -------------------------- cycle-2 blockers: identity lifecycle safety
+
+def test_restore_replays_burns_and_keeps_tokens_dead(env):
+    """Cycle-2 blocker 1 regression: after burns, deletion, and restore,
+    the counter equals the LAST burn and every spent token stays dead."""
+    root, repo, head, cfg = env
+    core1 = {"status": "paused", "paused_roles": ["all"], "reason": "a"}
+    t1 = human_token(root, "STATUS_CHANGED", "council-control", "0" * 40,
+                     core1)
+    events.append_event(root, cfg, "STATUS_CHANGED", "human",
+                        "council-control", repo, "0" * 40,
+                        dict(core1, human_token=t1))
+    storage.write_control(root, "active", [], "test", None)  # keep active
+    core2 = {"status": "active", "paused_roles": [], "reason": "b"}
+    t2 = human_token(root, "STATUS_CHANGED", "council-control", "0" * 40,
+                     core2)
+    events.append_event(root, cfg, "STATUS_CHANGED", "human",
+                        "council-control", repo, "0" * 40,
+                        dict(core2, human_token=t2))
+    burned_to = identity.read_verifier(root)["counter"]
+    assert burned_to == TEST_CHAIN_LENGTH - 2
+    os.unlink(identity.verifier_path(root))
+    assert cli.main(["--role", "human", "identity-restore-from-pin"]) == 0
+    restored = identity.read_verifier(root)
+    assert restored["counter"] == burned_to          # NOT the pin value
+    assert restored["tip_hex"] == t2["preimage_hex"]  # tip = last burn
+    # both spent tokens are dead after restore
+    for spent in (t1, t2):
+        replay = dict(spent)
+        replay["binds"] = identity.binding_hash(
+            "STATUS_CHANGED", "council-control", "0" * 40, core2)
+        with pytest.raises(CouncilError):
+            events.append_event(root, cfg, "STATUS_CHANGED", "human",
+                                "council-control", repo, "0" * 40,
+                                dict(core2, human_token=replay))
+    # ...and the legitimate next token still works
+    append(root, cfg, "STATUS_CHANGED", "human", "council-control", repo,
+           "0" * 40, dict(core2))
+
+
+def test_restore_refuses_inconsistent_history(env):
+    """A hash-chained but cryptographically inconsistent burn history
+    refuses recovery without writing anything."""
+    from tools.council.schemas import canonical_json, compute_event_hash
+    root, repo, head, cfg = env
+    chain = events.read_chain(root)
+    bogus = {"protocol_version": "1.0",
+             "event_id": f"{len(chain) + 1:06d}-deadbeef",
+             "event_type": "STATUS_CHANGED", "request_id": "council-control",
+             "sender": "human", "timestamp_utc": storage.utc_now(),
+             "repository": repo, "target_commit": "0" * 40,
+             "payload": {"status": "active", "paused_roles": [],
+                         "reason": "", "human_token": {
+                             "counter": TEST_CHAIN_LENGTH - 7,
+                             "preimage_hex": "0" * 64, "binds": "x"}},
+             "previous_event_hash": chain[-1]["event_hash"]}
+    bogus["event_hash"] = compute_event_hash(bogus)
+    storage.append_line(storage.events_path(root), canonical_json(bogus))
+    os.unlink(identity.verifier_path(root))
+    assert cli.main(["--role", "human", "identity-restore-from-pin"]) == 1
+    assert identity.read_verifier(root) is None  # nothing was written
+
+
+def test_failed_init_leaves_no_verifier(tmp_path, monkeypatch):
+    """Cycle-2 blocker 2 regression: every init failure — STOP file,
+    refused append, write fault — leaves NO verifier behind."""
+    root = str(tmp_path / "fresh")
+    os.makedirs(root)
+    storage.ensure_layout(root)
+    repo, head = make_repo(tmp_path)
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    etok = _enrollment(tmp_path, monkeypatch)
+    pw = tmp_path / "pw.txt"
+    pw.write_text(TEST_PASSPHRASE)
+    argv = ["--role", "human", "identity-init", "--chain-length", "16",
+            "--passphrase-file", str(pw), "--enrollment-token-file", etok]
+    # STOP file: the pin append refuses; no verifier may exist
+    open(os.path.join(root, "STOP"), "w").close()
+    assert cli.main(argv) == 1
+    assert identity.read_verifier(root) is None
+    assert events.read_chain(root) == []
+    os.unlink(os.path.join(root, "STOP"))
+    # injected append fault: same guarantee
+    def boom(*a, **k):
+        raise CouncilError("simulated append failure")
+    with monkeypatch.context() as m:
+        m.setattr(events, "append_event", boom)
+        assert cli.main(argv) == 1
+    assert identity.read_verifier(root) is None
+    # and after the faults clear, init succeeds cleanly
+    assert cli.main(argv) == 0
+    assert identity.read_verifier(root) is not None
+
+
+def test_unpinned_verifier_never_authorizes(tmp_path):
+    """Cycle-2 blocker 2, second half: a verifier with NO chain pin is
+    not bootstrap-compatible — every token event fails closed."""
+    root = str(tmp_path / "unpinned")
+    os.makedirs(root)
+    storage.ensure_layout(root)
+    storage.write_control(root, "active", [], "test", None)
+    repo, head = make_repo(tmp_path)
+    cfg = make_cfg(repo, root)
+    identity.init_identity(root, TEST_PASSPHRASE, chain_length=8,
+                           iterations=100)  # unpinned (test/legacy helper)
+    verifier = identity.read_verifier(root)
+    token = identity.compute_token(TEST_PASSPHRASE, verifier)
+    core = {"status": "paused", "paused_roles": ["all"], "reason": ""}
+    token["binds"] = identity.binding_hash("STATUS_CHANGED",
+                                           "council-control", "0" * 40, core)
+    with pytest.raises(CouncilError):
+        events.append_event(root, cfg, "STATUS_CHANGED", "human",
+                            "council-control", repo, "0" * 40,
+                            dict(core, human_token=token))
+
+
+def test_bootstrap_refused_without_enrollment_anchor(tmp_path, monkeypatch):
+    """Cycle-2 blocker 3 regression: no anchor, no bootstrap — an agent
+    invoking identity-init on a fresh root establishes nothing."""
+    root = str(tmp_path / "fresh")
+    os.makedirs(root)
+    storage.ensure_layout(root)
+    repo, head = make_repo(tmp_path)
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    monkeypatch.setattr(identity, "ENROLLMENT_HASH_FILE",
+                        str(tmp_path / "missing" / "anchor.sha256"))
+    pw = tmp_path / "pw.txt"
+    pw.write_text("attacker-passphrase")
+    rc = cli.main(["--role", "human", "identity-init", "--chain-length",
+                   "16", "--passphrase-file", str(pw),
+                   "--enrollment-token-file", str(pw)])
+    assert rc == 1
+    assert identity.read_verifier(root) is None
+    assert events.read_chain(root) == []  # no pin, nothing established
+
+
+def test_bootstrap_refused_with_wrong_enrollment_token(tmp_path,
+                                                       monkeypatch):
+    root = str(tmp_path / "fresh")
+    os.makedirs(root)
+    storage.ensure_layout(root)
+    repo, head = make_repo(tmp_path)
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    _enrollment(tmp_path, monkeypatch, token="the-real-secret")
+    wrong = tmp_path / "wrong.txt"
+    wrong.write_text("attacker-guess")
+    pw = tmp_path / "pw.txt"
+    pw.write_text("attacker-passphrase")
+    rc = cli.main(["--role", "human", "identity-init", "--chain-length",
+                   "16", "--passphrase-file", str(pw),
+                   "--enrollment-token-file", str(wrong)])
+    assert rc == 1
+    assert identity.read_verifier(root) is None
+    assert events.read_chain(root) == []
 
 
 def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):
