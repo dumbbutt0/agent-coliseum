@@ -157,6 +157,81 @@ def test_validate_rejects_unclaimed_and_wrong_sender(env):
         claude_watch._validate_verdict_event(root, cfg, forged, RID)
 
 
+# ------------------- source-task routing (council-protocol-delta cycle 2)
+
+def test_source_go_stays_at_go_then_integrates_commit_bound(env, capsys):
+    """Codex cycle-1 blocker regression: the real watcher must consume a
+    source-task GO WITHOUT any experiment policy transition, leaving state
+    `go` so a commit-bound CHANGE_INTEGRATED succeeds — and a different
+    commit is refused."""
+    root, repo, head, cfg = env
+    _submit(root, cfg, head, "GO", task_kind="source")
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "source task" in out and "state remains `go`" in out
+    from tools.council import state_machine
+    chain = events.read_chain(root)
+    types = [e["event_type"] for e in chain]
+    assert "POLICY_VALIDATION_REQUIRED" not in types
+    assert "AUTO_APPROVED" not in types
+    assert "HUMAN_APPROVAL_REQUIRED" not in types
+    assert state_machine.project(chain)[RID]["state"] == "go"
+    # a GO for one commit never authorizes integrating another
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, "e" * 40,
+               {"integrated_commit": "e" * 40})
+    append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, head,
+           {"integrated_commit": head, "integration_method": "fast-forward"})
+    chain = events.read_chain(root)
+    assert state_machine.project(chain)[RID]["state"] == "integrated"
+
+
+def test_source_go_with_conditions_also_stays_at_go(env, capsys):
+    root, repo, head, cfg = env
+    _submit(root, cfg, head, "GO_WITH_CONDITIONS", task_kind="source")
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "conditions attached" in out and "owner review" in out
+    from tools.council import state_machine
+    chain = events.read_chain(root)
+    assert "POLICY_VALIDATION_REQUIRED" not in \
+        [e["event_type"] for e in chain]
+    assert state_machine.project(chain)[RID]["state"] == "go"
+
+
+def test_experiment_go_still_enters_policy_validation(env, capsys):
+    """The discriminator must not disturb experiment routing: an explicit
+    task_kind=experiment request behaves exactly like the legacy default."""
+    root, repo, head, cfg = env
+    policy.write_initial_policy(root)
+    _submit(root, cfg, head, "GO", task_kind="experiment",
+            human_approval_required=False, autonomy=make_autonomy_block())
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    assert rc == 0
+    types = [e["event_type"] for e in events.read_chain(root)]
+    assert types[-2:] == ["POLICY_VALIDATION_REQUIRED", "AUTO_APPROVED"]
+
+
+def test_policy_continue_refuses_source_task(env, capsys):
+    """The manual recovery path must not smuggle a source task into the
+    experiment policy machinery either."""
+    import argparse
+    from tools.autonomy import cli as autonomy_cli
+    root, repo, head, cfg = env
+    _submit(root, cfg, head, "GO", task_kind="source")
+    # consume the GO so state is `go` with the cursor advanced
+    assert claude_watch.main(["--once", "--request-id", RID]) == 0
+    rc = autonomy_cli.cmd_policy_continue(
+        cfg, argparse.Namespace(request_id=RID))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "source task" in err
+    types = [e["event_type"] for e in events.read_chain(root)]
+    assert "POLICY_VALIDATION_REQUIRED" not in types
+
+
 # ------------------------- result-verdict handling (council-protocol-delta)
 
 def _drive_to_result_audit(root, cfg, repo, head):

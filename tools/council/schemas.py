@@ -136,6 +136,15 @@ VERDICT_REQUIRED_FIELDS = (
 # The only test command an audit request may name (never executed here).
 ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q",)
 
+# Continuation kind after AUDIT_GO. "experiment": policy validation ->
+# AUTO_APPROVED/human gate -> bounded runner -> result audit. "source":
+# state REMAINS `go` — the only legal continuation is a commit-bound
+# CHANGE_INTEGRATED recorded by the integration step, never by a watcher.
+# Absent field = "experiment": every pre-existing request keeps its exact
+# behavior. The field sits inside request_payload_hash, so the kind is
+# event-pinned and tamper-evident like every other request field.
+TASK_KINDS = ("experiment", "source")
+
 GENESIS_HASH = "0" * 64
 
 _REQUEST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
@@ -249,12 +258,21 @@ def validate_request(request: dict, repo_roots) -> None:
         raise SchemaViolation("require_clean_tree must be true")
     if request["live_experiment_allowed"] is not False:
         raise SchemaViolation("live_experiment_allowed must be false")
+    task_kind = request.get("task_kind", "experiment")
+    if task_kind not in TASK_KINDS:
+        raise SchemaViolation(
+            f"task_kind {task_kind!r} unknown (allowed: {TASK_KINDS})")
     # human_approval_required may be false ONLY for a policy-eligible
     # sandbox_local experiment carrying a complete autonomy block; the
     # autonomy policy still has final say at POLICY_VALIDATION time.
     if request["human_approval_required"] is not True:
         if request["human_approval_required"] is not False:
             raise SchemaViolation("human_approval_required must be a bool")
+        if task_kind == "source":
+            raise SchemaViolation(
+                "task_kind 'source' has no autonomy/policy path — "
+                "human_approval_required must stay true (the flag is never "
+                "consumed: source GO ends at commit-bound CHANGE_INTEGRATED)")
         validate_autonomy_block(request.get("autonomy"))
     if request["expected_test_command"] not in ALLOWED_TEST_COMMANDS:
         raise SchemaViolation(

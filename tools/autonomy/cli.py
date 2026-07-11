@@ -95,6 +95,11 @@ def cmd_policy_continue(cfg, args) -> int:
             print(f"  - {f}", file=sys.stderr)
         guard.pause(cfg, rid, repo, commit, integrity_failures)
         return 1
+    if request.get("task_kind") == "source":
+        print(f"refused: request {rid!r} is a source task — there is no "
+              "policy path; the continuation from `go` is commit-bound "
+              "CHANGE_INTEGRATED via the integration step", file=sys.stderr)
+        return 1
 
     if state == "go":
         try:

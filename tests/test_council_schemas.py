@@ -153,6 +153,38 @@ def test_valid_request_passes(tmp_path):
     validate_request(_ready_request(repo, head), (repo,))
 
 
+# --------------------------------------------- task_kind (protocol delta)
+
+def test_task_kind_values(tmp_path):
+    repo, head = make_repo(tmp_path)
+    validate_request(_ready_request(repo, head, task_kind="source"), (repo,))
+    validate_request(_ready_request(repo, head, task_kind="experiment"),
+                     (repo,))
+    with pytest.raises(SchemaViolation):
+        validate_request(_ready_request(repo, head, task_kind="wiki"),
+                         (repo,))
+
+
+def test_source_task_kind_refuses_autonomy_gate_bypass(tmp_path):
+    """A source task has no policy path — declaring it autonomous
+    (human_approval_required false) is a contradiction and is refused."""
+    repo, head = make_repo(tmp_path)
+    request = _ready_request(repo, head, task_kind="source",
+                             human_approval_required=False)
+    with pytest.raises(SchemaViolation):
+        validate_request(request, (repo,))
+
+
+def test_task_kind_is_covered_by_payload_hash(tmp_path):
+    """Flipping the kind after publish must invalidate the pinned hash —
+    the discriminator is tamper-evident like every other field."""
+    repo, head = make_repo(tmp_path)
+    request = _ready_request(repo, head, task_kind="source")
+    request["task_kind"] = "experiment"  # hash now stale
+    with pytest.raises(SchemaViolation):
+        validate_request(request, (repo,))
+
+
 # ----------------------------------------------- autonomy block (amendment)
 
 def test_human_gate_false_requires_autonomy_block(tmp_path):

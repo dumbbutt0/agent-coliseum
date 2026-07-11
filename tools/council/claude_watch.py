@@ -11,11 +11,16 @@ verdicts matching the current request, validates them hard, and then:
   AUDIT_BLOCKED           -> print the scoped findings (fixes required), stop.
                              A NEW Claude task decides to append FIX_STARTED —
                              this process never modifies source automatically.
-  AUDIT_GO / _CONDITIONS  -> POLICY_VALIDATION_REQUIRED, evaluate the immutable
-                             autonomy policy: inside policy -> AUTO_APPROVED
-                             (the sandboxed runner may then start it — this
-                             watcher itself NEVER launches experiments);
-                             outside policy -> HUMAN_APPROVAL_REQUIRED, stop.
+  AUDIT_GO / _CONDITIONS  -> experiment tasks: POLICY_VALIDATION_REQUIRED,
+                             evaluate the immutable autonomy policy: inside
+                             policy -> AUTO_APPROVED (the sandboxed runner may
+                             then start it — this watcher itself NEVER
+                             launches experiments); outside policy ->
+                             HUMAN_APPROVAL_REQUIRED, stop.
+                             source tasks (event-pinned task_kind "source"):
+                             append NOTHING — state remains `go`; the only
+                             continuation is commit-bound CHANGE_INTEGRATED
+                             recorded by the integration step.
   RESULT_APPROVED         -> NEXT_MILESTONE_READY (idempotent: skipped if the
                              chain already carries it), stop. The task is
                              complete; selection of the next one belongs to
@@ -153,6 +158,26 @@ def _handle_result_approved(root: str, cfg, event: dict, request: dict,
     print(f"\nRESULT_APPROVED on {rid} at {commit[:12]} — "
           "NEXT_MILESTONE_READY recorded. Task selection belongs to the "
           "builder launcher; this watcher stops here.")
+
+
+def _handle_source_go(event: dict, commit: str) -> None:
+    """Source-task GO (task_kind pinned via the verified request): the
+    experiment policy path does NOT apply. The watcher appends NOTHING —
+    state remains `go`, from which the only legal continuation is a
+    commit-bound CHANGE_INTEGRATED recorded by the integration step
+    (builder launcher or `tools.autonomy.cli integrate`)."""
+    verdict = event["payload"]
+    print(f"\n{event['event_type']} on {event['request_id']} at "
+          f"{commit[:12]} (source task) — summary: {verdict['summary']}")
+    if event["event_type"] == "AUDIT_GO_WITH_CONDITIONS":
+        print("conditions attached — owner review is required before any "
+              "integration:")
+        for cond in verdict.get("conditions", []):
+            print(f"  - {cond}")
+    print("no policy evaluation for source tasks; state remains `go`. "
+          "Integration (fast-forward + CHANGE_INTEGRATED, bound to "
+          f"{commit[:12]}) belongs to the integration step, never to this "
+          "watcher.")
 
 
 def _handle_go(root: str, cfg, event: dict, request: dict, repo: str,
@@ -321,6 +346,10 @@ def main(argv=None) -> int:
                     elif etype == "RESULT_APPROVED":
                         _handle_result_approved(root, cfg, event, request,
                                                 pin_repo, pin_commit)
+                    elif request.get("task_kind") == "source":
+                        # kind is inside the event-pinned payload hash the
+                        # verified request just passed — tamper-evident
+                        _handle_source_go(event, pin_commit)
                     else:
                         _handle_go(root, cfg, event, request, pin_repo,
                                    pin_commit)
