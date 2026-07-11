@@ -20,7 +20,8 @@ from tools.council import events, get_config, locking, state_machine, storage
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    VERDICT_TO_EVENT, RESULT_VERDICT_TO_EVENT,
                                    compute_verdict_payload_hash,
-                                   validate_verdict)
+                                   validate_verdict,
+                                   validate_verdict_event_payload)
 
 SENDER = "codex"
 
@@ -92,6 +93,20 @@ def finalize_incomplete(root: str, cfg) -> list:
         acted = False
         verdict_path = storage.verdict_path(root, rid)
         want = last_verdict["payload"]
+        # AUTHORITY REQUIRES VALIDITY (cycle-5 blocker): recovery may act
+        # only on a terminal event whose nested verdict is fully
+        # schema-valid and bound to this request/commit/event type. A
+        # hash-chained but malformed historical event is NEVER promoted
+        # into artifacts or lock clearance — fail closed, mutate nothing,
+        # and leave migration to the owner.
+        try:
+            validate_verdict_event_payload(last_verdict)
+        except CouncilError as exc:
+            print(f"codex_watch: NOT finalizing {rid} — terminal event "
+                  f"{last_verdict['event_id']} carries an invalid verdict "
+                  f"payload ({exc}); artifacts untouched, owner-led "
+                  "migration required", file=sys.stderr)
+            continue
         try:
             with open(verdict_path, encoding="utf-8") as fh:
                 have = json.load(fh)

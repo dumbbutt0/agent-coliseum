@@ -140,11 +140,10 @@ def test_full_mock_lifecycle_reaches_result_approved(tmp_path):
         assert os.path.exists(os.path.join(run_dir, name))
     assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
 
-    # Codex approves the result (generic record path — the codex_watch
-    # wrapper cannot submit APPROVED, docs/AUTONOMY.md); claude advances.
+    # Codex approves the result (full schema-valid verdict — the append
+    # boundary refuses anything less); claude advances.
     codex_cfg = make_cfg(repo, root, role="codex")
-    append(root, codex_cfg, "RESULT_APPROVED", "codex", RID, repo, head,
-           {"verdict": "APPROVED", "summary": "evidence checks out"})
+    append(root, codex_cfg, "RESULT_APPROVED", "codex", RID, repo, head)
     assert _state(root, RID) == "result_approved"
     append(root, cfg, "NEXT_MILESTONE_READY", "claude", RID, repo, head)
     assert _state(root, RID) == "next_milestone_ready"

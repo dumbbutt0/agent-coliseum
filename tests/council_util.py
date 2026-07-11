@@ -103,8 +103,24 @@ def make_autonomy_block(**overrides) -> dict:
     return block
 
 
+_EVENT_TO_VERDICT = {"AUDIT_BLOCKED": "BLOCKED", "AUDIT_GO": "GO",
+                     "AUDIT_GO_WITH_CONDITIONS": "GO_WITH_CONDITIONS",
+                     "RESULT_APPROVED": "APPROVED",
+                     "RESULT_BLOCKED": "BLOCKED"}
+
+
 def append(root: str, cfg: Config, event_type: str, sender: str,
            request_id: str, repo: str, commit: str, payload=None) -> dict:
+    """Raw append helper. Verdict events must carry a schema-valid nested
+    verdict (append-boundary rule); when a test passes no payload, fill a
+    canonical valid one so drive-style sequences stay terse. Tests probing
+    the boundary itself pass their own (invalid) payloads explicitly."""
+    if not payload and event_type in _EVENT_TO_VERDICT:
+        from tools.council.schemas import compute_verdict_payload_hash
+        payload = make_verdict(commit, request_id,
+                               verdict=_EVENT_TO_VERDICT[event_type])
+        payload["verdict_payload_hash"] = \
+            compute_verdict_payload_hash(payload)
     return events.append_event(root, cfg, event_type, sender, request_id,
                                repo, commit, payload or {})
 

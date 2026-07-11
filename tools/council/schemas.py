@@ -241,6 +241,8 @@ def validate_event(event: dict) -> None:
             f"protocol_version {event['protocol_version']!r} unsupported")
     if not isinstance(event["payload"], dict):
         raise SchemaViolation("event payload must be an object")
+    if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
+        validate_verdict_event_payload(event)
     if compute_event_hash(event) != event["event_hash"]:
         raise ChainError(
             f"event {event.get('event_id')!r}: event_hash does not match "
@@ -393,6 +395,36 @@ RESULT_VERDICT_TO_EVENT = {
     "APPROVED": "RESULT_APPROVED",
     "BLOCKED": "RESULT_BLOCKED",
 }
+
+RESULT_VERDICT_EVENT_TYPES = frozenset(RESULT_VERDICT_TO_EVENT.values())
+VERDICT_PAYLOAD_EVENT_TYPES = \
+    frozenset(VERDICT_TO_EVENT.values()) | RESULT_VERDICT_EVENT_TYPES
+
+
+def validate_verdict_event_payload(event: dict) -> None:
+    """A verdict EVENT must carry a fully schema-valid nested verdict bound
+    to the same request and commit, whose verdict value maps to the event
+    type (launcher audit cycle-5 blocker). Enforced at the append boundary
+    for every new AUDIT_*/RESULT_* verdict event, and re-checked before
+    artifact recovery ever treats a chained payload as authority — a
+    hash-chained but malformed verdict is never promoted into one."""
+    etype = event["event_type"]
+    result_kind = etype in RESULT_VERDICT_EVENT_TYPES
+    verdict = event["payload"]
+    validate_verdict(verdict, result_audit=result_kind)
+    if verdict["request_id"] != event["request_id"]:
+        raise SchemaViolation(
+            "nested verdict request_id differs from the event's request_id")
+    if verdict["audited_commit"] != event["target_commit"]:
+        raise SchemaViolation(
+            f"nested verdict audited_commit "
+            f"{verdict['audited_commit'][:12]} differs from the event's "
+            f"target_commit {event['target_commit'][:12]}")
+    table = RESULT_VERDICT_TO_EVENT if result_kind else VERDICT_TO_EVENT
+    if table[verdict["verdict"]] != etype:
+        raise SchemaViolation(
+            f"verdict value {verdict['verdict']!r} does not map to event "
+            f"type {etype!r}")
 
 
 def protocol_version() -> str:

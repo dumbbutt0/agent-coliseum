@@ -8,7 +8,7 @@ from tests.council_util import (append, drive_to_claimed, make_autonomy_block,
                                 make_cfg, make_repo, make_root, make_verdict)
 from tools.council import claude_watch, codex_watch, events, locking, policy, \
     storage
-from tools.council.schemas import (CouncilError, LockHeld,
+from tools.council.schemas import (CouncilError, LockHeld, SchemaViolation,
                                    compute_verdict_payload_hash)
 
 RID = "watch-req-001"
@@ -117,32 +117,52 @@ def test_other_requests_verdicts_are_ignored(env, capsys):
     assert "POLICY_VALIDATION_REQUIRED" not in types
 
 
-def test_invalid_verdict_payload_rejected_and_logged(env, capsys):
+def test_append_boundary_refuses_malformed_verdict_events(env):
+    """launcher cycle-5 blocker: verdict EVENTS must carry a fully valid
+    nested verdict — a malformed one never enters the chain at all."""
     root, repo, head, cfg = env
     ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
-    # forge a GO event whose payload is NOT a valid verdict (raw append,
-    # bypassing codex_watch validation)
-    append(root, cfg, "AUDIT_GO", "codex", RID, repo, head,
-           {"verdict": "GO", "note": "missing everything"})
+    length = len(events.read_chain(root))
+    from tools.council.schemas import compute_verdict_payload_hash
+    cases = [
+        {"verdict": "GO", "note": "missing everything"},   # missing fields
+        _signed("c" * 40),                                 # commit mismatch
+        _signed(head, request_id="watch-req-other"),       # nested rid off
+        _signed(head, verdict="APPROVED"),                 # result vocab on
+                                                           # a source event
+    ]
+    stale = _signed(head)
+    stale["summary"] = "silently edited"                   # hash now stale
+    cases.append(stale)
+    mismatch = make_verdict(head, RID, verdict="BLOCKED")  # valid verdict,
+    mismatch["verdict_payload_hash"] = \
+        compute_verdict_payload_hash(mismatch)             # wrong event type
+    cases.append(mismatch)
+    for payload in cases:
+        with pytest.raises(CouncilError):
+            append(root, cfg, "AUDIT_GO", "codex", RID, repo, head, payload)
+    assert len(events.read_chain(root)) == length  # nothing entered
     locking.release(ctx["lock"])
-    rc = claude_watch.main(["--once", "--request-id", RID])
-    err = capsys.readouterr().err
-    assert rc == 0
-    assert "invalid verdict ignored" in err
-    assert events.read_chain(root)[-1]["event_type"] == "WATCHER_ERROR"
 
 
-def test_wrong_audited_commit_rejected(env, capsys):
+def test_append_boundary_refuses_malformed_result_verdict_events(env):
     root, repo, head, cfg = env
-    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
-    verdict = _signed("c" * 40)  # audited a different commit
-    append(root, cfg, "AUDIT_GO", "codex", RID, repo, head, verdict)
-    locking.release(ctx["lock"])
-    rc = claude_watch.main(["--once", "--request-id", RID])
-    err = capsys.readouterr().err
-    assert rc == 0
-    assert "invalid verdict ignored" in err
-    assert events.read_chain(root)[-1]["event_type"] == "WATCHER_ERROR"
+    _submit(root, cfg, head, "GO")
+    assert claude_watch.main(["--once", "--request-id", RID]) == 0
+    append(root, cfg, "EXPERIMENT_APPROVED", "human", RID, repo, head,
+           {"approved_by": "human"})
+    append(root, cfg, "EXPERIMENT_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_COMPLETE", "claude", RID, repo, head)
+    append(root, cfg, "RESULT_VALIDATION_REQUIRED", "claude", RID, repo,
+           head)
+    append(root, cfg, "RESULT_AUDIT_REQUESTED", "claude", RID, repo, head)
+    length = len(events.read_chain(root))
+    for payload in ({"verdict": "APPROVED"},               # missing fields
+                    _signed(head, verdict="GO")):          # source vocab on
+        with pytest.raises(CouncilError):                  # a result event
+            append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
+                   payload)
+    assert len(events.read_chain(root)) == length
 
 
 def test_validate_rejects_unclaimed_and_wrong_sender(env):
@@ -235,6 +255,47 @@ def test_cli_go_and_result_submissions_release_lock(env, tmp_path):
     chain = events.read_chain(root)
     assert state_machine.project(chain)[RID]["state"] == "result_approved"
     assert codex_watch.main(["--submit", str(rfile), "--result-audit"]) == 1
+
+
+# ---- recovery authority requires validity (launcher cycle 5 blocker)
+
+def test_recovery_never_promotes_invalid_historical_verdict(env, capsys):
+    """A hash-chained but schema-invalid terminal event (legacy-style —
+    the append boundary refuses new ones) must NEVER be promoted into
+    verdict artifacts or lock clearance: recovery fails closed with zero
+    mutations and reports the integrity failure for owner-led migration."""
+    root, repo, head, cfg = env
+    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
+    from tools.council.schemas import canonical_json, compute_event_hash
+    chain = events.read_chain(root)
+    event = {
+        "protocol_version": "1.0",
+        "event_id": f"{len(chain) + 1:06d}-deadbeef",
+        "event_type": "AUDIT_GO",
+        "request_id": RID,
+        "sender": "codex",
+        "timestamp_utc": storage.utc_now(),
+        "repository": repo,
+        "target_commit": head,
+        "payload": {"verdict": "GO", "invalid": True},
+        "previous_event_hash": chain[-1]["event_hash"],
+    }
+    event["event_hash"] = compute_event_hash(event)
+    storage.append_line(storage.events_path(root), canonical_json(event))
+    assert events.verify_chain(root).ok  # chained — i.e. "legacy-valid"
+    codex_cfg = make_cfg(repo, root, role="codex")
+    length = len(events.read_chain(root))
+    healed = codex_watch.finalize_incomplete(root, codex_cfg)
+    err = capsys.readouterr().err
+    assert RID not in healed
+    assert "invalid verdict payload" in err
+    assert "owner-led migration" in err
+    # ZERO mutations: claimed file, lock, verdict json, chain untouched
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert locking.read_lock(root, RID) is not None
+    assert not os.path.exists(storage.verdict_path(root, RID))
+    assert len(events.read_chain(root)) == length
+    locking.release(ctx["lock"])
 
 
 # ------- post-event finalization is idempotent (launcher cycle 4 blocker)
@@ -707,14 +768,19 @@ def test_emergency_stop_stops_watcher(env, capsys):
     assert events.read_chain(root)[-1]["event_type"] == "AUTONOMY_PAUSED"
 
 
-def test_three_consecutive_errors_pause_autonomy(env, capsys):
+def test_three_consecutive_errors_pause_autonomy(env, capsys, monkeypatch):
+    """The append boundary now refuses malformed verdicts outright, so the
+    watcher's consecutive-error machinery is exercised by forcing its own
+    validation layer (defense in depth for legacy chains) to reject three
+    otherwise-valid verdicts."""
     root, repo, head, cfg = env
     for i in range(1, 4):
-        rid = f"watch-req-bad-{i}"
-        ctx = drive_to_claimed(root, cfg, repo, head, request_id=rid)
-        append(root, cfg, "AUDIT_GO", "codex", rid, repo, head,
-               {"verdict": "GO", "invalid": True})
-        locking.release(ctx["lock"])
+        _submit(root, cfg, head, "GO", rid=f"watch-req-bad-{i}")
+
+    def refuse(*_a, **_k):
+        raise SchemaViolation("forced validation failure (legacy-chain "
+                              "defense-in-depth probe)")
+    monkeypatch.setattr(claude_watch, "_validate_verdict_event", refuse)
     rc = claude_watch.main(["--once"])
     assert rc == 1
     chain = events.read_chain(root)
