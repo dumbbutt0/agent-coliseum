@@ -1,12 +1,14 @@
 {
   "checks": {
     "crontab": "no coliseum entries",
-    "systemctl_unit_files": "(none)",
-    "systemctl_units": "(none)"
+    "system_unit_files": "(none)",
+    "system_units": "(none)",
+    "user_unit_files": "(none)",
+    "user_units": "(none)"
   },
-  "commit": "0abe32051f1196aa58a4738ad40788c762314c6e",
+  "commit": "ec85c8f5acdbe1f3af7433cc7cb0cc1594a7b21c",
   "gate": "gate4-noservice",
-  "generated_utc": "2026-07-11T21:28:23Z",
-  "note": "no coliseum service or cron entry exists before activation",
+  "generated_utc": "2026-07-11T21:57:57Z",
+  "note": "no coliseum unit/unit-file/cron on the system manager, the user manager, or cron before activation; probes fail closed when a manager is unreachable",
   "ok": true
 }

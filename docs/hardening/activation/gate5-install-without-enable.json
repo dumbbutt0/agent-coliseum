@@ -1,14 +1,15 @@
 {
   "checks": {
+    "confirmed_disabled": true,
     "deployment_mode": "user-service (systemctl --user)",
-    "enabled": false,
     "installed_at_user_dir": false,
+    "is_enabled_state": "not-installed",
     "unit_in_repo": true,
     "unit_sha256": "0e6a90260e4eb3457fdb9b08fdea6501c414f1a185beea562a22b6b200f5c313"
   },
-  "commit": "0abe32051f1196aa58a4738ad40788c762314c6e",
+  "commit": "ec85c8f5acdbe1f3af7433cc7cb0cc1594a7b21c",
   "gate": "gate5-install-without-enable",
-  "generated_utc": "2026-07-11T21:43:55Z",
+  "generated_utc": "2026-07-11T21:56:37Z",
   "note": "install is owner-attended; USER-mode manager (systemctl --user) per the ratified deployment model \u2014 the gate verifies the unit exists in-repo and is NOT enabled",
   "ok": true,
   "owner_attended": true,

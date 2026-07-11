@@ -1,7 +1,7 @@
 {
-  "commit": "0abe32051f1196aa58a4738ad40788c762314c6e",
+  "commit": "ec85c8f5acdbe1f3af7433cc7cb0cc1594a7b21c",
   "gate": "gate7-owner-enable",
-  "generated_utc": "2026-07-11T21:43:55Z",
+  "generated_utc": "2026-07-11T21:56:37Z",
   "note": "owner enables ONLY the codex launcher (USER-mode manager per the ratified deployment model); builder/experiment/society automation stay disabled and need their own audits",
   "ok": false,
   "owner_attended": true,

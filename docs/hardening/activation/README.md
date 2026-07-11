@@ -2,18 +2,23 @@
 
 Produced by `scripts/council_staging.py` (hardening directive item 15).
 Each JSON artifact records one ordered activation gate. Gates 1–4 are
-automated and ran green; gates 5–7 are OWNER-ATTENDED (sudo / live review /
-enablement) and their artifacts carry the exact commands.
+automated and ran green; gates 5–7 are OWNER-ATTENDED (install / live
+review / enablement) and their artifacts carry the exact commands.
+
+DEPLOYMENT MODEL (owner-ratified 2026-07-11, H7 condition 2): **USER
+service** — the unit installs at `~/.config/systemd/user/` and every
+activation command uses `systemctl --user` (+ `loginctl enable-linger`).
+No sudo and no `/etc/systemd/system` anywhere on the activation surface.
 
 | gate | what it proves | mode |
 |------|----------------|------|
 | 1 `gate1-suite` | full test suite green at the isolated commit | automated |
 | 2 `gate2-e2e` | fake-Codex end-to-end on a fresh staging council through the REAL `codex_launcher`/`codex_watch`/`runner`: source round → GO; auto-approved mock experiment → REAL evidence manifest → result round → APPROVED. No human token anywhere. | automated |
 | 3 `gate3-drills` | torn-tail detection + append refusal on a scratch COPY of the live chain; STOP-mid-claim rollback; kill-between-journal-steps recovery (both directions, idempotent) | automated |
-| 4 `gate4-noservice` | no coliseum systemd unit or cron entry exists anywhere before activation | automated |
-| 5 `gate5-install-without-enable` | unit exists in-repo, NOT enabled; exact `sudo cp` install commands (install ≠ enable) | owner |
+| 4 `gate4-noservice` | no coliseum systemd unit, unit-file, or cron entry exists on EITHER manager (system AND `--user`) before activation | automated (native host) |
+| 5 `gate5-install-without-enable` | unit exists in-repo, NOT enabled on the user manager; user-mode install commands (`mkdir -p ~/.config/systemd/user` + `cp` + `systemctl --user daemon-reload`; install ≠ enable) | owner |
 | 6 `gate6-owner-foreground-review` | owner runs ONE foreground `--once` pass on live and reviews it | owner |
-| 7 `gate7-owner-enable` | owner enables ONLY the codex launcher | owner |
+| 7 `gate7-owner-enable` | owner enables ONLY the codex launcher via `systemctl --user enable --now` | owner |
 
 Notes:
 
@@ -21,7 +26,10 @@ Notes:
   the artifacts themselves are part of the audited commit, so their hash
   cannot appear inside them). Re-running
   `PYTHONPATH=. python3 scripts/council_staging.py` at the audited commit
-  reproduces every automated gate.
+  reproduces every automated gate. Gate 4 needs a NATIVE host with working
+  systemd bus access (system and user managers) — inside a sandbox its
+  probes report `unavailable` and the gate fails closed by design; the
+  committed `gate4-noservice-native-recheck.json` is the native evidence.
 - The staging harness NEVER writes to the live council: gate 3 copies the
   live chain into scratch; gates 2/3 bootstrap fresh staging councils whose
   identity anchors live only under the scratch dir (the live root-owned

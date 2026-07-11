@@ -405,29 +405,61 @@ def gate3_drills(out_dir: str, scratch: str, live_root: str) -> bool:
 # ------------------------------------------------------------------- gate 4
 
 def gate4_noservice(out_dir: str, scratch: str, live_root: str) -> bool:
+    """No-service check across BOTH systemd managers (the ratified
+    deployment is the USER service, so `systemctl --user` must be probed
+    too) plus cron. FAIL-CLOSED: a probe that errors (no bus access, e.g.
+    inside a sandbox) reports `unavailable: ...` and the gate fails — only
+    a genuine empty result from a working manager counts as clean. Run
+    natively on the intended host."""
     def run(cmd):
         try:
             p = subprocess.run(cmd, capture_output=True, text=True,
                                timeout=30)
-            return p.returncode, (p.stdout + p.stderr).strip()
+            out = p.stdout.strip()
+            err = p.stderr.strip()
+            if p.returncode == 0:
+                return True, out
+            if p.returncode == 1 and not out and not err:
+                # systemctl's documented empty-filter answer: list-unit-files
+                # exits 1 with NO output when nothing matches — a genuine
+                # clean result, not a bus failure
+                return True, ""
+            return False, f"unavailable: rc={p.returncode} " \
+                          f"{(out + ' ' + err).strip()[:200]}"
         except Exception as exc:
-            return -1, f"unavailable: {exc}"
+            return False, f"unavailable: {exc}"
 
-    rc_units, units = run(["systemctl", "list-units", "--all", "--plain",
-                           "--no-legend", "*coliseum*"])
-    rc_files, unit_files = run(["systemctl", "list-unit-files", "--no-legend",
-                                "*coliseum*"])
-    rc_cron, cron = run(["crontab", "-l"])
-    no_units = units.strip() == ""
-    no_files = unit_files.strip() == ""
-    no_cron = rc_cron != 0 or "coliseum" not in cron
-    ok = no_units and no_files and no_cron
+    checks = {}
+    clean = []
+    for label, cmd in (
+            ("system_units", ["systemctl", "list-units", "--all", "--plain",
+                              "--no-legend", "*coliseum*"]),
+            ("system_unit_files", ["systemctl", "list-unit-files",
+                                   "--no-legend", "*coliseum*"]),
+            ("user_units", ["systemctl", "--user", "list-units", "--all",
+                            "--plain", "--no-legend", "*coliseum*"]),
+            ("user_unit_files", ["systemctl", "--user", "list-unit-files",
+                                 "--no-legend", "*coliseum*"])):
+        ok_probe, out = run(cmd)
+        checks[label] = out or "(none)"
+        clean.append(ok_probe and out == "")
+    # crontab: rc!=0 with "no crontab" is a genuine empty answer
+    try:
+        p = subprocess.run(["crontab", "-l"], capture_output=True, text=True,
+                           timeout=30)
+        cron_out = (p.stdout + p.stderr).strip()
+        no_cron = ("coliseum" not in cron_out) and (
+            p.returncode == 0 or "no crontab" in cron_out.lower())
+        checks["crontab"] = "no coliseum entries" if no_cron else cron_out
+    except Exception as exc:
+        no_cron = False
+        checks["crontab"] = f"unavailable: {exc}"
+    ok = all(clean) and no_cron
     _artifact(out_dir, "gate4-noservice", {
-        "ok": ok,
-        "checks": {"systemctl_units": units or "(none)",
-                   "systemctl_unit_files": unit_files or "(none)",
-                   "crontab": "no coliseum entries" if no_cron else cron},
-        "note": "no coliseum service or cron entry exists before activation"})
+        "ok": ok, "checks": checks,
+        "note": ("no coliseum unit/unit-file/cron on the system manager, "
+                 "the user manager, or cron before activation; probes fail "
+                 "closed when a manager is unreachable")})
     return ok
 
 
@@ -443,18 +475,31 @@ def gate5_install_status(out_dir: str, scratch: str, live_root: str) -> bool:
     `systemctl --user` — matching the shipped unit's own header. No sudo
     anywhere in the runbook."""
     installed = os.path.exists(os.path.join(_user_unit_dir(), UNIT_NAME))
-    enabled = False
+    # FAIL-CLOSED enabled detection: when the unit is installed, the gate
+    # passes ONLY if `is-enabled` genuinely prints `disabled`. Any other
+    # state — enabled, enabled-runtime, linked, static, masked, or an
+    # unreachable manager — is treated as NOT-disabled and fails the gate
+    # (a plain `state == "enabled"` check let enabled-runtime slip through).
+    enabled_state = "not-installed"
     if installed:
-        p = subprocess.run(["systemctl", "--user", "is-enabled", UNIT_NAME],
-                           capture_output=True, text=True)
-        enabled = p.stdout.strip() == "enabled"
-    ok = os.path.exists(UNIT_SRC) and not enabled
+        try:
+            p = subprocess.run(["systemctl", "--user", "is-enabled",
+                                UNIT_NAME], capture_output=True, text=True,
+                               timeout=30)
+            enabled_state = (p.stdout.strip() or p.stderr.strip()
+                             or f"unavailable: rc={p.returncode}")
+        except Exception as exc:
+            enabled_state = f"unavailable: {exc}"
+    confirmed_disabled = (not installed) or enabled_state == "disabled"
+    ok = os.path.exists(UNIT_SRC) and confirmed_disabled
     _artifact(out_dir, "gate5-install-without-enable", {
         "ok": ok, "owner_attended": True,
         "checks": {"unit_in_repo": os.path.exists(UNIT_SRC),
                    "unit_sha256": _sha256(UNIT_SRC) if os.path.exists(
                        UNIT_SRC) else None,
-                   "installed_at_user_dir": installed, "enabled": enabled,
+                   "installed_at_user_dir": installed,
+                   "is_enabled_state": enabled_state,
+                   "confirmed_disabled": confirmed_disabled,
                    "deployment_mode": "user-service (systemctl --user)"},
         "owner_commands": [
             f"mkdir -p {_user_unit_dir()}",
