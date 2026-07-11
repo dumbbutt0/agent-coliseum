@@ -1,6 +1,9 @@
 # First Gladiator gap analysis — repository vs exit criteria
 
-Wiki twin: `Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-GAP-ANALYSIS.md`.
+CANONICALITY: this repo document is canonical.
+`Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-GAP-ANALYSIS.md` is
+a COMPANION navigation artifact (NOT a byte mirror) that must agree in
+substance and point here.
 A capability is NOT complete merely because a partial implementation exists.
 Rows flip to CLOSED with evidence links as milestones integrate.
 RR = research risk, ER = engineering risk.

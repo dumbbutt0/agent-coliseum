@@ -1,13 +1,20 @@
 # First Gladiator roadmap — canonical M0–M15
 
 Machine twin: `configs/autonomy-roadmap.yaml` (validated, milestone
-`first-gladiator`, 15 tasks, hash `501e470bc8dcc9b6…`). **The Markdown and
-YAML must agree exactly; divergence is a defect.** The twin ACTIVATES at
-SC-4 (owner roadmap transition — until then the live roadmap at
+`first-gladiator`, 15 tasks, hash `501e470bc8dcc9b6…`). **This Markdown
+and that YAML must agree MILESTONE-FOR-MILESTONE (every stated control
+machine-encoded); the YAML and its wiki copy
+`Claude-Wiki/03_wiki/projects/coliseum/autonomy-roadmap-first-gladiator.yaml`
+must be BYTE-IDENTICAL.** The twin ACTIVATES at SC-4 (owner roadmap
+transition — until then the live roadmap at
 `Claude-Wiki/coliseum/autonomy-roadmap.yaml`, milestone `society-substrate`,
 remains what the tools read; the default-path pointer changes only with the
-owner's SC-4 decision). Wiki twin of this document:
-`Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-ROADMAP.md`.
+owner's SC-4 decision).
+
+CANONICALITY: this repo document is canonical.
+`Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-ROADMAP.md` is a
+COMPANION navigation artifact (frontmatter, different prose; NOT a byte
+mirror) — it must agree in substance and point here.
 
 ## Per-milestone law
 

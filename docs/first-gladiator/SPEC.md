@@ -1,11 +1,16 @@
 # First Gladiator Phase — canonical specification
 
 **Status: DRAFT pending owner sign-off (SC-3). Binding once signed.**
-Wiki twin: `Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-VISION.md`
-(provenance-marked). After SC-3 this repo copy is canonical; the wiki mirrors.
-Companion docs: `ROADMAP.md` (M0–M15 + verification contract),
-`GAP-ANALYSIS.md` (16 gaps), `configs/autonomy-roadmap.yaml` (machine twin,
-activates at SC-4).
+
+CANONICALITY MAP (what must match what): THIS repo document is canonical.
+`Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-VISION.md` is a
+COMPANION navigation artifact (frontmatter + per-statement provenance
+marks; deliberately a different document, NOT a byte mirror) — it must
+AGREE IN SUBSTANCE and point here, nothing more. The only byte-exact pair
+in the package is `configs/autonomy-roadmap.yaml` ↔ its wiki copy
+`.../autonomy-roadmap-first-gladiator.yaml`. Sibling canonical docs:
+`ROADMAP.md` (M0–M15 + verification contract; must agree
+milestone-for-milestone with the YAML), `GAP-ANALYSIS.md` (16 gaps).
 
 ## 1. Phase definitions
 
