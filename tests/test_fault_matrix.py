@@ -253,6 +253,30 @@ def test_acquire_cleans_up_partial_lock_on_write_failure(tmp_path, monkeypatch):
     assert locking.read_lock(root, "lk-partial") is None   # no stranded lock
 
 
+def test_acquire_fsync_is_best_effort(tmp_path, monkeypatch):
+    """Narrowed contract (H6 cycle-2): the body write is what makes a lock
+    complete; the fsync is BEST-EFFORT (the council root is drvfs, where
+    fsync can legitimately fail). An fsync error after a successful write
+    leaves a COMPLETE, token-bearing, releasable lock — it is NOT unlinked,
+    because dropping a fully-written lock a caller believes it holds would be
+    wrong. Only a WRITE failure (tested above) triggers cleanup."""
+    root = make_root(tmp_path)
+    real_fsync = os.fsync
+
+    def boom(fd):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(os, "fsync", boom)
+    lock = locking.acquire(root, "lk-fsync", "codex", "lk-fsync-rid",
+                           kind="claim")
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    holder = locking.read_lock(root, "lk-fsync")
+    assert holder is not None
+    assert holder["owner_token"] == lock.owner_token       # complete + usable
+    locking.release(lock)
+    assert locking.read_lock(root, "lk-fsync") is None      # and releasable
+
+
 def test_injector_global_index(tmp_path):
     """fail_global(k) fires at the kth boundary across ALL ops, and the
     trace is a faithful ordered record used to drive the matrix."""

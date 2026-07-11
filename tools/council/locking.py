@@ -60,10 +60,19 @@ def acquire(root: str, name: str, role: str, request_id: str,
 
 def _create_lock(root: str, name: str, path: str, body: str) -> None:
     """The single durable lock-create boundary (H6 completeness fix): O_EXCL
-    create then write the whole body. CRASH-SAFE: if the write/fsync fails
-    after the create, unlink the partial (tokenless) file so no lock is
-    stranded that compare-and-delete could never remove. O_EXCL guarantees
-    we only ever unlink a lock WE just created — never another holder's."""
+    create then write the whole body.
+
+    CONTRACT (H6 cycle-2, explicitly narrowed): if the BODY WRITE fails after
+    the create, the on-disk lock is partial/tokenless — we unlink it before
+    re-raising so no lock is stranded that compare-and-delete could never
+    remove. The subsequent fsync is BEST-EFFORT, consistent with the
+    codebase-wide `_fsync_quietly` policy (the council root lives on drvfs,
+    where fsync can legitimately fail): once the body write has returned, the
+    lock file is COMPLETE and carries its owner_token, so it is a valid,
+    releasable lock even if the durability barrier could not be issued —
+    unlinking a fully-written lock on an fsync error would wrongly drop a
+    lock a caller believes it holds. O_EXCL guarantees we only ever unlink a
+    lock WE just created — never another holder's."""
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -71,12 +80,9 @@ def _create_lock(root: str, name: str, path: str, body: str) -> None:
         raise LockHeld(f"lock {name!r} already held: {holder}")
     try:
         os.write(fd, (body + "\n").encode("utf-8"))
-        try:
-            os.fsync(fd)
-        except OSError:
-            pass
     except BaseException:
-        # partial create: remove the half-written lock before re-raising
+        # the body is not fully written: remove the partial lock before
+        # re-raising so compare-and-delete never faces a tokenless lock
         try:
             os.close(fd)
         except OSError:
@@ -86,8 +92,11 @@ def _create_lock(root: str, name: str, path: str, body: str) -> None:
         except OSError:
             pass
         raise
-    else:
-        os.close(fd)
+    try:
+        os.fsync(fd)              # best-effort durability (drvfs-tolerant)
+    except OSError:
+        pass
+    os.close(fd)
 
 
 def _write_lock_excl(path: str, body: dict) -> bool:
