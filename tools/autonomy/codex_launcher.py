@@ -292,17 +292,32 @@ def _stale_lock_gate(cfg, root: str, rid: str, repo: str, commit: str,
     holder = locking.read_lock(root, rid)
     if holder is None:
         return True
-    try:
-        age = time.time() - os.path.getmtime(storage.lock_path(root, rid))
-    except OSError:
-        age = None
-    if age is not None and age < audit_timeout:
-        print(f"codex_launcher: {rid} is claimed and its lock is "
-              f"{age:.0f}s old (< {audit_timeout:.0f}s audit bound) — a "
-              "session may still be running; waiting")
+    # H5 lease locks: prefer the recorded lease_expires_utc; fall back to
+    # mtime age for legacy locks written before leases
+    expired = None
+    lease = holder.get("lease_expires_utc") if isinstance(holder, dict) \
+        else None
+    if lease:
+        import datetime
+        try:
+            exp = datetime.datetime.strptime(
+                lease[:-1], "%Y-%m-%dT%H:%M:%S.%f").replace(
+                    tzinfo=datetime.timezone.utc)
+            expired = datetime.datetime.now(datetime.timezone.utc) > exp
+        except ValueError:
+            expired = None
+    if expired is None:
+        try:
+            age = time.time() - os.path.getmtime(storage.lock_path(root, rid))
+            expired = age >= audit_timeout
+        except OSError:
+            expired = False
+    if not expired:
+        print(f"codex_launcher: {rid} is claimed and its lease has not "
+              "expired — a session may still be running; waiting")
         return False
     _clear_stale_claim_lock(cfg, root, rid, repo, commit,
-                            "claim lock outlived the audit timeout")
+                            "claim lock lease expired")
     return True
 
 

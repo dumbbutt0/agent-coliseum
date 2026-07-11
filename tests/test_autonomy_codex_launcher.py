@@ -361,10 +361,13 @@ def test_resume_waits_for_young_foreign_lock(env, tmp_path, monkeypatch):
     assert not os.path.exists(marker)  # waited: no launch
     assert locking.read_lock(root, RID) is not None
     assert _failure_events(root) == []
-    # the lock outlives the audit bound -> logged clearance + resume
+    # the lease expires (H5) -> logged clearance + resume
+    import json as _json
     lock_file = storage.lock_path(root, RID)
-    old = os.path.getmtime(lock_file) - 4000
-    os.utime(lock_file, (old, old))
+    holder = _json.load(open(lock_file))
+    holder["lease_expires_utc"] = "2000-01-01T00:00:00.000Z"  # long past
+    with open(lock_file, "w") as fh:
+        _json.dump(holder, fh)
     assert codex_launcher.main(["--once"]) == 0
     assert os.path.exists(marker)
     assert _state(root) == "go"

@@ -275,6 +275,31 @@ fails closed in guard preflight. Absent file = no constraint (not yet
 provisioned). `cli checkpoint-status` prints the JSON to sudo-install.
 `policy.milestone_status` now also requires the explicit codex signature.
 
+## Crash-safe transactions + lease locks (hardening H5)
+
+Multi-step council operations that would be inconsistent if interrupted
+mid-way now run under a JOURNAL (`council/txn/<txn_id>.json`, `txn.v1`;
+item 6). The journal records the ordered steps, which have completed, and
+the compensation data. `txn.recover(root, cfg)` — run at codex_watch
+startup and the launcher loop top — scans the journal, and for each
+interrupted transaction consults the AUTHORITATIVE event chain: it rolls
+FORWARD when the terminal event landed and BACK when it did not, and it is
+idempotent (a second recovery is a no-op). The claim path is the first
+adopter: `codex_watch.claim` runs `[locked → moved → event]`, and a STOP
+engaged before the `AUDIT_CLAIMED` append compensates — the request moves
+back to `ready/` and the lock is released, leaving no stranded lock and no
+half-moved request.
+
+Locks are now leases (item 7). A `lock.v1` body carries an `owner_token`
+(`secrets.token_hex`), a `lease_expires_utc`, and a `kind`. `release()`
+and `renew()` are COMPARE-AND-DELETE on the token: the holder is read, the
+token verified, and only then is the lock removed (rename-then-unlink, a
+drvfs-safe commit point) or extended. A wrong or absent token is a no-op,
+so a reused PID cannot steal a live lock — authority is the random token,
+not the pid. Expiry only makes a lock ELIGIBLE for the existing logged
+clearance paths (`cli clear-lock`, the launcher stale-gate, which now reads
+`lease_expires_utc` instead of file mtime) — never a silent steal.
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

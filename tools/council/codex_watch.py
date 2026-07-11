@@ -36,21 +36,42 @@ def list_ready(root: str) -> list:
 
 
 def claim(root: str, cfg, request_id: str) -> dict:
-    """Atomic: O_EXCL lock -> move ready/ -> claimed/ -> AUDIT_CLAIMED.
-    A second claimant dies on the lock, never on a half-moved file."""
+    """Crash-safe (H5): O_EXCL lock -> move ready/ -> claimed/ ->
+    AUDIT_CLAIMED, under a transaction journal. If the terminal append is
+    refused (STOP mid-claim) or the process dies, txn.recover rolls the
+    move back and releases the lock — never a stranded lock or a
+    half-moved request without its event. A second claimant dies on the
+    lock, never on a half-moved file."""
+    from tools.council import txn
+    txn.recover(root, cfg)  # finish any interrupted claim first
     ready_path = storage.safe_request_path(root, "ready", request_id)
     claimed_path = storage.safe_request_path(root, "claimed", request_id)
     if not os.path.exists(ready_path):
         raise SchemaViolation(f"request {request_id!r} is not in ready/")
-    lock = locking.acquire(root, request_id, SENDER, request_id)
-    with open(ready_path, "rb") as fh:
-        request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
-    os.rename(ready_path, claimed_path)
-    return events.append_event(
-        root, cfg, "AUDIT_CLAIMED", SENDER, request_id,
-        request["repository"], request["target_commit"],
-        {"claimed_by": SENDER, "lock_file": f"locks/{request_id}.lock",
-         "lock_holder": locking.read_lock(root, request_id)}), lock
+    lock = locking.acquire(root, request_id, SENDER, request_id,
+                           kind="claim")
+    t = txn.Txn.begin(root, "claim", request_id,
+                      steps=["locked", "moved", "event"],
+                      data={"owner_token": lock.owner_token})
+    try:
+        t.mark("locked")
+        with open(ready_path, "rb") as fh:
+            request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
+        os.rename(ready_path, claimed_path)
+        t.mark("moved")
+        event = events.append_event(
+            root, cfg, "AUDIT_CLAIMED", SENDER, request_id,
+            request["repository"], request["target_commit"],
+            {"claimed_by": SENDER, "lock_file": f"locks/{request_id}.lock",
+             "lock_holder": locking.read_lock(root, request_id)})
+        t.mark("event")
+        t.complete()
+        return event, lock
+    except CouncilError:
+        # STOP mid-claim (or any refusal): roll back the move + lock so
+        # nothing is stranded, then re-raise
+        txn.recover(root, cfg)
+        raise
 
 
 # The states a request occupies AFTER a terminal verdict for its current
@@ -277,11 +298,14 @@ def main(argv=None) -> int:
     storage.ensure_layout(root)
 
     try:
+        from tools.council import txn
+        for txn_id, outcome in txn.recover(root, cfg):
+            print(f"codex_watch: recovered transaction {txn_id} ({outcome})")
         for rid in finalize_incomplete(root, cfg):
             print(f"codex_watch: finalized incomplete verdict artifacts "
                   f"for {rid}")
     except CouncilError as exc:
-        print(f"codex_watch: startup finalization skipped — {exc}",
+        print(f"codex_watch: startup recovery skipped — {exc}",
               file=sys.stderr)
 
     try:
