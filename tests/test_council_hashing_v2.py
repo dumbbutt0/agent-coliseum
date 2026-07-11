@@ -124,6 +124,31 @@ def test_unsupported_version_event_fails_verify_chain(env):
         compute_event_hash(ev)
 
 
+@pytest.mark.parametrize("falsy", ["", None, False, 0])
+def test_explicit_falsy_version_fails_closed(env, falsy):
+    """Cycle-3 blocker: an explicit empty/null/false/0 protocol_version
+    must NOT coerce to legacy 1.0 — it is a present, unsupported value and
+    fails verify_chain/read_chain closed."""
+    root, repo, head, cfg = env
+    from tools.council.schemas import (canonical_json, payload_hash,
+                                       ChainError)
+    from tools.council import storage
+    append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+    chain = events.read_chain(root)
+    seq = len(chain) + 1
+    ev = {"protocol_version": falsy, "event_id": f"{seq:06d}-falsy000",
+          "event_type": "BUILD_READY", "request_id": RID, "sender": "claude",
+          "timestamp_utc": storage.utc_now(), "repository": repo,
+          "target_commit": head, "payload": {},
+          "previous_event_hash": chain[-1]["event_hash"]}
+    ev["event_hash"] = payload_hash(  # legacy bare hash, as the probe did
+        {k: v for k, v in ev.items() if k != "event_hash"})
+    storage.append_line(storage.events_path(root), canonical_json(ev))
+    assert not events.verify_chain(root).ok
+    with pytest.raises(ChainError):
+        events.read_chain(root)
+
+
 def test_v2_verdict_domain_is_unambiguous():
     """Cycle-2 blocker 1: a known schema_version drives the v2 domain; an
     unknown one raises; absent = legacy bare hash (no silent fallback)."""

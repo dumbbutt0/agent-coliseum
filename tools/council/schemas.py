@@ -238,9 +238,18 @@ VALIDATION_REPORT_DOMAIN = "council:validation-report:v1"
 CONTROL_DOMAIN = "council:control:v1"
 
 
+_VERSION_ABSENT = object()
+
+
 def _obj_version(obj: dict, field: str = "protocol_version") -> str:
-    """The declared version of an event/object; absent = legacy 1.0."""
-    return obj.get(field) or "1.0"
+    """The declared version of an event/object. Cycle-2 blocker: only a
+    TRULY ABSENT field defaults to legacy 1.0; a PRESENT value (even
+    '', None, False, 0) is returned as-is so the dispatch can reject it —
+    `obj.get(field) or '1.0'` silently coerced falsy values to legacy."""
+    value = obj.get(field, _VERSION_ABSENT)
+    if value is _VERSION_ABSENT:
+        return "1.0"
+    return value
 
 
 def compute_event_hash(event: dict) -> str:
@@ -262,7 +271,11 @@ def compute_event_hash(event: dict) -> str:
 
 def compute_request_payload_hash(request: dict) -> str:
     body = {k: v for k, v in request.items() if k != "request_payload_hash"}
-    if _obj_version(request) == "2.0":
+    version = _obj_version(request)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise SchemaViolation(
+            f"unsupported request protocol_version {version!r}")
+    if version == "2.0":
         return domain_hash(REQUEST_DOMAIN_V2, body)
     return payload_hash(body)
 
