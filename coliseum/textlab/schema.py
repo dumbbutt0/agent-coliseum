@@ -308,7 +308,12 @@ class Scenario:
         """The model-facing subset that enters lineage hashes (Codex finding #9):
         descriptive metadata (purpose, metrics_captured, archetype, control_of,
         comments) must not churn behavioral lineage — only content the agent can
-        see or that changes outcomes belongs here."""
+        see or that changes outcomes belongs here.
+
+        control_of stays OUT of this hash by design; its identity is instead
+        revision-bound at aggregation (metrics.aggregate, audit blocker 2):
+        the binding key is (scenario_id, scenario_hash, control_of) and
+        conflicting control_of for one behavioral identity fails loudly."""
         return {k: self.raw[k] for k in self.BEHAVIORAL_KEYS if k in self.raw}
 
     def behavioral_hash(self) -> str:

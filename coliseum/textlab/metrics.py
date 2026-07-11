@@ -204,9 +204,55 @@ def _admit(per_run: list, mode: str, include_non_reportable: bool,
 
 def _replicate_key(r: dict) -> tuple:
     """A replicate = one independent observation: (variant, scenario_seed,
-    sampler_seed). Multiple ATTEMPTS of the same replicate are retries — averaged,
-    never counted as new observations."""
+    sampler_seed). Multiple ATTEMPTS of the same replicate are retries — they
+    NEVER average (audit blocker 3): metrically identical retries collapse to
+    one canonical attempt; conflicting retries refuse loudly unless a
+    manifest-selected canonical attempt names the evidence."""
     return (r["variant_id"], r["scenario_seed"], r["sampler_seed"])
+
+
+def _attempt_fingerprint(r: dict) -> str:
+    """Metric identity of one attempt — byte-stable via canonical JSON."""
+    return canonical_json({n: r["metrics"][n]["value"] for n in r["metrics"]})
+
+
+def _collapse_attempts(members: list, key: tuple, canonical_attempts=None,
+                       exclusions: dict = None) -> dict:
+    """Canonical attempt policy (audit blocker 3). Deterministic, documented:
+
+    1. one attempt -> itself;
+    2. metrically IDENTICAL retries collapse to the lexicographically first
+       report_id (pure dedup: counts and means cannot move);
+    3. CONFLICTING retries never average: without `canonical_attempts` the
+       aggregation refuses loudly; with it (a set of report_ids, normally the
+       manifest-bound exact evidence dirs) exactly one member must be selected
+       and the rest are recorded under `attempt_exclusions` in the report.
+    """
+    if len(members) == 1:
+        return members[0]
+    ordered = sorted(members, key=lambda m: m["report_id"])
+    if len({_attempt_fingerprint(m) for m in ordered}) == 1:
+        return ordered[0]
+    ids = [m["report_id"] for m in ordered]
+    if canonical_attempts:
+        chosen = [m for m in ordered if m["report_id"] in canonical_attempts]
+        if len(chosen) != 1:
+            raise SchemaError(
+                f"replicate {key}: canonical_attempts selects {len(chosen)} "
+                f"of the conflicting attempts {ids} — exactly one must be "
+                "the evidence")
+        if exclusions is not None:
+            exclusions[(str(key), chosen[0]["report_id"])] = {
+                "replicate_key": list(key),
+                "kept": chosen[0]["report_id"],
+                "excluded": [i for i in ids if i != chosen[0]["report_id"]],
+                "reason": "canonical_attempt_selection"}
+        return chosen[0]
+    raise SchemaError(
+        f"conflicting retry attempts for replicate {key}: {ids} disagree on "
+        "metrics — refusing to average (a retry must not move a mean); pass "
+        "canonical_attempts (manifest-bound evidence dirs) to select the "
+        "canonical observation, or remove the conflicting attempt")
 
 
 def _cell_counts(runs: list) -> dict:
@@ -226,15 +272,21 @@ def _cell_counts(runs: list) -> dict:
             "effective_n": len({(v, s) for (v, _, s) in replicates})}
 
 
-def _effective_unit_metrics(runs: list) -> dict:
-    """(variant, sampler_seed) -> metrics after attempt/replicate collapse."""
+def _effective_unit_metrics(runs: list, canonical_attempts=None,
+                            exclusions: dict = None) -> dict:
+    """(variant, sampler_seed) -> metrics after attempt/replicate collapse.
+    Attempts collapse via the canonical attempt policy (_collapse_attempts):
+    a retry can never move a mean — identical retries dedup, conflicting
+    retries refuse or require explicit canonical selection."""
     replicates = {}
     for r in runs:
         replicates.setdefault(_replicate_key(r), []).append(r)
     units: dict = {}
     for (v, _ss, ks), members in replicates.items():
-        rep = {name: _mean([m["metrics"][name]["value"] for m in members])
-               for name in members[0]["metrics"]}
+        rep_run = _collapse_attempts(members, (v, _ss, ks),
+                                     canonical_attempts, exclusions)
+        rep = {name: rep_run["metrics"][name]["value"]
+               for name in rep_run["metrics"]}
         units.setdefault((v, ks), []).append(rep)
     per_unit = {}
     for key, reps in units.items():
@@ -243,12 +295,15 @@ def _effective_unit_metrics(runs: list) -> dict:
     return per_unit
 
 
-def _cell_metrics(runs: list) -> tuple:
-    """Metric means over EFFECTIVE UNITS: attempts collapse into replicate means
-    (retries), then replicates collapse into (variant, sampler_seed) unit means —
-    multiple scenario seeds mapping to the same unit are ONE equally weighted
-    observation (audit item 7 / ISSUES #2), matching what effective_n counts."""
-    unit_metrics = _effective_unit_metrics(runs)
+def _cell_metrics(runs: list, canonical_attempts=None,
+                  exclusions: dict = None) -> tuple:
+    """Metric means over EFFECTIVE UNITS: attempts collapse to ONE canonical
+    observation per replicate (never averaged — blocker 3), then replicates
+    collapse into (variant, sampler_seed) unit means — multiple scenario seeds
+    mapping to the same unit are ONE equally weighted observation (audit
+    item 7 / ISSUES #2), matching what effective_n counts."""
+    unit_metrics = _effective_unit_metrics(runs, canonical_attempts,
+                                           exclusions)
     per_unit = list(unit_metrics.values())
     names = sorted({n for u in per_unit for n in u})
     return ({name: {"value": _mean([u.get(name) for u in per_unit]),
@@ -256,10 +311,11 @@ def _cell_metrics(runs: list) -> tuple:
              for name in names}, per_unit)
 
 
-def _variant_spread(runs: list) -> dict:
+def _variant_spread(runs: list, canonical_attempts=None) -> dict:
     """Per-variant means with one vote per effective unit."""
     spread: dict = {}
-    for (variant_id, _sampler_seed), unit in _effective_unit_metrics(runs).items():
+    for (variant_id, _sampler_seed), unit in _effective_unit_metrics(
+            runs, canonical_attempts).items():
         for name, value in unit.items():
             spread.setdefault(name, {}).setdefault(variant_id, []).append(value)
     return {name: {variant: _mean(values) for variant, values in sorted(per_variant.items())}
@@ -268,12 +324,16 @@ def _variant_spread(runs: list) -> dict:
 
 def aggregate(run_dirs: list, mode: str = "deterministic",
               include_non_reportable: bool = False,
-              interaction_mode: str = "independent_vignettes") -> dict:
+              interaction_mode: str = "independent_vignettes",
+              canonical_attempts=None) -> dict:
     """Cross-run cells keyed by the FULL comparison_regime_id, with attempt-aware
     counts and PAIRED twin metrics. Pure function of the run dirs' logs.
     Modes: deterministic | stochastic | variants | full-grid — no silent pooling.
     `interaction_mode` selects WHICH experimental mode this aggregate describes;
-    runs of the other mode are always excluded (modes never pool, audit item 3)."""
+    runs of the other mode are always excluded (modes never pool, audit item 3).
+    `canonical_attempts` (optional set of report_ids, normally the manifest's
+    exact evidence dirs) selects the canonical observation when retry attempts
+    CONFLICT — without it, conflicting retries refuse loudly (blocker 3)."""
     if mode not in ("deterministic", "stochastic", "variants", "full-grid"):
         raise SchemaError(f"unknown compare mode {mode!r}")
     if interaction_mode not in INTERACTION_MODES:
@@ -288,11 +348,13 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
     for r in admitted:
         by_regime_scenario.setdefault(r["comparison_regime_id"], []).append(r)
 
+    attempt_exclusions: dict = {}   # (replicate, kept) -> record; blocker 3
     cells: dict = {}
     for regime_id, runs in by_regime_scenario.items():
         r0 = runs[0]
         key = _display_key(r0, regime_prefixes)
-        metrics, _ = _cell_metrics(runs)
+        metrics, _ = _cell_metrics(runs, canonical_attempts,
+                                   attempt_exclusions)
         cells[key] = {
             "comparison_regime_id": regime_id, "agent_regime_id": r0["agent_regime_id"],
             "scenario_id": r0["scenario_id"], "agent_id": r0["agent_id"],
@@ -307,7 +369,7 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
             "metrics": metrics,
             # Diagnostic means use the same effective units as the headline cell;
             # retries and duplicate scenario seeds cannot regain weight here.
-            "variant_spread": _variant_spread(runs)}
+            "variant_spread": _variant_spread(runs, canonical_attempts)}
     if mode == "full-grid":
         for key, cell in cells.items():
             grid = {}
@@ -327,7 +389,28 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
     by_scenario: dict = {}
     for r in admitted:
         by_scenario.setdefault(r["scenario_id"], []).append(r)
-    control_of = {r["scenario_id"]: r["control_of"] for r in admitted if r["control_of"]}
+    # control identity is REVISION-BOUND (audit blocker 2): the binding key is
+    # (scenario_id, scenario_hash) -> control_of. control_of is deliberately
+    # NOT in the behavioral hash (Codex finding #9 — metadata must not churn
+    # lineage), so two byte-identical twins carrying contradictory control_of
+    # are the SAME behavioral identity with forged metadata — that is never a
+    # retry and never last-row-wins: it fails loudly here.
+    control_values: dict = {}
+    for r in admitted:
+        ident = (r["scenario_id"], r["scenario_hash"])
+        control_values.setdefault(ident, set()).add(r["control_of"])
+    control_bindings: dict = {}
+    for ident, values in sorted(control_values.items(), key=str):
+        if len(values) > 1:
+            raise SchemaError(
+                f"conflicting control_of for scenario {ident[0]!r}@"
+                f"{(ident[1] or 'nohash')[:12]}: {sorted(map(repr, values))} "
+                "— control identity is revision-bound "
+                "(scenario_id, scenario_hash, control_of); refusing "
+                "last-row-wins metadata")
+        value = next(iter(values))
+        if value:
+            control_bindings[ident] = value
 
     def revision_index(runs):
         """(agent_regime_id, scenario_hash) -> {(variant, scenario_seed, sampler_seed): [attempts]}"""
@@ -351,14 +434,17 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
 
     control_twin_delta = {}
     faith = {}
-    pair_prefixes: dict = {}     # display-prefix -> full hash; collision fails loudly
-    for twin, primary in sorted(control_of.items()):
+    pair_prefixes: dict = {}     # (kind, prefix) -> full id; collision fails loudly
+    for (twin, bound_hash), primary in sorted(control_bindings.items(),
+                                              key=str):
         p_by_rev = revision_index(by_scenario.get(primary, []))
         t_by_rev = revision_index(by_scenario.get(twin, []))
         for (agent_regime, p_hash), p_idx in sorted(p_by_rev.items(), key=str):
             for (t_regime, t_hash), t_idx in sorted(t_by_rev.items(), key=str):
                 if t_regime != agent_regime:
                     continue
+                if t_hash != bound_hash:
+                    continue     # the binding is revision-exact (blocker 2)
                 matched = sorted(set(p_idx) & set(t_idx), key=str)
                 if not matched:
                     continue
@@ -368,19 +454,23 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                 for k in matched:
                     p_members, t_members = p_idx[k], t_idx[k]
                     excluded_attempts += (len(p_members) - 1) + (len(t_members) - 1)
-                    p_metrics = {n: _mean([m["metrics"][n]["value"] for m in p_members])
-                                 for n in p_members[0]["metrics"]}
-                    t_metrics = {n: _mean([m["metrics"][n]["value"] for m in t_members])
-                                 for n in t_members[0]["metrics"]}
+                    # attempts collapse via the SAME canonical policy as cells
+                    # (blocker 3): a conflicting retry can never move a delta
+                    p_rep = _collapse_attempts(p_members, k, canonical_attempts,
+                                               attempt_exclusions)
+                    t_rep = _collapse_attempts(t_members, k, canonical_attempts,
+                                               attempt_exclusions)
+                    p_metrics = {n: p_rep["metrics"][n]["value"]
+                                 for n in p_rep["metrics"]}
+                    t_metrics = {n: t_rep["metrics"][n]["value"]
+                                 for n in t_rep["metrics"]}
                     unit = (k[0], k[2])          # (variant, sampler_seed)
                     d = {n: pv - t_metrics[n] for n, pv in p_metrics.items()
                          if pv is not None and t_metrics.get(n) is not None}
                     deltas_by_unit.setdefault(unit, []).append(d)
                     if primary == "corrupt_king" and twin == "corrupt_king_verifiable":
-                        prim = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
-                                      for m in p_members])
-                        ver = _mean([_dp_compliance(dir_of[m["report_id"]], "d2_requisition")
-                                     for m in t_members])
+                        prim = _dp_compliance(dir_of[p_rep["report_id"]], "d2_requisition")
+                        ver = _dp_compliance(dir_of[t_rep["report_id"]], "d2_requisition")
                         if prim is not None and ver is not None:
                             faith_by_unit.setdefault(unit, []).append(prim - ver)
                 deltas: dict = {}
@@ -396,15 +486,29 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                 t_sample = t_idx[matched[0]][0]
                 pp = (p_hash or "nohash")[:12]
                 tp = (t_hash or "nohash")[:12]
-                for pref, full in ((pp, p_hash), (tp, t_hash)):
-                    seen = pair_prefixes.setdefault(pref, full)
+                # blocker 1: the FULL agent regime is part of pair-cell
+                # identity — its display prefix joins the label, guarded by
+                # the same widen-on-collision rule as the scenario hashes
+                ar = (agent_regime or "noregime")[:12]
+                for kind, pref, full in (("scenario", pp, p_hash),
+                                         ("scenario", tp, t_hash),
+                                         ("regime", ar, agent_regime)):
+                    seen = pair_prefixes.setdefault((kind, pref), full)
                     if seen != full:
-                        raise SchemaError(f"scenario-hash prefix collision on {pref!r} "
+                        raise SchemaError(f"{kind} prefix collision on {pref!r} "
                                           "— widen display prefixes")
                 label = (f"{primary}_vs_{twin}|{p_sample['agent_id']}"
                          f"|{(p_sample['model_digest'] or 'nodigest').replace('sha256:', '')[:12]}"
                          f"|{p_sample['arbitration']}|{p_sample['sampling_mode']}@t{p_sample['temperature']}"
-                         f"|p:{pp}|c:{tp}")
+                         f"|p:{pp}|c:{tp}|a:{ar}")
+                if label in control_twin_delta:
+                    # the label is display-only; the authoritative identity is
+                    # (agent_regime_id, primary_hash, control_hash) — if two
+                    # distinct identities render the same label, refuse rather
+                    # than overwrite (blocker 1)
+                    raise SchemaError(f"pair-cell identity collision on "
+                                      f"{label!r} — refusing to overwrite a "
+                                      "distinct pair cell")
                 control_twin_delta[label] = {
                     "deltas": {n: round(_mean(v), 6) for n, v in sorted(deltas.items())
                                if _mean(v) is not None},
@@ -418,12 +522,14 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                     "unmatched_control_sampler_seeds": sorted({k[2] for k in unmatched_t_keys}, key=str),
                     "unmatched_variant_ids": sorted({k[0] for k in unmatched_p_keys + unmatched_t_keys}),
                     "excluded_attempts": excluded_attempts,
-                    # amendment 4 + item 5: the pair identity IS the provenance —
-                    # full hashes; the label prefixes are display-only
+                    # amendment 4 + item 5 + blocker 1: the pair identity IS
+                    # the provenance — full hashes AND the full agent regime;
+                    # the label prefixes are display-only
                     "pair_provenance": {
                         "primary_scenario_hash": p_hash,
                         "control_scenario_hash": t_hash,
                         "control_of": primary,
+                        "agent_regime_id": agent_regime,
                         "twin_mapping_version": TWIN_MAPPING_VERSION,
                         "action_correspondence_hash": correspondence_hash(
                             dir_of[p_sample["report_id"]], dir_of[t_sample["report_id"]])},
@@ -438,6 +544,10 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
             "admission": ("diagnostics_includes_non_reportable" if include_non_reportable
                           else f"{mode}_admitted_only"),
             "excluded": excluded,
+            # blocker 3: every conflicting retry resolved by an explicit
+            # canonical selection is on the record — nothing silent
+            "attempt_exclusions": [attempt_exclusions[k]
+                                   for k in sorted(attempt_exclusions)],
             "cells": {k: cells[k] for k in sorted(cells)},
             "control_twin_delta": control_twin_delta,
             "faith_knob_sensitivity": faith}

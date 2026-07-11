@@ -1,0 +1,197 @@
+"""Per-request finite state machine, replayed from the event chain.
+
+events.jsonl is authoritative; state.json is a derived cache written by
+rebuild(). An approval binds to the exact commit the request was published
+for — the same request_id at a different commit is refused.
+
+Autonomy extension: AUDIT_GO may proceed through POLICY_VALIDATION_REQUIRED
+to AUTO_APPROVED (policy-gated, see policy.py) instead of the human gate;
+HUMAN_APPROVAL_REQUIRED remains the path for anything outside policy.
+"""
+from __future__ import annotations
+
+from tools.council import storage
+from tools.council.schemas import TransitionError
+
+# state names
+NONE = "none"
+BUILDING = "building"
+FIXING = "fixing"
+READY = "ready"
+REQUESTED = "requested"
+CLAIMED = "claimed"
+BLOCKED = "blocked"
+GO = "go"
+POLICY_VALIDATION = "policy_validation"
+AUTO_APPROVED = "auto_approved"
+AWAITING_HUMAN = "awaiting_human"
+APPROVED = "approved"
+EXPERIMENT_RUNNING = "experiment_running"
+EXPERIMENT_COMPLETE = "experiment_complete"
+RESULT_VALIDATION = "result_validation"
+RESULT_AUDIT = "result_audit"
+RESULT_APPROVED = "result_approved"
+RESULT_BLOCKED = "result_blocked"
+NEXT_MILESTONE_READY = "next_milestone_ready"
+CANCELED = "canceled"
+AUTONOMY_PAUSED = "autonomy_paused"
+MILESTONE_REACHED = "milestone_reached"
+
+TERMINAL_STATES = frozenset({CANCELED, MILESTONE_REACHED})
+
+# event_type -> (allowed source states, destination state)
+TRANSITIONS = {
+    "BUILD_STARTED": (frozenset({NONE}), BUILDING),
+    "FIX_STARTED": (frozenset({BUILDING, BLOCKED, RESULT_BLOCKED}), FIXING),
+    "BUILD_READY": (frozenset({BUILDING, FIXING}), READY),
+    "AUDIT_REQUESTED": (frozenset({READY}), REQUESTED),
+    "READY_FOR_REAUDIT": (frozenset({READY}), REQUESTED),
+    "AUDIT_CLAIMED": (frozenset({REQUESTED}), CLAIMED),
+    "AUDIT_BLOCKED": (frozenset({CLAIMED}), BLOCKED),
+    "AUDIT_GO": (frozenset({CLAIMED}), GO),
+    "AUDIT_GO_WITH_CONDITIONS": (frozenset({CLAIMED}), GO),
+    "POLICY_VALIDATION_REQUIRED": (frozenset({GO}), POLICY_VALIDATION),
+    "AUTO_APPROVED": (frozenset({POLICY_VALIDATION}), AUTO_APPROVED),
+    "HUMAN_APPROVAL_REQUIRED": (frozenset({GO, POLICY_VALIDATION}),
+                                AWAITING_HUMAN),
+    "EXPERIMENT_APPROVED": (frozenset({AWAITING_HUMAN}), APPROVED),
+    "EXPERIMENT_STARTED": (frozenset({APPROVED, AUTO_APPROVED}),
+                           EXPERIMENT_RUNNING),
+    "EXPERIMENT_COMPLETE": (frozenset({EXPERIMENT_RUNNING}),
+                            EXPERIMENT_COMPLETE),
+    "RESULT_VALIDATION_REQUIRED": (frozenset({EXPERIMENT_COMPLETE}),
+                                   RESULT_VALIDATION),
+    "RESULT_AUDIT_REQUESTED": (frozenset({RESULT_VALIDATION}), RESULT_AUDIT),
+    "RESULT_APPROVED": (frozenset({RESULT_AUDIT}), RESULT_APPROVED),
+    "RESULT_BLOCKED": (frozenset({RESULT_AUDIT}), RESULT_BLOCKED),
+    "NEXT_MILESTONE_READY": (frozenset({RESULT_APPROVED}),
+                             NEXT_MILESTONE_READY),
+}
+
+# events that never change request state
+STATELESS_EVENTS = frozenset({"WATCHER_ERROR"})
+
+# events exempt from the commit binding (they record incidents, not progress)
+BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",
+                            "REQUEST_CANCELED"})
+
+# once a request is in one of these states, its target_commit is bound
+_BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,
+                         AUTO_APPROVED, AWAITING_HUMAN, APPROVED,
+                         EXPERIMENT_RUNNING, EXPERIMENT_COMPLETE,
+                         RESULT_VALIDATION, RESULT_AUDIT, RESULT_APPROVED,
+                         RESULT_BLOCKED, NEXT_MILESTONE_READY})
+
+
+def _blank_request() -> dict:
+    return {"state": NONE, "target_commit": None, "claimed_by": None,
+            "audit_cycles": 0, "history": [], "last_event_id": None,
+            "last_verdict": None}
+
+
+def check(event: dict, requests: dict) -> None:
+    """Raise TransitionError unless `event` is legal given the projection."""
+    etype = event["event_type"]
+    req = requests.get(event["request_id"], _blank_request())
+    state = req["state"]
+
+    if etype in STATELESS_EVENTS:
+        return
+    if etype == "AUTONOMY_PAUSED":
+        return  # recordable from any state — it is the incident record
+    if etype == "AUTONOMY_MILESTONE_REACHED":
+        if state in TERMINAL_STATES:
+            raise TransitionError(
+                f"AUTONOMY_MILESTONE_REACHED on terminal request "
+                f"{event['request_id']!r} ({state})")
+        return
+    if etype == "REQUEST_CANCELED":
+        if state in TERMINAL_STATES:
+            raise TransitionError(
+                f"cannot cancel {event['request_id']!r} in terminal "
+                f"state {state}")
+        return
+    if state == AUTONOMY_PAUSED:
+        raise TransitionError(
+            f"request {event['request_id']!r} is AUTONOMY_PAUSED — only a "
+            "human cancel/fresh request may follow")
+
+    if etype not in TRANSITIONS:
+        raise TransitionError(f"no transition defined for {etype}")
+    allowed_from, _to = TRANSITIONS[etype]
+    if state not in allowed_from:
+        raise TransitionError(
+            f"{etype} not allowed from state {state!r} for request "
+            f"{event['request_id']!r} (allowed from: {sorted(allowed_from)})")
+
+    # commit binding: an approval/audit for one commit never applies to
+    # another. The binding is set when the request is published.
+    if state in _BOUND_FROM and etype not in BINDING_EXEMPT:
+        bound = req["target_commit"]
+        if bound and event["target_commit"] != bound:
+            raise TransitionError(
+                f"{etype} carries commit {event['target_commit'][:12]} but "
+                f"request {event['request_id']!r} is bound to {bound[:12]} "
+                "— approvals do not transfer between commits")
+
+
+def apply(event: dict, requests: dict) -> dict:
+    """Fold one event into the projection (caller ran check())."""
+    rid = event["request_id"]
+    req = requests.setdefault(rid, _blank_request())
+    etype = event["event_type"]
+    req["history"].append(event["event_id"])
+    req["last_event_id"] = event["event_id"]
+    if etype in STATELESS_EVENTS:
+        return requests
+    if etype == "AUTONOMY_PAUSED":
+        req["state"] = AUTONOMY_PAUSED
+        return requests
+    if etype == "AUTONOMY_MILESTONE_REACHED":
+        req["state"] = MILESTONE_REACHED
+        return requests
+    if etype == "REQUEST_CANCELED":
+        req["state"] = CANCELED
+        return requests
+    _allowed, to_state = TRANSITIONS[etype]
+    req["state"] = to_state
+    if etype in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+        req["target_commit"] = event["target_commit"]
+        req["audit_cycles"] += 1
+    if etype == "AUDIT_CLAIMED":
+        req["claimed_by"] = event["sender"]
+    if etype in ("AUDIT_BLOCKED", "AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",
+                 "RESULT_APPROVED", "RESULT_BLOCKED"):
+        req["last_verdict"] = {"event_type": etype,
+                               "event_id": event["event_id"],
+                               "verdict": event["payload"].get("verdict")}
+    return requests
+
+
+def project(events) -> dict:
+    """Replay a full event list into {request_id: request_state}, checking
+    every transition (a chain that replays is a chain that was legal)."""
+    requests: dict = {}
+    for event in events:
+        check(event, requests)
+        apply(event, requests)
+    return requests
+
+
+def global_flags(requests: dict) -> dict:
+    states = {r["state"] for r in requests.values()}
+    return {"milestone_reached": MILESTONE_REACHED in states,
+            "autonomy_paused": AUTONOMY_PAUSED in states}
+
+
+def rebuild(root: str, events: list, head_hash: str) -> dict:
+    """Write the derived cache. events.jsonl always wins over this file."""
+    requests = project(events)
+    state = {"chain_length": len(events),
+             "head_event_hash": head_hash,
+             "requests": requests,
+             "flags": global_flags(requests),
+             "rebuilt_utc": storage.utc_now(),
+             "note": "derived cache — events.jsonl is authoritative"}
+    storage.atomic_write_json(storage.state_path(root), state)
+    return state

@@ -30,15 +30,27 @@ from coliseum.textlab.schema import (SchemaError, build_behavioral_config,  # no
 
 _ATTEMPT_RE = re.compile(r"\.a(\d+)$")
 
+# The complete current manifest-row schema — exactly what the sweep writer
+# emits (audit blocker 4). The loader REQUIRES every field; the writer builds
+# rows against the same constant so the two can never drift. Legacy rows go
+# through scripts/migrate_manifest.py, never implicit acceptance.
+REQUIRED_ROW_FIELDS = (
+    "regime_id", "model", "scenario", "scenario_seed", "sampler_seed",
+    "variant_id", "temperature", "sampling_mode", "digest", "scenario_hash",
+    "arbitration", "run_id", "dir", "reportable", "stochastic_reportable",
+    "interaction_mode", "path",
+)
+
 
 def manifest_load(path: str, out_root: str) -> dict:
     """(regime_id, scenario_seed, sampler_seed) -> validated row.
 
-    Full-row validation (audit item 6, closes ISSUES.md #1): EVERY redundant field
-    a row carries must agree with its run.json evidence — a manifest can no longer
-    assert anything its evidence contradicts. Duplicate resume keys are REFUSED
-    outright (no last-row-wins); so are dir/attempt mismatches and legacy dir-less
-    rows."""
+    Full-row validation (audit item 6 + blocker 4, closes ISSUES.md #1):
+    every row must carry the COMPLETE current schema (REQUIRED_ROW_FIELDS) and
+    every field must agree with its run.json evidence — a manifest can neither
+    assert anything its evidence contradicts nor omit its way past validation.
+    Duplicate resume keys are REFUSED outright (no last-row-wins); so are
+    dir/attempt mismatches and legacy dir-less rows."""
     done = {}
     if not os.path.exists(path):
         return done
@@ -50,6 +62,13 @@ def manifest_load(path: str, out_root: str) -> dict:
                 raise SchemaError(
                     f"{where}: legacy manifest row without an exact evidence dir — "
                     "REFUSED (run scripts/migrate_manifest.py or use a fresh manifest)")
+            missing = [f for f in REQUIRED_ROW_FIELDS if f not in rec]
+            if missing:
+                raise SchemaError(
+                    f"{where}: incomplete manifest row — missing required "
+                    f"current-schema fields {missing}; legacy rows must go "
+                    "through scripts/migrate_manifest.py, never implicit "
+                    "acceptance")
             run_dir = os.path.join(out_root, rec["dir"])
             manifest_file = os.path.join(run_dir, "run.json")
             if not os.path.exists(manifest_file):
@@ -83,6 +102,9 @@ def manifest_load(path: str, out_root: str) -> dict:
                 "path": decision_path,
             }
             for field_name, want in expected.items():
+                # every REQUIRED_ROW_FIELDS entry is guaranteed present above;
+                # this guard only skips loader-side extras (e.g. 'seed') that
+                # rows legitimately never carry
                 if field_name in rec and rec[field_name] != want:
                     raise SchemaError(f"{where}: {field_name} mismatch vs evidence "
                                       f"({rec[field_name]!r} vs {want!r})")
@@ -191,6 +213,10 @@ def main():
                                "stochastic_reportable": r.run.stochastic_reportable,
                                "interaction_mode": r.run.interaction_mode,
                                "path": r.final_actions}
+                        # writer and loader share one schema constant — a row
+                        # this sweep emits always reloads (blocker 4)
+                        assert set(REQUIRED_ROW_FIELDS) <= set(row), \
+                            sorted(set(REQUIRED_ROW_FIELDS) - set(row))
                         manifest.write(json.dumps(row) + "\n")
                         manifest.flush()
                         completed += 1

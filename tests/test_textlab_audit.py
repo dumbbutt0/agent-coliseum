@@ -271,6 +271,16 @@ def test_twin_pairing_separates_scenario_revisions(tmp_path):
 
 # ================================================== item 6: manifest integrity
 
+def _decision_path(run_dir):
+    path = []
+    with open(os.path.join(run_dir, "decisions.jsonl"), encoding="utf-8") as fh:
+        for line in fh:
+            event = json.loads(line)
+            if event.get("kind") == "decision_node":
+                path.append(event["data"]["final_action"])
+    return path
+
+
 def _mock_row(run_dir):
     run = json.load(open(os.path.join(run_dir, "run.json")))
     return {"regime_id": run["comparison_regime_id"],
@@ -284,7 +294,8 @@ def _mock_row(run_dir):
             "run_id": run["run_id"], "dir": os.path.basename(run_dir),
             "reportable": run["reportable"],
             "stochastic_reportable": run["stochastic_reportable"],
-            "interaction_mode": run["interaction_mode"]}
+            "interaction_mode": run["interaction_mode"],
+            "path": _decision_path(run_dir)}
 
 
 def test_manifest_full_row_validation_and_duplicate_refusal(tmp_path):
@@ -311,12 +322,13 @@ def test_manifest_full_row_validation_and_duplicate_refusal(tmp_path):
     with pytest.raises(SchemaError, match="duplicate resume key"):
         sweep_models.manifest_load(str(path), out_root)
 
-    # Optional row fields cannot alter the canonical evidence-derived key.
+    # Incomplete current-schema rows REFUSE outright (blocker 4): omitting
+    # identity fields can neither bypass validation nor mint a second key.
     omitted_identity = {k: v for k, v in row.items()
                         if k not in ("scenario_seed", "sampler_seed")}
     path.write_text(json.dumps(row) + "\n" + json.dumps(omitted_identity) + "\n",
                     encoding="utf-8")
-    with pytest.raises(SchemaError, match="duplicate resume key"):
+    with pytest.raises(SchemaError, match="incomplete manifest row"):
         sweep_models.manifest_load(str(path), out_root)
 
     # a dir that does not name its run_id refuses
