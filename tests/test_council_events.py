@@ -107,8 +107,7 @@ def test_append_refused_under_emergency_stop(env):
 
 def test_append_refused_when_status_not_active(env):
     root, repo, head, cfg = env
-    with open(os.path.join(root, "log.md"), "w", encoding="utf-8") as fh:
-        fh.write("STATUS: paused claude\n")
+    storage.write_control(root, "paused", ["claude"], "test", None)
     with pytest.raises(CouncilError):
         append(root, cfg, "BUILD_STARTED", "claude", "req-aaa", repo, head)
 

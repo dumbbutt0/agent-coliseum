@@ -15,10 +15,23 @@ import argparse
 import json
 import sys
 
-from tools.council import (events, get_config, locking, policy, publish,
-                           state_machine, storage)
+from tools.council import (events, get_config, identity, locking, policy,
+                           publish, state_machine, storage)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    validate_commit, validate_request_id)
+
+# H1: the generic escape hatch may record ONLY non-authority bookkeeping.
+# Approval, verdict, policy, claim, execution, integration, and milestone
+# events are unreachable from `record` regardless of role — each has a
+# dedicated command or tool with its own gates.
+RECORD_ALLOWED_EVENT_TYPES = frozenset({
+    "BUILD_STARTED", "BUILD_READY", "FIX_STARTED", "WATCHER_ERROR",
+    "AUTONOMY_PAUSED",
+})
+
+CONTROL_RID = "council-control"
+IDENTITY_RID = "council-identity"
+NULL_COMMIT = "0" * 40
 
 
 def _cfg(args):
@@ -26,22 +39,70 @@ def _cfg(args):
     return cfg, cfg.council_root
 
 
+def _maybe_human_token(root, args, event_type: str, request_id: str,
+                       commit: str, payload_core: dict):
+    """Owner-side token minting for a human-authority event. Returns None
+    only on a pre-cutover root (no verifier AND no chain pin) — otherwise
+    a token is mandatory and the passphrase is prompted via getpass
+    (never argv). --token-file supplies {counter, preimage_hex} for
+    scripted use; binding is always recomputed here."""
+    verifier = identity.read_verifier(root)
+    pin = identity.latest_pin(events.read_chain(root))
+    if verifier is None and pin is None:
+        return None
+    if verifier is None:
+        raise SchemaViolation(
+            "identity verifier missing but the chain pins one — fail "
+            "closed; run identity-restore-from-pin or identity-rotate")
+    token_file = getattr(args, "token_file", None)
+    if token_file:
+        with open(token_file, encoding="utf-8") as fh:
+            token = json.load(fh)
+        if not isinstance(token, dict):
+            raise SchemaViolation("--token-file must contain a JSON object")
+    else:
+        import getpass
+        passphrase = getpass.getpass("owner passphrase: ")
+        token = identity.compute_token(passphrase, verifier)
+    token["binds"] = identity.binding_hash(event_type, request_id, commit,
+                                           payload_core)
+    return token
+
+
+def _with_token(payload_core: dict, token) -> dict:
+    payload = dict(payload_core)
+    if token is not None:
+        payload["human_token"] = token
+    return payload
+
+
 def cmd_init(args) -> int:
     _cfg_, root = _cfg(args)
     storage.ensure_layout(root)
     print(f"council layout ready at {root}")
+    if not identity.read_verifier(root):
+        print("bootstrap (fail-closed root): 1) identity-init  "
+              "2) status-set --status active   — until then everything "
+              "is paused")
     return 0
 
 
 def cmd_init_policy(args) -> int:
     if args.role != "human":
         raise SchemaViolation("init-policy is an owner action: --role human")
-    _cfg_, root = _cfg(args)
+    cfg, root = _cfg(args)
     path = policy.write_initial_policy(root)
     _pol, pol_hash = policy.load_policy(root)
+    payload_core = {"policy_hash": pol_hash, "policy_file": storage.POLICY_FILE}
+    token = _maybe_human_token(root, args, "POLICY_INITIALIZED",
+                               CONTROL_RID, NULL_COMMIT, payload_core)
+    event = events.append_event(root, cfg, "POLICY_INITIALIZED", "human",
+                                CONTROL_RID, cfg.repo_roots[0], NULL_COMMIT,
+                                _with_token(payload_core, token))
     print(f"autonomy policy installed at {path}\npolicy_hash: {pol_hash}\n"
-          "the file is immutable during autonomous operation — agents have "
-          "no write API and hash drift pauses autonomy")
+          f"pinned by event {event['event_id']}; the file is immutable "
+          "during autonomous operation — agents have no write API and "
+          "hash drift pauses autonomy")
     return 0
 
 
@@ -50,9 +111,27 @@ def cmd_status(args) -> int:
     chain = events.read_chain(root)
     requests = state_machine.project(chain)
     flags = state_machine.global_flags(requests)
+    control = storage.read_control(root)
     print(f"council: {root}")
-    print(f"kill-switch: {storage.read_status(root)}; "
-          f"STOP file: {'PRESENT' if storage.emergency_stop_reason(root) and 'STOP' in (storage.emergency_stop_reason(root) or '') else 'absent'}")
+    print(f"control: {control['status']}"
+          + (f" (roles: {','.join(control.get('paused_roles', []))};"
+             f" {control.get('reason', '')})"
+             if control["status"] != "active" else "")
+          + f"; STOP file: "
+            f"{'PRESENT' if storage.stop_file_present(root) else 'absent'}"
+          + f"; log.md mirror: {storage.read_status(root)} (cosmetic)")
+    verifier = identity.read_verifier(root)
+    pin = identity.latest_pin(chain)
+    if verifier is None:
+        print("identity: NOT INITIALIZED"
+              + (" (chain pins one — FAIL CLOSED)" if pin else
+                 " (pre-cutover: human events are legacy-tokenless)"))
+    else:
+        lineage = "unpinned (bootstrap)" if pin is None else (
+            "descends from pinned tip" if
+            identity.verify_lineage(verifier, *pin) else
+            "DOES NOT DESCEND FROM PINNED TIP — fail closed")
+        print(f"identity: {verifier['counter']} tokens remaining; {lineage}")
     print(f"chain: {len(chain)} events; flags: {flags}")
     for rid, req in sorted(requests.items()):
         print(f"  {rid}: {req['state']} "
@@ -107,6 +186,13 @@ def cmd_record(args) -> int:
     cfg, root = _cfg(args)
     if args.role not in ("claude", "codex", "human"):
         raise SchemaViolation("--role required (claude|codex|human)")
+    if args.type not in RECORD_ALLOWED_EVENT_TYPES:
+        raise SchemaViolation(
+            f"record refuses {args.type!r} — the generic escape hatch may "
+            f"emit only {sorted(RECORD_ALLOWED_EVENT_TYPES)}; authority "
+            "events go through their dedicated commands (approve, "
+            "approve-conditions, cancel, status-set, publish-request, "
+            "codex_watch, the autonomy runner)")
     payload = json.loads(args.payload_json) if args.payload_json else {}
     if not isinstance(payload, dict):
         raise SchemaViolation("--payload-json must be a JSON object")
@@ -130,11 +216,14 @@ def cmd_approve(args) -> int:
             f"approval commit {args.commit[:12]} does not match the "
             f"request's target_commit {request['target_commit'][:12]} — "
             "an approval for one commit must not apply to another")
+    payload_core = {"approved_by": "human", "approval_commit": args.commit}
+    token = _maybe_human_token(root, args, "EXPERIMENT_APPROVED",
+                               args.request_id, request["target_commit"],
+                               payload_core)
     event = events.append_event(root, cfg, "EXPERIMENT_APPROVED", "human",
                                 args.request_id, request["repository"],
                                 request["target_commit"],
-                                {"approved_by": "human",
-                                 "approval_commit": args.commit})
+                                _with_token(payload_core, token))
     storage.append_log_md(root, "human", (
         f"**EXPERIMENT_APPROVED** for `{args.request_id}` at "
         f"`{args.commit}` (event `{event['event_id']}`)."))
@@ -158,12 +247,15 @@ def cmd_approve_conditions(args) -> int:
             f"approval commit {args.commit[:12]} does not match the "
             f"request's target_commit {request['target_commit'][:12]} — "
             "a condition sign-off for one commit must not apply to another")
+    payload_core = {"reviewed_by": "human", "approval_commit": args.commit,
+                    "note": args.note or ""}
+    token = _maybe_human_token(root, args, "CONDITIONS_SATISFIED",
+                               args.request_id, request["target_commit"],
+                               payload_core)
     event = events.append_event(root, cfg, "CONDITIONS_SATISFIED", "human",
                                 args.request_id, request["repository"],
                                 request["target_commit"],
-                                {"reviewed_by": "human",
-                                 "approval_commit": args.commit,
-                                 "note": args.note or ""})
+                                _with_token(payload_core, token))
     storage.append_log_md(root, "human", (
         f"**CONDITIONS_SATISFIED** for `{args.request_id}` at "
         f"`{args.commit}` (event `{event['event_id']}`)"
@@ -178,11 +270,191 @@ def cmd_cancel(args) -> int:
     if args.role not in ("claude", "human"):
         raise SchemaViolation("cancel requires --role claude or human")
     request = publish.read_request(root, args.request_id)
+    payload_core = {"reason": args.reason}
+    token = None
+    if args.role == "human":  # agent cancels revoke, never grant — no token
+        token = _maybe_human_token(root, args, "REQUEST_CANCELED",
+                                   args.request_id,
+                                   request["target_commit"], payload_core)
     event = events.append_event(root, cfg, "REQUEST_CANCELED", args.role,
                                 args.request_id, request["repository"],
                                 request["target_commit"],
-                                {"reason": args.reason})
+                                _with_token(payload_core, token))
     print(f"canceled {args.request_id} (event {event['event_id']})")
+    return 0
+
+
+def cmd_identity_init(args) -> int:
+    """Create the owner's S/KEY token chain and PIN its tip into the event
+    chain (self-pinning — this event creates the authority it pins)."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("identity-init is an owner action: "
+                              "--role human")
+    import getpass
+    if getattr(args, "passphrase_file", None):
+        with open(args.passphrase_file, encoding="utf-8") as fh:
+            passphrase = fh.read().strip()
+    else:
+        passphrase = getpass.getpass("new owner passphrase: ")
+        if getpass.getpass("repeat passphrase: ") != passphrase:
+            raise SchemaViolation("passphrases do not match")
+    verifier = identity.init_identity(root, passphrase,
+                                      chain_length=args.chain_length)
+    payload = {"schema_version": "identity.v1",
+               "tip_hex": verifier["tip_hex"],
+               "counter": verifier["counter"],
+               "chain_length": verifier["chain_length"],
+               "salt_hex": verifier["salt_hex"],
+               "pbkdf2_iterations": verifier["pbkdf2_iterations"]}
+    event = events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
+                                "human", IDENTITY_RID, cfg.repo_roots[0],
+                                NULL_COMMIT, payload)
+    print(f"identity initialized: {verifier['counter']} one-time tokens; "
+          f"tip pinned by event {event['event_id']}. Every human-authority "
+          "event now requires a token (passphrase prompt).")
+    return 0
+
+
+def cmd_identity_status(args) -> int:
+    _cfg_, root = _cfg(args)
+    verifier = identity.read_verifier(root)
+    pin = identity.latest_pin(events.read_chain(root))
+    if verifier is None and pin is None:
+        print("identity: not initialized (pre-cutover legacy root)")
+        return 0
+    if verifier is None:
+        print("identity: FAIL CLOSED — chain pins a tip but the verifier "
+              "file is missing; run identity-restore-from-pin",
+              file=sys.stderr)
+        return 1
+    print(f"tokens remaining: {verifier['counter']} of "
+          f"{verifier['chain_length']}")
+    if pin is None:
+        print("lineage: unpinned (bootstrap verifier; the next "
+              "identity-init/rotate event pins it)")
+        return 0
+    if identity.verify_lineage(verifier, *pin):
+        print("lineage: verifier descends from the chain-pinned tip")
+        return 0
+    print("lineage: VERIFIER DOES NOT DESCEND FROM THE PINNED TIP — "
+          "possible substitution; token events fail closed", file=sys.stderr)
+    return 1
+
+
+def cmd_identity_restore_from_pin(args) -> int:
+    """Realign the verifier FILE to what the CHAIN already pins (crash
+    between a rotation's event and its verifier write, or file loss).
+    Grants no new authority — the chain is the authority — so no token."""
+    _cfg_, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("identity-restore-from-pin is an owner "
+                              "action: --role human")
+    pin_event = None
+    for event in events.read_chain(root):
+        if event["event_type"] in ("HUMAN_IDENTITY_INITIALIZED",
+                                   "HUMAN_IDENTITY_ROTATED"):
+            pin_event = event
+    if pin_event is None:
+        raise SchemaViolation("no identity pin in the chain — use "
+                              "identity-init")
+    payload = pin_event["payload"]
+    now = storage.utc_now()
+    verifier = {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
+                "salt_hex": payload["salt_hex"],
+                "pbkdf2_iterations": payload["pbkdf2_iterations"],
+                "chain_length": payload["chain_length"],
+                "counter": payload["counter"],
+                "tip_hex": payload["tip_hex"],
+                "created_utc": now, "updated_utc": now}
+    identity._write_verifier(root, verifier)
+    print(f"verifier restored from event {pin_event['event_id']} "
+          f"({verifier['counter']} tokens; tokens spent after that pin "
+          "were burned and stay burned — the counter restarts at the pin)")
+    return 0
+
+
+def cmd_identity_rotate(args) -> int:
+    """Replace the token chain: one OLD-chain token authorizes pinning a
+    NEW chain tip; the verifier is rewritten to the new chain. A crash
+    between the event and the verifier write is recovered by
+    identity-restore-from-pin (the chain is the authority)."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("identity-rotate is an owner action: "
+                              "--role human")
+    old_verifier = identity.read_verifier(root)
+    if old_verifier is None:
+        raise SchemaViolation("no identity to rotate — use identity-init")
+    import getpass
+    import os as _os
+    if getattr(args, "passphrase_file", None):
+        with open(args.passphrase_file, encoding="utf-8") as fh:
+            new_passphrase = fh.read().strip()
+    else:
+        new_passphrase = getpass.getpass("NEW owner passphrase: ")
+        if getpass.getpass("repeat new passphrase: ") != new_passphrase:
+            raise SchemaViolation("passphrases do not match")
+    salt = _os.urandom(32)
+    iterations = old_verifier["pbkdf2_iterations"]
+    seed = identity.derive_seed(new_passphrase, salt, iterations)
+    tip = identity.chain_value(seed, args.chain_length)
+    payload_core = {"schema_version": "identity.v1", "tip_hex": tip.hex(),
+                    "counter": args.chain_length,
+                    "chain_length": args.chain_length,
+                    "salt_hex": salt.hex(),
+                    "pbkdf2_iterations": iterations}
+    token = _maybe_human_token(root, args, "HUMAN_IDENTITY_ROTATED",
+                               IDENTITY_RID, NULL_COMMIT, payload_core)
+    event = events.append_event(root, cfg, "HUMAN_IDENTITY_ROTATED",
+                                "human", IDENTITY_RID, cfg.repo_roots[0],
+                                NULL_COMMIT, _with_token(payload_core, token))
+    now = storage.utc_now()
+    identity._write_verifier(root, {
+        "schema_version": "identity.v1", "algo": "skey-sha256-v1",
+        "salt_hex": salt.hex(), "pbkdf2_iterations": iterations,
+        "chain_length": args.chain_length, "counter": args.chain_length,
+        "tip_hex": tip.hex(), "created_utc": now, "updated_utc": now})
+    print(f"identity rotated: {args.chain_length} fresh tokens; new tip "
+          f"pinned by event {event['event_id']}")
+    return 0
+
+
+def cmd_status_set(args) -> int:
+    """The ONLY sanctioned run/pause change: a human-token STATUS_CHANGED
+    event, then the derived control.json. log.md edits never resume."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("status-set is an owner action: --role human")
+    if args.status not in ("active", "paused"):
+        raise SchemaViolation("--status must be active|paused")
+    roles = [r.strip() for r in (args.roles or "all").split(",") if r.strip()]
+    if args.status == "active":
+        roles = []
+    payload_core = {"status": args.status, "paused_roles": roles,
+                    "reason": args.reason or ""}
+    token = _maybe_human_token(root, args, "STATUS_CHANGED", CONTROL_RID,
+                               NULL_COMMIT, payload_core)
+    if token is None:
+        raise SchemaViolation(
+            "status-set requires an initialized identity — run "
+            "identity-init first (fail closed)")
+    event = events.append_event(root, cfg, "STATUS_CHANGED", "human",
+                                CONTROL_RID, cfg.repo_roots[0], NULL_COMMIT,
+                                _with_token(payload_core, token))
+    storage.write_control(root, args.status, roles, args.reason or "",
+                          event["event_id"])
+    try:
+        storage.append_log_md(root, "human", (
+            f"**STATUS_CHANGED** to `{args.status}`"
+            + (f" (paused: {','.join(roles)})" if roles else "")
+            + f" — event `{event['event_id']}`."
+            + (f" {args.reason}" if args.reason else "")))
+    except (CouncilError, OSError):
+        pass  # the mirror is cosmetic; control.json is the authority
+    print(f"control: {args.status}"
+          + (f" (paused roles: {','.join(roles)})" if roles else "")
+          + f" — authorized by event {event['event_id']}")
     return 0
 
 
@@ -252,15 +524,39 @@ def main(argv=None) -> int:
     p = sub.add_parser("approve")
     p.add_argument("request_id")
     p.add_argument("--commit", required=True)
+    p.add_argument("--token-file", dest="token_file", default=None)
 
     p = sub.add_parser("approve-conditions")
     p.add_argument("request_id")
     p.add_argument("--commit", required=True)
     p.add_argument("--note", default=None)
+    p.add_argument("--token-file", dest="token_file", default=None)
+
+    p = sub.add_parser("identity-init")
+    p.add_argument("--chain-length", type=int, default=10_000)
+    p.add_argument("--passphrase-file", dest="passphrase_file", default=None,
+                   help="tests/scripting only; interactive getpass otherwise")
+
+    sub.add_parser("identity-status")
+
+    sub.add_parser("identity-restore-from-pin")
+
+    p = sub.add_parser("identity-rotate")
+    p.add_argument("--chain-length", type=int, default=10_000)
+    p.add_argument("--passphrase-file", dest="passphrase_file", default=None)
+    p.add_argument("--token-file", dest="token_file", default=None)
+
+    p = sub.add_parser("status-set")
+    p.add_argument("--status", required=True, choices=("active", "paused"))
+    p.add_argument("--roles", default=None,
+                   help="comma list for paused (default all)")
+    p.add_argument("--reason", default=None)
+    p.add_argument("--token-file", dest="token_file", default=None)
 
     p = sub.add_parser("cancel")
     p.add_argument("request_id")
     p.add_argument("--reason", required=True)
+    p.add_argument("--token-file", dest="token_file", default=None)
 
     p = sub.add_parser("clear-lock")
     p.add_argument("name")
@@ -274,6 +570,11 @@ def main(argv=None) -> int:
                 "publish-request": cmd_publish_request,
                 "record": cmd_record, "approve": cmd_approve,
                 "approve-conditions": cmd_approve_conditions,
+                "identity-init": cmd_identity_init,
+                "identity-status": cmd_identity_status,
+                "identity-restore-from-pin": cmd_identity_restore_from_pin,
+                "identity-rotate": cmd_identity_rotate,
+                "status-set": cmd_status_set,
                 "cancel": cmd_cancel, "clear-lock": cmd_clear_lock,
                 "milestone-status": cmd_milestone_status}
     try:

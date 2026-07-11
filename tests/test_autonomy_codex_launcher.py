@@ -204,8 +204,21 @@ def test_status_paused_halts_before_launch(env, tmp_path, monkeypatch):
     root, repo, head, cfg = env
     marker = _install_fake_codex(tmp_path, monkeypatch, FAKE_NOOP)
     _publish_requested(root, cfg, repo, head)
+    storage.write_control(root, "paused", ["codex"], "test pause", None)
+    rc = codex_launcher.main(["--once"])
+    assert rc == 0
+    assert not os.path.exists(marker)
+
+
+def test_log_md_edit_never_resumes(env, tmp_path, monkeypatch):
+    """H1: the log.md STATUS line is cosmetic — editing it cannot resume
+    a paused council; only the control record (human token) can."""
+    root, repo, head, cfg = env
+    marker = _install_fake_codex(tmp_path, monkeypatch, FAKE_NOOP)
+    _publish_requested(root, cfg, repo, head)
+    storage.write_control(root, "paused", ["all"], "owner pause", None)
     with open(os.path.join(root, "log.md"), "w", encoding="utf-8") as fh:
-        fh.write("STATUS: paused codex\n")
+        fh.write("STATUS: active\n")  # forged mirror
     rc = codex_launcher.main(["--once"])
     assert rc == 0
     assert not os.path.exists(marker)

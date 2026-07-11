@@ -10,7 +10,9 @@ import uuid
 from dataclasses import dataclass
 
 from tools.council import Config, locking, state_machine, storage
-from tools.council.schemas import (ChainError, CouncilError, GENESIS_HASH,
+from tools.council.schemas import (CONTROL_BOOTSTRAP_EVENT_TYPES, ChainError,
+                                   CouncilError, GENESIS_HASH,
+                                   HUMAN_TOKEN_REQUIRED_EVENT_TYPES,
                                    STOP_EXEMPT_EVENT_TYPES, canonical_json,
                                    compute_event_hash, protocol_version,
                                    validate_event)
@@ -96,8 +98,15 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
     lock = locking.acquire_events_lock(root, sender, request_id)
     try:
         # emergency stop precedes every transition; only the events that
-        # RECORD a stop may pass while it is engaged
-        if event_type not in STOP_EXEMPT_EVENT_TYPES:
+        # RECORD a stop may pass while it is engaged. Bootstrap/control
+        # events (H1) pass a control-record pause — they are how the owner
+        # un-pauses a fail-closed root — but NEVER the STOP file.
+        if event_type in CONTROL_BOOTSTRAP_EVENT_TYPES:
+            if storage.stop_file_present(root):
+                raise CouncilError(
+                    "council/STOP file exists — the hard emergency stop "
+                    f"refuses {event_type}; the owner removes STOP first")
+        elif event_type not in STOP_EXEMPT_EVENT_TYPES:
             reason = storage.emergency_stop_reason(root)
             if reason:
                 raise CouncilError(
@@ -111,6 +120,10 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         validate_event(event)
         requests = state_machine.project(chain)
         state_machine.check(event, requests)
+        # H1: burn the human one-time token (if this event type requires
+        # one) durably BEFORE the line lands — a crash here wastes a
+        # token, it never leaves a spendable one behind an appended event
+        _verify_human_token(root, chain, event)
         storage.append_line(storage.events_path(root), canonical_json(event))
         try:  # state.json is best-effort cache; the append already succeeded
             state_machine.apply(event, requests)
@@ -121,6 +134,32 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         return event
     finally:
         locking.release(lock)
+
+
+def _verify_human_token(root: str, chain: list, event: dict) -> None:
+    """H1: human authority is a burned one-time token (tools/council/
+    identity.py), never a caller-supplied sender string. Runs INSIDE the
+    events lock, immediately before the append. Pre-cutover chains (no
+    verifier file AND no pinned identity event) stay tokenless so legacy
+    roots replay; once either exists, these events fail closed."""
+    from tools.council import identity
+    etype = event["event_type"]
+    if etype not in HUMAN_TOKEN_REQUIRED_EVENT_TYPES:
+        return
+    if etype == "REQUEST_CANCELED" and event["sender"] != "human":
+        return  # agent cancels revoke authority; they never grant it
+    pin = identity.latest_pin(chain)
+    verifier_exists = identity.read_verifier(root) is not None
+    if pin is None and not verifier_exists:
+        return  # pre-cutover legacy behavior
+    payload = event["payload"]
+    expected = identity.binding_hash(
+        etype, event["request_id"], event["target_commit"],
+        {k: v for k, v in payload.items() if k != "human_token"})
+    pinned_tip, pinned_counter = pin if pin is not None else (None, None)
+    identity.verify_and_advance(root, payload.get("human_token"), expected,
+                                pinned_tip_hex=pinned_tip,
+                                pinned_counter=pinned_counter)
 
 
 def pause_autonomy(root: str, cfg: Config, sender: str, request_id: str,

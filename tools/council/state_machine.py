@@ -77,8 +77,12 @@ TRANSITIONS = {
                              NEXT_MILESTONE_READY),
 }
 
-# events that never change request state
-STATELESS_EVENTS = frozenset({"WATCHER_ERROR"})
+# events that never change request state (control/identity events use
+# synthetic request ids and carry no request authority)
+STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
+                              "POLICY_INITIALIZED",
+                              "HUMAN_IDENTITY_INITIALIZED",
+                              "HUMAN_IDENTITY_ROTATED"})
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",

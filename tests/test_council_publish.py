@@ -132,8 +132,7 @@ def test_log_md_mirror_appends_only(env):
 
 def test_status_paused_refuses_publish(env):
     root, repo, head, cfg = env
-    with open(os.path.join(root, "log.md"), "w", encoding="utf-8") as fh:
-        fh.write("STATUS: paused claude\n")
+    storage.write_control(root, "paused", ["claude"], "test", None)
     with pytest.raises(Exception):
         publish.publish_request(root, cfg, make_request(repo, head, RID))
 

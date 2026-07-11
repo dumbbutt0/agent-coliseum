@@ -134,50 +134,107 @@ def write_cursor(root: str, role: str, byte_offset: int,
                        "updated_utc": utc_now()})
 
 
-# ------------------------------------------------------------- emergency stop
+# ----------------------------------------- emergency stop + control record
 
 STOP_FILE = "STOP"
 POLICY_FILE = "autonomy_policy.json"
+CONTROL_FILE = "control.json"
+
+_CONTROL_ROLES = ("claude", "codex", "human", "jaharri", "all")
+
+FAIL_CLOSED_CONTROL = {
+    "schema_version": "control.v1", "status": "paused",
+    "paused_roles": ["all"],
+    "reason": "control record missing or invalid — fail closed",
+    "changed_utc": None, "authorized_by_event": None, "fail_closed": True,
+}
 
 
 def stop_file_path(root: str) -> str:
     return os.path.join(root, STOP_FILE)
 
 
+def stop_file_present(root: str) -> bool:
+    return os.path.exists(stop_file_path(root))
+
+
 def policy_path(root: str) -> str:
     return os.path.join(root, POLICY_FILE)
 
 
+def control_path(root: str) -> str:
+    return os.path.join(root, CONTROL_FILE)
+
+
+def read_control(root: str) -> dict:
+    """The AUTHORITATIVE run/pause state (H1: STATUS moved out of log.md).
+    Missing, unreadable, or schema-invalid → paused-all (FAIL CLOSED) —
+    deleting or mangling the record can never resume autonomy. Changes
+    happen only through the human-token STATUS_CHANGED event (cli
+    status-set), which then derives this file."""
+    path = control_path(root)
+    if not os.path.exists(path):
+        return dict(FAIL_CLOSED_CONTROL)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            control = json.load(fh)
+    except (OSError, ValueError):
+        return dict(FAIL_CLOSED_CONTROL)
+    if not isinstance(control, dict) \
+            or control.get("schema_version") != "control.v1" \
+            or control.get("status") not in ("active", "paused") \
+            or not isinstance(control.get("paused_roles"), list) \
+            or any(r not in _CONTROL_ROLES
+                   for r in control.get("paused_roles", [])):
+        return dict(FAIL_CLOSED_CONTROL)
+    return control
+
+
+def write_control(root: str, status: str, paused_roles: list, reason: str,
+                  authorized_by_event) -> dict:
+    """Derive control.json. Callers MUST have appended the authorizing
+    STATUS_CHANGED event first (cli status-set is the only sanctioned
+    path; tests and bootstrap write directly via this helper)."""
+    control = {"schema_version": "control.v1", "status": status,
+               "paused_roles": list(paused_roles), "reason": reason,
+               "changed_utc": utc_now(),
+               "authorized_by_event": authorized_by_event}
+    atomic_write_json(control_path(root), control)
+    return control
+
+
 def emergency_stop_reason(root: str):
-    """Checked before EVERY transition: council STATUS must be 'active' and
-    council/STOP must not exist. Returns a reason string, or None if clear."""
-    status = read_status(root).split(":", 1)[1].strip()
-    if status.lower() != "active":
-        return f"council STATUS is {status!r} (must be 'active')"
-    if os.path.exists(stop_file_path(root)):
+    """Checked before EVERY transition: the control record must read
+    'active' and council/STOP must not exist. Returns a reason string, or
+    None if clear. log.md is COSMETIC and can never resume autonomy."""
+    if stop_file_present(root):
         return "council/STOP file exists"
+    control = read_control(root)
+    if control["status"] != "active":
+        return (f"control record status is {control['status']!r} "
+                f"({control.get('reason') or 'no reason recorded'})")
     return None
+
+
+def status_allows(root: str, author: str) -> bool:
+    control = read_control(root)
+    if control["status"] == "active":
+        return True
+    roles = control.get("paused_roles") or ["all"]
+    return "all" not in roles and author not in roles
 
 
 # --------------------------------------------------------------------- log.md
 
 def read_status(root: str) -> str:
-    """First line of log.md, e.g. 'STATUS: active' or 'STATUS: paused codex'."""
+    """COSMETIC ONLY (H1): the log.md first line survives as a mirror for
+    humans skimming the log; no authority path reads it."""
     path = os.path.join(root, LOG_FILE)
     if not os.path.exists(path):
-        return "STATUS: active"
+        return "STATUS: (no log.md)"
     with open(path, encoding="utf-8") as fh:
         first = fh.readline().strip()
-    return first if first.upper().startswith("STATUS:") else "STATUS: active"
-
-
-def status_allows(root: str, author: str) -> bool:
-    status = read_status(root).split(":", 1)[1].strip().lower()
-    if status.startswith("paused"):
-        paused_for = status.split("paused", 1)[1].strip()
-        return bool(paused_for) and paused_for != author and \
-            paused_for != "all"
-    return True
+    return first if first.upper().startswith("STATUS:") else "STATUS: (none)"
 
 
 def append_log_md(root: str, author: str, body: str) -> None:

@@ -147,6 +147,36 @@ the launcher plan). Until then, a human (or an already-running session)
 starts each Claude work session; everything else in the loop is
 event-driven.
 
+## Human identity + control record (hardening H1)
+
+Human authority is a burned one-time token, never a `--role` string. The
+owner's passphrase derives an S/KEY hash chain (`tools/council/
+identity.py`); the council stores only the tip verifier
+(`council/identity/human-tip.json`), and the tip is pinned into the event
+chain by `HUMAN_IDENTITY_INITIALIZED`/`ROTATED`. Every human-authority
+event (`EXPERIMENT_APPROVED`, `CONDITIONS_SATISFIED`, human
+`REQUEST_CANCELED`, `STATUS_CHANGED`, `POLICY_INITIALIZED`,
+`HUMAN_IDENTITY_ROTATED`) carries the next preimage, bound to the exact
+action, verified and BURNED inside the events lock before the line lands
+(a crash wastes one token, never leaves a spendable one). A missing or
+substituted verifier where the chain pins one fails closed everywhere
+(append, guard preflight, `cli identity-status`). Same-user interception
+between keystroke and append is documented out of scope.
+
+The run/pause STATE lives in `council/control.json` — missing or invalid
+reads as PAUSED ALL (fail closed). It changes only through the
+human-token `STATUS_CHANGED` event (`cli status-set`); the log.md STATUS
+line is a cosmetic mirror with zero authority. `council/STOP` remains the
+independent hard emergency stop: bootstrap/control events pass a
+control-record pause (that is how the owner un-pauses) but never STOP.
+Generic `cli record` emits ONLY non-authority bookkeeping
+(`BUILD_STARTED`, `BUILD_READY`, `FIX_STARTED`, `WATCHER_ERROR`,
+`AUTONOMY_PAUSED`).
+
+Bootstrap on a fresh (fail-closed) root, owner-attended:
+`cli --role human identity-init` then
+`cli --role human status-set --status active`.
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

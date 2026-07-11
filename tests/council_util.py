@@ -7,9 +7,15 @@ from __future__ import annotations
 import os
 import subprocess
 
-from tools.council import Config, events, storage
+from tools.council import Config, events, identity, storage
 
 TEST_COMMAND = "python3 -m pytest tests/ -q"
+
+# H1 test identity: tiny chain + cheap KDF so token minting is fast; the
+# math under test is identical to production parameters
+TEST_PASSPHRASE = "test-owner-passphrase"
+TEST_CHAIN_LENGTH = 64
+TEST_ITERATIONS = 1_000
 
 
 def make_root(tmp_path) -> str:
@@ -18,7 +24,24 @@ def make_root(tmp_path) -> str:
     storage.ensure_layout(root)
     with open(os.path.join(root, "log.md"), "w", encoding="utf-8") as fh:
         fh.write("STATUS: active\n\n# test council log\n")
+    # H1: control.json is the authoritative run state (fail-closed when
+    # absent) and human events require identity tokens once a verifier
+    # exists — every test root gets both, matching a bootstrapped council
+    storage.write_control(root, "active", [], "test root", None)
+    identity.init_identity(root, TEST_PASSPHRASE,
+                           chain_length=TEST_CHAIN_LENGTH,
+                           iterations=TEST_ITERATIONS)
     return root
+
+
+def human_token(root: str, event_type: str, request_id: str,
+                target_commit: str, payload_core: dict) -> dict:
+    """A bound, spendable one-time token for the NEXT counter value."""
+    verifier = identity.read_verifier(root)
+    token = identity.compute_token(TEST_PASSPHRASE, verifier)
+    token["binds"] = identity.binding_hash(event_type, request_id,
+                                           target_commit, payload_core)
+    return token
 
 
 def make_repo(tmp_path, name: str = "repo") -> tuple:
@@ -131,17 +154,25 @@ _EVENT_TO_VERDICT = {"AUDIT_BLOCKED": "BLOCKED", "AUDIT_GO": "GO",
 def append(root: str, cfg: Config, event_type: str, sender: str,
            request_id: str, repo: str, commit: str, payload=None) -> dict:
     """Raw append helper. Verdict events must carry a schema-valid nested
-    verdict (append-boundary rule); when a test passes no payload, fill a
-    canonical valid one so drive-style sequences stay terse. Tests probing
-    the boundary itself pass their own (invalid) payloads explicitly."""
+    verdict, and human-authority events a spendable one-time token (H1) —
+    both autofilled when a test passes no explicit payload/token, so
+    drive-style sequences stay terse. Tests probing either boundary pass
+    their own (invalid) payloads explicitly."""
     if not payload and event_type in _EVENT_TO_VERDICT:
         from tools.council.schemas import compute_verdict_payload_hash
         payload = make_verdict(commit, request_id,
                                verdict=_EVENT_TO_VERDICT[event_type])
         payload["verdict_payload_hash"] = \
             compute_verdict_payload_hash(payload)
+    from tools.council.schemas import HUMAN_TOKEN_REQUIRED_EVENT_TYPES
+    payload = dict(payload or {})
+    if event_type in HUMAN_TOKEN_REQUIRED_EVENT_TYPES \
+            and sender == "human" and "human_token" not in payload \
+            and identity.read_verifier(root) is not None:
+        payload["human_token"] = human_token(root, event_type, request_id,
+                                             commit, payload)
     return events.append_event(root, cfg, event_type, sender, request_id,
-                               repo, commit, payload or {})
+                               repo, commit, payload)
 
 
 def drive_to_claimed(root, cfg, repo, head, request_id="test-req-001",

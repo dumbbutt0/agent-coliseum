@@ -40,13 +40,25 @@ def test_stop_file_trips_and_pause_records(tmp_path):
 
 def test_status_paused_trips(tmp_path):
     root, repo, head, cfg, rm_path = _setup(tmp_path)
+    storage.write_control(root, "paused", ["all"], "owner pause", None)
+    report = guard.preflight(cfg, roadmap_path=rm_path)
+    assert not report.ok and any("emergency_stop" in f
+                                 for f in report.failures)
+
+
+def test_log_md_status_edit_is_cosmetic(tmp_path):
+    """H1: forging the log.md STATUS line changes nothing — control.json
+    is the only authority, and deleting IT fails closed."""
+    root, repo, head, cfg, rm_path = _setup(tmp_path)
     log = os.path.join(root, "log.md")
     body = open(log, encoding="utf-8").read().split("\n", 1)[1]
     with open(log, "w", encoding="utf-8") as fh:
         fh.write("STATUS: paused all\n" + body)
     report = guard.preflight(cfg, roadmap_path=rm_path)
-    assert not report.ok and any("emergency_stop" in f
-                                 for f in report.failures)
+    assert report.ok  # the mirror has no authority
+    os.unlink(storage.control_path(root))
+    report = guard.preflight(cfg, roadmap_path=rm_path)
+    assert not report.ok and any("fail closed" in f for f in report.failures)
 
 
 def test_dirty_tree_and_wrong_head_trip(tmp_path):

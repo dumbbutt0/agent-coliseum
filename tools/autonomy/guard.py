@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from tools.autonomy import default_roadmap_path, roadmap as roadmap_mod
+from tools.council.schemas import CouncilError
 from tools.council import Config, events, git_state, policy, state_machine, \
     storage
 
@@ -59,6 +60,23 @@ def preflight(cfg: Config, repo: str | None = None,
         if flags["milestone_reached"]:
             failures.append("flags: society milestone reached — autonomous "
                             "continuation is forbidden")
+        # H1: identity lineage — a substituted or missing verifier where
+        # the chain pins one is a fail-closed condition
+        try:
+            from tools.council import identity
+            pin = identity.latest_pin(chain)
+            verifier = identity.read_verifier(root)
+            if pin is not None:
+                if verifier is None:
+                    failures.append(
+                        "identity: chain pins a token tip but the verifier "
+                        "file is missing — identity-restore-from-pin")
+                elif not identity.verify_lineage(verifier, *pin):
+                    failures.append(
+                        "identity: verifier does not descend from the "
+                        "chain-pinned tip — possible substitution")
+        except CouncilError as exc:
+            failures.append(f"identity: {exc}")
 
     # 2. immutable policy, unchanged since pinned
     pol = pol_hash = None

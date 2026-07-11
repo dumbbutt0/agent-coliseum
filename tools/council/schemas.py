@@ -73,6 +73,12 @@ EVENT_TYPES = (
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
+    # H1 identity + control events (request_id is a synthetic control slug;
+    # they never touch request state)
+    "STATUS_CHANGED",
+    "POLICY_INITIALIZED",
+    "HUMAN_IDENTITY_INITIALIZED",
+    "HUMAN_IDENTITY_ROTATED",
 )
 
 ROLES = ("claude", "codex", "human")
@@ -108,7 +114,30 @@ SENDER_ALLOWED = {
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
+    "STATUS_CHANGED": frozenset({"human"}),
+    "POLICY_INITIALIZED": frozenset({"human"}),
+    "HUMAN_IDENTITY_INITIALIZED": frozenset({"human"}),
+    "HUMAN_IDENTITY_ROTATED": frozenset({"human"}),
 }
+
+# H1: events whose authority is a HUMAN one-time token (S/KEY chain,
+# tools/council/identity.py) — a caller-supplied --role/sender string is
+# never sufficient. REQUEST_CANCELED needs a token only from a human
+# sender (claude cancels revoke, never grant). HUMAN_IDENTITY_INITIALIZED
+# is self-pinning (it CREATES the chain) and needs no token.
+HUMAN_TOKEN_REQUIRED_EVENT_TYPES = frozenset({
+    "EXPERIMENT_APPROVED", "CONDITIONS_SATISFIED", "REQUEST_CANCELED",
+    "STATUS_CHANGED", "POLICY_INITIALIZED", "HUMAN_IDENTITY_ROTATED",
+})
+
+# H1: bootstrap/control events appendable while the CONTROL record pauses
+# the council (a fail-closed fresh root must be bootstrappable, and
+# un-pausing requires appending STATUS_CHANGED) — but NEVER while the
+# STOP file exists: STOP is the hard emergency stop.
+CONTROL_BOOTSTRAP_EVENT_TYPES = frozenset({
+    "STATUS_CHANGED", "POLICY_INITIALIZED", "HUMAN_IDENTITY_INITIALIZED",
+    "HUMAN_IDENTITY_ROTATED",
+})
 
 # Events that may still be appended while the emergency stop is engaged —
 # exactly the ones that RECORD the stop; everything else is refused.
