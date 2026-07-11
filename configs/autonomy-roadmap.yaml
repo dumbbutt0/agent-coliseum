@@ -1,0 +1,495 @@
+# First Gladiator roadmap — DRAFT machine twin of FIRST-GLADIATOR-ROADMAP.md.
+# Lands at repo configs/autonomy-roadmap.yaml in the M1 canonicalization
+# commit; the OWNER activates it at SC-4 (until then the live roadmap at
+# Claude-Wiki/coliseum/autonomy-roadmap.yaml, milestone society-substrate,
+# remains authoritative). Strict YAML subset (tools/autonomy/roadmap.py):
+# 2-space indents, block sequences, scalars, [] for empty lists, full-line
+# comments only. Limits are stricter than or equal to policy caps. The
+# Markdown roadmap and this file must agree exactly; divergence is a defect.
+roadmap_version: "1"
+milestone: first-gladiator
+tasks:
+  - task_id: m1-canonical-spec
+    title: Canonical First Gladiator specification + wiki reconciliation
+    phase: m1-canonicalization
+    status: ready
+    dependencies: []
+    allowed_files:
+      - docs/first-gladiator/
+      - configs/autonomy-roadmap.yaml
+      - tools/autonomy/__init__.py
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/textlab/
+    audit_scope: SPEC.md exit criteria + claim-lifecycle rules, scorecard remap, roadmap YAML landing + default-path pointer
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 30
+    maximum_storage_growth_mb: 64
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - SPEC exit criteria complete and internally consistent
+      - owner SC-3 sign-off and SC-4 roadmap transition recorded on chain
+    failure_criteria:
+      - SPEC contradicts a binding ruling
+      - roadmap YAML fails validate_roadmap
+    evidence_required:
+      - audited commit with SPEC + GAP + ROADMAP docs
+    requires_human: true
+    next_tasks:
+      - m2-metrics-freeze
+  - task_id: m2-metrics-freeze
+    title: METRICS-v1 freeze of the deterministic ground-truth metrics
+    phase: m2-metrics
+    status: pending
+    dependencies:
+      - m1-canonical-spec
+    allowed_files:
+      - docs/metrics/
+      - coliseum/textlab/metrics.py
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+    audit_scope: METRICS-v1 doc matches implementation exactly (numerator, denominator, exclusions, effective units, uncertainty, report form)
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 30
+    maximum_storage_growth_mb: 64
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - every implemented metric documented with all required fields
+      - owner SC-5 ratification recorded on chain
+    failure_criteria:
+      - doc-implementation mismatch
+      - stated confidence gains arbitration authority
+    evidence_required:
+      - audited commit with METRICS-v1 + metric-version constant
+    requires_human: true
+    next_tasks:
+      - m3-scenario-registry
+  - task_id: m3-scenario-registry
+    title: Scenario registry and taxonomy over the existing seven scenarios
+    phase: m3-scenario-registry
+    status: pending
+    dependencies:
+      - m2-metrics-freeze
+    allowed_files:
+      - configs/registry/
+      - coliseum/textlab/scenario.py
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+    audit_scope: registry completeness for all seven scenarios, family mapping to scenario-pack-v1, variant versioning, two-paraphrase enforcement, lint
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 30
+    maximum_storage_growth_mb: 64
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - all seven scenarios registered with family + variants + hashes
+      - lint refuses missing or incompatible registry fields
+    failure_criteria:
+      - a scenario remains unregistered or misclassified
+    evidence_required:
+      - audited commit with registry + lint tests
+    requires_human: false
+    next_tasks:
+      - m4-experiment-registry
+  - task_id: m4-experiment-registry
+    title: Experiment registry binding designs to evidence and verdicts
+    phase: m4-experiment-registry
+    status: pending
+    dependencies:
+      - m3-scenario-registry
+    allowed_files:
+      - configs/registry/
+      - coliseum/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+    audit_scope: design-regime-approval-artifact-replay-report-verdict binding, post-freeze mutation refusal, retry lineage, pooling prevention, back-fill of sweep sweep-v2 exp-1 exp-2, held-out set frozen
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 30
+    maximum_storage_growth_mb: 64
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - back-filled registry validates against real artifacts
+      - post-freeze mutation is refused by lint
+    failure_criteria:
+      - registry accepts a broken evidence link
+    evidence_required:
+      - audited commit with registry + mutation-refusal tests
+    requires_human: false
+    next_tasks:
+      - m5-reports-claims
+  - task_id: m5-reports-claims
+    title: Report generators and claim lifecycle with Program Dashboard
+    phase: m5-reports
+    status: pending
+    dependencies:
+      - m4-experiment-registry
+    allowed_files:
+      - scripts/
+      - coliseum/textlab/metrics.py
+      - configs/registry/
+      - docs/first-gladiator/
+      - derived/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+    audit_scope: run regime experiment milestone report generators derived from artifacts, claim ladder states with evidence-link lint, dashboard idempotence
+    experiment_class: report_generation
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 60
+    maximum_storage_growth_mb: 256
+    expected_tests: golden-file report tests against exp-1 and exp-2 manifests
+    success_criteria:
+      - reports regenerate byte-identically from unchanged artifacts
+      - claims registry enforces the promotion ladder
+    failure_criteria:
+      - a report number cannot be traced to an artifact
+    evidence_required:
+      - audited commit with generators + golden files
+    requires_human: false
+    next_tasks:
+      - m6-sequential-baseline
+  - task_id: m6-sequential-baseline
+    title: Sequential-history live baseline plus stochastic and paraphrase evidence
+    phase: m6-live-baseline
+    status: pending
+    dependencies:
+      - m5-reports-claims
+    allowed_files:
+      - logs/runs/
+      - derived/textlab/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: fresh protocol-v2 requests executing the frozen SEQUENTIAL-RERUN design, stochastic baseline, paraphrase replication, per-batch owner approvals
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 240
+    maximum_storage_growth_mb: 1024
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - RESULT_APPROVED on all three batches with byte-identical replay
+      - variance estimates recorded for power decisions
+    failure_criteria:
+      - replay mismatch
+      - pooling across interaction modes
+    evidence_required:
+      - run dirs with manifests and captures
+      - registry and claim entries
+    requires_human: true
+    next_tasks:
+      - m7-loop-amendment
+  - task_id: m7-loop-amendment
+    title: Experiment-loop hardening and ollama_local automation amendment
+    phase: m7-loop
+    status: pending
+    dependencies:
+      - m6-sequential-baseline
+    allowed_files:
+      - tools/autonomy/
+      - scripts/
+      - docs/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+    audit_scope: resumable idempotent loop, anomaly routing with evidence-derived thresholds, then the owner-only policy amendment
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 60
+    maximum_storage_growth_mb: 128
+    expected_tests: chaos tests kill-resume with no duplicate effective units
+    success_criteria:
+      - interrupted loop resumes without changing effective sample counts
+      - anomalies halt and route to the owner
+      - SC-7 policy amendment recorded by the owner
+    failure_criteria:
+      - silent rerun changes lineage
+    evidence_required:
+      - audited commit + chaos test evidence
+    requires_human: true
+    next_tasks:
+      - m8-time-pressure
+  - task_id: m8-time-pressure
+    title: Time-pressure and reflex mechanism validation with scenario batch A
+    phase: m8-time-pressure
+    status: pending
+    dependencies:
+      - m7-loop-amendment
+    allowed_files:
+      - configs/scenarios/
+      - configs/registry/
+      - logs/runs/
+      - derived/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+    audit_scope: budget-pressure isolation pilots, latency log-only preserved, time_pressure and self_preservation families authored with twins and variants
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 240
+    maximum_storage_growth_mb: 1024
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - mechanism-adequacy decision resolved from pilot evidence
+      - both families frozen in the registry after clean pilots
+    failure_criteria:
+      - manipulation confounded and unfixable within scope
+    evidence_required:
+      - pilot run dirs + registry freeze entries
+    requires_human: false
+    next_tasks:
+      - m9-personas
+  - task_id: m9-personas
+    title: Versioned LLM personas with measured intervention strength
+    phase: m9-personas
+    status: pending
+    dependencies:
+      - m8-time-pressure
+    allowed_files:
+      - configs/personas/
+      - configs/registry/
+      - configs/scenarios/
+      - coliseum/textlab/
+      - logs/runs/
+      - derived/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+    audit_scope: persona hashing into behavioral_config, legacy-implicit-v0 mapping, pooling prevention, intervention-strength pilots, scenario batch B
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 240
+    maximum_storage_growth_mb: 1024
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - persona change produces a new regime hash
+      - measured effects justify the persona set before any expansion
+    failure_criteria:
+      - persona pooling possible
+      - parser stability degrades under personas
+    evidence_required:
+      - persona pilot run dirs + regime-hash tests
+    requires_human: false
+    next_tasks:
+      - m10-reversal-program
+  - task_id: m10-reversal-program
+    title: Reflex-planner reversal taxonomy program
+    phase: m10-reversal
+    status: pending
+    dependencies:
+      - m9-personas
+    allowed_files:
+      - docs/first-gladiator/
+      - configs/registry/
+      - logs/runs/
+      - derived/textlab/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: taxonomy frozen from observed data, controlled wording model persona sampling comparisons, replication separated from generalization
+    experiment_class: stochastic_sweep_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 360
+    maximum_storage_growth_mb: 1536
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - taxonomy design frozen before sweep execution
+      - findings enter the claim ladder at honest positions
+    failure_criteria:
+      - taxonomy redefined after data collection without a versioned amendment
+    evidence_required:
+      - pre-registration + sweep manifests + experiment report
+    requires_human: false
+    next_tasks:
+      - m11-two-agent
+  - task_id: m11-two-agent
+    title: Two-agent execution foundation
+    phase: m11-two-agent
+    status: pending
+    dependencies:
+      - m10-reversal-program
+    allowed_files:
+      - coliseum/textlab/
+      - configs/scenarios/
+      - configs/registry/
+      - logs/runs/
+      - derived/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+    audit_scope: deterministic two-agent turns, named logged turn-order arbitration, actor-bound observations and actions, replay and regime separation
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 120
+    maximum_storage_growth_mb: 512
+    expected_tests: two-agent replay determinism tests green
+    success_criteria:
+      - scripted x scripted then llm x llm validation runs RESULT_APPROVED
+    failure_criteria:
+      - actor attribution ambiguous in any record
+    evidence_required:
+      - audited commit + validation run dirs
+    requires_human: false
+    next_tasks:
+      - m12-memory-arcs
+  - task_id: m12-memory-arcs
+    title: Memory representations and longitudinal gladiator arcs
+    phase: m12-memory
+    status: pending
+    dependencies:
+      - m11-two-agent
+    allowed_files:
+      - coliseum/textlab/
+      - configs/scenarios/
+      - configs/registry/
+      - logs/runs/
+      - derived/textlab/
+      - tests/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+    audit_scope: memory pilots then single frozen representation, linked histories, retaliation forgiveness loyalty betrayal drift measures
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 360
+    maximum_storage_growth_mb: 1536
+    expected_tests: replay determinism with memory enabled green
+    success_criteria:
+      - representation frozen only after pilot evidence
+      - arc lineage preserved end to end
+    failure_criteria:
+      - memory-on and memory-off pooled anywhere
+    evidence_required:
+      - pilot + arc manifests and reports
+    requires_human: false
+    next_tasks:
+      - m13-completion
+  - task_id: m13-completion
+    title: First Gladiator experiment completion sweep
+    phase: m13-completion
+    status: pending
+    dependencies:
+      - m12-memory-arcs
+    allowed_files:
+      - logs/runs/
+      - derived/textlab/
+      - docs/
+      - configs/registry/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: required scenario cells complete, coverage complete, audited reports, anomalies resolved or documented as accepted limitations
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 360
+    maximum_storage_growth_mb: 2048
+    expected_tests: python3 -m pytest tests/ -q green at the audited commit
+    success_criteria:
+      - registry shows every required cell complete or documented
+    failure_criteria:
+      - silent coverage shrinkage
+    evidence_required:
+      - completion report derived from registries
+    requires_human: false
+    next_tasks:
+      - m14-training-gate
+  - task_id: m14-training-gate
+    title: Training decision gate with held-out preservation
+    phase: m14-training
+    status: pending
+    dependencies:
+      - m13-completion
+    allowed_files:
+      - docs/first-gladiator/
+      - configs/registry/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: target selection from baseline evidence, scoped weight_training exception decision, held-out contamination lint
+    experiment_class: source_change_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 60
+    maximum_storage_growth_mb: 128
+    expected_tests: held-out contamination lint green against all prior manifests
+    success_criteria:
+      - SC-8 owner decision recorded on chain either way
+    failure_criteria:
+      - training treated as mandatory without evidence
+      - held-out set contaminated
+    evidence_required:
+      - design doc + decision event
+    requires_human: true
+    next_tasks:
+      - m15-readiness
+  - task_id: m15-readiness
+    title: First Gladiator readiness review and Hunger Games gate
+    phase: m15-readiness
+    status: pending
+    dependencies:
+      - m14-training-gate
+    allowed_files:
+      - docs/first-gladiator/
+      - derived/textlab/
+      - scripts/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: every SPEC exit criterion linked to evidence, no unresolved BLOCKED requests, independent completion audit, owner gate
+    experiment_class: report_generation
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 60
+    maximum_storage_growth_mb: 128
+    expected_tests: readiness evidence links resolve and reports regenerate idempotently
+    success_criteria:
+      - SC-9 owner verdict recorded on chain
+    failure_criteria:
+      - an exit criterion lacks evidence
+    evidence_required:
+      - READINESS.md + independent audit verdict
+    requires_human: true
+    next_tasks: []
