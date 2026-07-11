@@ -245,11 +245,17 @@ def _obj_version(obj: dict, field: str = "protocol_version") -> str:
 
 def compute_event_hash(event: dict) -> str:
     """Version-DISPATCHED (H2): a 2.0 event is hashed under the event
-    domain; a 1.0 event keeps the bare formula. Verification recomputes
-    each event under ITS OWN version and compares stored hash strings, so
-    the first 2.0 event chains onto the last 1.0 event with no break."""
+    domain; a 1.0 event keeps the bare formula. An UNSUPPORTED version
+    raises (cycle-1 blocker 3: the legacy fallback silently admitted a
+    3.0 event) — verify_chain surfaces this as an invalid chain."""
+    version = _obj_version(event)
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise ChainError(
+            f"event {event.get('event_id')!r}: unsupported "
+            f"protocol_version {version!r} — only "
+            f"{SUPPORTED_PROTOCOL_VERSIONS} exist")
     body = {k: v for k, v in event.items() if k != "event_hash"}
-    if _obj_version(event) == "2.0":
+    if version == "2.0":
         return domain_hash(EVENT_DOMAIN_V2, body)
     return payload_hash(body)
 
@@ -261,16 +267,27 @@ def compute_request_payload_hash(request: dict) -> str:
     return payload_hash(body)
 
 
+VERDICT_SCHEMA_DOMAINS = {
+    "source-verdict.v2": SOURCE_VERDICT_DOMAIN_V2,
+    "result-verdict.v2": RESULT_VERDICT_DOMAIN_V2,
+}
+
+
 def compute_verdict_payload_hash(verdict: dict) -> str:
+    """A verdict's hash domain is UNAMBIGUOUS (cycle-1 blocker 1): a
+    known schema_version drives its v2 domain; ABSENT schema_version is a
+    legacy verdict (bare hash). An unknown schema_version raises rather
+    than silently falling back — validate_verdict enforces the same, so a
+    verdict can never claim a v2 shape while being legacy-hashed."""
     body = {k: v for k, v in verdict.items() if k != "verdict_payload_hash"}
-    # verdict schema_version selects the domain; source vs result is by the
-    # verdict value's vocabulary (checked in validate_verdict)
     sv = verdict.get("schema_version")
-    if sv == "source-verdict.v2":
-        return domain_hash(SOURCE_VERDICT_DOMAIN_V2, body)
-    if sv == "result-verdict.v2":
-        return domain_hash(RESULT_VERDICT_DOMAIN_V2, body)
-    return payload_hash(body)
+    if sv is None:
+        return payload_hash(body)
+    if sv not in VERDICT_SCHEMA_DOMAINS:
+        raise SchemaViolation(
+            f"unknown verdict schema_version {sv!r} "
+            f"(known: {sorted(VERDICT_SCHEMA_DOMAINS)})")
+    return domain_hash(VERDICT_SCHEMA_DOMAINS[sv], body)
 
 
 # ------------------------------------------------------------------ validators
@@ -435,6 +452,22 @@ AUDIT_MODES = ("narrow", "isolated_archive", "full", "result")
 _TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
+
+def _validate_utc_timestamp(value) -> None:
+    """Grammar AND real calendar/clock (cycle-1 blocker 2: the regex alone
+    accepted 2026-99-99T99:99:99Z)."""
+    if not isinstance(value, str) or not _TIMESTAMP_RE.match(value):
+        raise SchemaViolation(
+            "timestamp_utc must be ISO-8601 UTC "
+            "(YYYY-MM-DDTHH:MM:SS[.ffffff]Z)")
+    import datetime
+    core = value[:-1]  # drop trailing Z
+    fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in core else "%Y-%m-%dT%H:%M:%S"
+    try:
+        datetime.datetime.strptime(core, fmt)
+    except ValueError as exc:
+        raise SchemaViolation(f"timestamp_utc is not a real UTC time: {exc}")
+
 FINDING_REQUIRED_FIELDS = (
     "claim", "evidence", "failure_mode", "file", "line_range",
     "minimum_fix", "minimum_regression", "reproduced", "severity",
@@ -502,14 +535,21 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
         if not isinstance(verdict[name], str) or not verdict[name]:
             raise SchemaViolation(f"{name} must be a non-empty string")
     # H2 (carried from codex-auto-launcher-audit-002 GO_WITH_CONDITIONS):
-    # audit_mode is an enum and timestamp_utc has the council's format
+    # audit_mode is an enum and timestamp_utc is a REAL UTC timestamp
     if verdict["audit_mode"] not in AUDIT_MODES:
         raise SchemaViolation(
             f"audit_mode {verdict['audit_mode']!r} not in {AUDIT_MODES}")
-    if not _TIMESTAMP_RE.match(verdict["timestamp_utc"]):
-        raise SchemaViolation(
-            "timestamp_utc must be ISO-8601 UTC "
-            "(YYYY-MM-DDTHH:MM:SS[.mmm]Z)")
+    _validate_utc_timestamp(verdict["timestamp_utc"])
+    # cycle-1 blocker 1: schema_version, if present, must be known and
+    # match the audit kind — no verdict claims a v2 shape while legacy
+    sv = verdict.get("schema_version")
+    if sv is not None:
+        expected_sv = ("result-verdict.v2" if result_audit
+                       else "source-verdict.v2")
+        if sv != expected_sv:
+            raise SchemaViolation(
+                f"verdict schema_version {sv!r} does not match this audit "
+                f"kind (expected {expected_sv!r})")
     for name in ("blockers", "conditions", "commands_run"):
         value = verdict[name]
         if not isinstance(value, list) or \
