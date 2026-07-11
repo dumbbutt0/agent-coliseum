@@ -69,8 +69,12 @@ def claim(root: str, cfg, request_id: str) -> dict:
         t.mark("locked")
         with open(ready_path, "rb") as fh:
             request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
-        os.rename(ready_path, claimed_path)
+        # Journal the intent to move BEFORE the rename: if we crash after the
+        # rename but before recording it, recovery still knows the move was
+        # ours to undo. The rollback guard (claimed exists AND ready absent)
+        # makes a "moved"-marked-but-not-yet-renamed crash a safe no-op.
         t.mark("moved")
+        os.rename(ready_path, claimed_path)
         event = events.append_event(
             root, cfg, "AUDIT_CLAIMED", SENDER, request_id,
             request["repository"], request["target_commit"],

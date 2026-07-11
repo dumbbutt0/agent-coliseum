@@ -212,6 +212,59 @@ def test_renew_cannot_overwrite_a_replacement_lock(env):
     locking.release(replacement)
 
 
+def test_publish_rolls_back_ready_file_on_append_crash(env, monkeypatch):
+    """H5 crash-safety (draft->ready->event): if the AUDIT_REQUESTED append
+    fails with a low-level OSError (a crash, not just a CouncilError
+    refusal), publish_request must not leave an unpinned request orphaned in
+    ready/ — the rollback is all-or-nothing, keyed on whether the authority
+    event actually landed."""
+    root, repo, head, cfg = env
+    append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "BUILD_READY", "claude", RID, repo, head)
+    real_append = publish.events.append_event
+
+    def boom(root_, cfg_, etype, *a, **k):
+        if etype == "AUDIT_REQUESTED":
+            raise OSError("simulated crash during append")
+        return real_append(root_, cfg_, etype, *a, **k)
+
+    monkeypatch.setattr(publish.events, "append_event", boom)
+    with pytest.raises(OSError):
+        publish.publish_request(root, cfg, make_request(repo, head, RID))
+    monkeypatch.undo()
+    assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
+    from tools.council import state_machine
+    proj = state_machine.project(events.read_chain(root))
+    assert RID not in proj or proj[RID]["state"] != "requested"
+
+
+def test_compensate_is_phase_and_ownership_aware(env):
+    """Blocker (cycle 2): a claim that began its journal but never acquired
+    the lock or moved the file must NOT, on compensation, disturb a
+    concurrent claimant that legitimately holds the lock and moved the
+    request. Recovery only undoes the move its OWN journal recorded, and
+    releases only a lock its OWN token owns."""
+    root, repo, head, cfg = env
+    _publish(root, cfg, repo, head)
+    # claimant B is mid-claim: holds the lock, moved ready/ -> claimed/, but
+    # has not yet appended AUDIT_CLAIMED
+    lockB = locking.acquire(root, RID, "codex", RID, kind="claim")
+    os.rename(storage.safe_request_path(root, "ready", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    # claimant A raced: it began a journal (prior_claimed_count 0) but its
+    # acquire failed, so it never reached "locked"/"moved"
+    tA = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
+                       {"owner_token": "a" * 32, "prior_claimed_count": 0})
+    outcome = txn.compensate(root, make_cfg(repo, root, role="codex"), tA)
+    assert outcome == "back"
+    # B is completely untouched: its file stays claimed, its lock survives
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
+    holder = locking.read_lock(root, RID)
+    assert holder is not None and holder["owner_token"] == lockB.owner_token
+    locking.release(lockB)
+
+
 def test_launcher_recovers_orphan_claim_before_work(env, monkeypatch):
     """Blocker 3: codex_launcher._run calls txn.recover at the loop top, so
     an orphaned interrupted claim is healed BEFORE work is derived — not

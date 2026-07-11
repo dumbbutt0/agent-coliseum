@@ -103,19 +103,24 @@ def _recover_claim(root: str, cfg, j: dict) -> str:
     from tools.council import events
     rid = j["request_id"]
     data = j["data"]
+    completed = j.get("completed", [])
     prior = data.get("prior_claimed_count", 0)
     current = sum(1 for e in events.read_chain(root)
                   if e["event_type"] == "AUDIT_CLAIMED"
                   and e["request_id"] == rid)
     if current > prior:
         return "forward"   # our event is authoritative; nothing to undo
-    # roll back: request back to ready/ (if it was moved), our lock released.
+    # Roll back PHASE- and OWNERSHIP-aware (H5 cycle-2 round 2): a claim that
+    # never acquired the lock or moved the file must not disturb a concurrent
+    # claimant's state. Only undo the move if OUR journal recorded reaching
+    # the "moved" phase; only then can claimed/<rid> be ours to move back.
+    if "moved" in completed:
+        ready = storage.safe_request_path(root, "ready", rid)
+        claimed_path = storage.safe_request_path(root, "claimed", rid)
+        if os.path.exists(claimed_path) and not os.path.exists(ready):
+            os.rename(claimed_path, ready)
     # Release is compare-and-delete on OUR token, so a concurrent claimant's
-    # lock (a different token) is never touched.
-    ready = storage.safe_request_path(root, "ready", rid)
-    claimed_path = storage.safe_request_path(root, "claimed", rid)
-    if os.path.exists(claimed_path) and not os.path.exists(ready):
-        os.rename(claimed_path, ready)
+    # lock (a different token) is never removed even if our journal names one.
     token = data.get("owner_token")
     if token:
         locking.release(locking.Lock(
@@ -136,7 +141,8 @@ def compensate(root: str, cfg, txn: "Txn") -> str | None:
     if handler is None:
         return None
     j = {"txn_id": txn.txn_id, "kind": txn.kind,
-         "request_id": txn.request_id, "data": txn.data}
+         "request_id": txn.request_id, "data": txn.data,
+         "completed": txn.completed}
     try:
         outcome = handler(root, cfg, j)
     except CouncilError:

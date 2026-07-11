@@ -70,42 +70,14 @@ def acquire(root: str, name: str, role: str, request_id: str,
                 owner_token=token)
 
 
-def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
-    """Extend the lease — ownership-preserving compare-and-swap (H5 cycle-2
-    fix). A plain read-verify-then-write let a stale owner overwrite a
-    replacement lock if the holder was released and re-acquired between the
-    read and the write. Instead we ATOMICALLY move the live lock aside
-    (single-winner rename), confirm the moved body is still OURS, update it,
-    and restore it with an O_EXCL create so a lock re-acquired during the
-    swap window is never clobbered — a raced renew fails closed (LockHeld),
-    never corrupts a live lease."""
-    if lock.root is None or lock.owner_token is None:
-        raise LockHeld("cannot renew a lock without its owner token")
-    aside = f"{lock.path}.renew.{lock.owner_token}"
+def _write_lock_excl(path: str, body: dict) -> bool:
+    """O_EXCL-create `path` with `body`; return False WITHOUT clobbering if a
+    file already exists there. The restore commit point for renew — a lock
+    re-acquired in the swap vacancy is never overwritten."""
     try:
-        os.rename(lock.path, aside)          # atomic single-winner grab
-    except OSError:
-        raise LockHeld("renew refused — lock is gone")
-    body = read_lock_file(aside)
-    if not isinstance(body, dict) or \
-            body.get("owner_token") != lock.owner_token:
-        # we grabbed a DIFFERENT owner's lock (released+reacquired between
-        # our read and this rename) — put it back untouched and refuse
-        try:
-            os.rename(aside, lock.path)
-        except OSError:
-            pass
-        raise LockHeld("renew refused — not the lock owner")
-    body["lease_expires_utc"] = _lease_expiry(lease_seconds)
-    try:
-        fd = os.open(lock.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        # someone acquired in the swap window; do not clobber their lock
-        try:
-            os.unlink(aside)
-        except OSError:
-            pass
-        raise LockHeld("renew refused — lock re-acquired during renew")
+        return False
     try:
         os.write(fd, (canonical_json(body) + "\n").encode("utf-8"))
         try:
@@ -114,8 +86,55 @@ def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
             pass
     finally:
         os.close(fd)
+    return True
+
+
+def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
+    """Extend the lease — ownership-preserving (H5 cycle-2 fix, round 2).
+
+    Two failure modes had to close together: (a) a stale owner must never
+    OVERWRITE a replacement lock, and (b) renew must never MOVE a lock it
+    does not own. So we first CONFIRM ownership by reading — a lock that is
+    not ours is left completely untouched and renew fails closed. Only then
+    do we move OUR lock aside (compare-and-delete already forbids any other
+    party from taking it, so what we grab is still ours) and restore it in
+    place with an O_EXCL create; if a lock was re-acquired during that brief
+    vacancy we do NOT clobber it and fail closed instead. No path overwrites
+    another holder's lock at any point."""
+    if lock.root is None or lock.owner_token is None:
+        raise LockHeld("cannot renew a lock without its owner token")
+    # (1) confirm ownership by READING — never disturb a non-owned lock
+    holder = read_lock(lock.root, lock.name)
+    if not isinstance(holder, dict) or \
+            holder.get("owner_token") != lock.owner_token:
+        raise LockHeld("renew refused — not the lock owner")
+    # (2) grab OUR lock aside (single-winner rename; compare-and-delete keeps
+    #     it ours between the read above and here) and update its lease
+    aside = f"{lock.path}.renew.{lock.owner_token}"
     try:
-        os.unlink(aside)
+        os.rename(lock.path, aside)
+    except OSError:
+        raise LockHeld("renew refused — lock is gone")
+    body = read_lock_file(aside)
+    if not isinstance(body, dict) or \
+            body.get("owner_token") != lock.owner_token:
+        # unreachable while compare-and-delete protects our lock, but if it
+        # ever happens, restore the grabbed body only into a still-vacant
+        # path (never clobber a replacement) and fail closed
+        if _write_lock_excl(lock.path, body if isinstance(body, dict) else {}):
+            _unlink_quietly(aside)
+        raise LockHeld("renew refused — ownership changed during renew")
+    body["lease_expires_utc"] = _lease_expiry(lease_seconds)
+    if not _write_lock_excl(lock.path, body):
+        # a lock was re-acquired in the vacancy — do not clobber it
+        _unlink_quietly(aside)
+        raise LockHeld("renew refused — lock re-acquired during renew")
+    _unlink_quietly(aside)
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
     except OSError:
         pass
 

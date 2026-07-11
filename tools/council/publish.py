@@ -131,14 +131,20 @@ def publish_request(root: str, cfg: Config, request: dict,
              "expected_test_command": request["expected_test_command"],
              "expected_test_count": request["expected_test_count"],
              "blockers_addressed": request["blockers_addressed"]})
-    except CouncilError:
+    except (CouncilError, OSError):
         # the append is the authority; roll the file back so no unpinned
-        # request ever sits in ready/ (append_event re-checks under lock,
-        # so a concurrent interleaving can still refuse here)
-        try:
-            os.unlink(ready_path)
-        except OSError:
-            pass
+        # request ever sits in ready/. A crash/OSError mid-append (not only a
+        # CouncilError refusal) must trigger the same rollback — but ONLY if
+        # the authority event did NOT land: if the event is durably in the
+        # chain and a LATER step failed, the request IS published and the
+        # ready file must stay (all-or-nothing, both directions).
+        landed = any(e["event_type"] == event_type and e["request_id"] == rid
+                     for e in events.read_chain(root))
+        if not landed:
+            try:
+                os.unlink(ready_path)
+            except OSError:
+                pass
         raise
 
     scope_lines = "\n".join(f"  {i}. {s}" for i, s in
