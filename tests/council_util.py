@@ -129,6 +129,13 @@ def make_verdict(head: str, request_id: str = "test-req-001",
         "findings": [],
         "commands_run": [TEST_COMMAND],
         "timestamp_utc": storage.utc_now(),
+        # H3 auditor-judgment fields — required on RESULT verdicts (the
+        # runner-pinned bindings are injected by submit_verdict); harmless
+        # extras on source verdicts
+        "replay_result": "replayed_ok",
+        "counts": {"scenarios_run": 1, "validations_passed": 1,
+                   "validations_failed": 0},
+        "conclusion_scope": "test evidence approved",
     }
     body.update(overrides)
     return body
@@ -174,6 +181,49 @@ _EVENT_TO_VERDICT = {"AUDIT_BLOCKED": "BLOCKED", "AUDIT_GO": "GO",
                      "RESULT_BLOCKED": "BLOCKED"}
 
 
+def _inject_test_bindings(root, verdict, rid, commit, result_audit) -> None:
+    """Populate H3 verdict bindings from the chain (mirrors
+    codex_watch._inject_bindings) so drive-style test appends produce
+    valid, cross-checkable verdicts. Falls back to synthetic values when
+    no publication event exists yet (negative/edge tests)."""
+    from tools.council import state_machine
+    chain = events.read_chain(root)
+    proj = state_machine.project(chain)
+    src_pub = pub = None
+    for e in chain:
+        if e["request_id"] != rid:
+            continue
+        if e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+            src_pub = e
+        if result_audit and e["event_type"] == "RESULT_AUDIT_REQUESTED":
+            pub = e
+    if not result_audit:
+        pub = src_pub
+    verdict["auditor"] = "codex"
+    verdict["audit_cycle"] = proj.get(rid, {}).get("audit_cycles") or 1
+    verdict["request_payload_hash"] = (
+        (src_pub["payload"].get("request_payload_hash") or "0" * 64)
+        if src_pub else "0" * 64)
+    verdict["publication_event_id"] = (
+        pub["event_id"] if pub else "000001-00000000")
+    verdict["publication_event_hash"] = (
+        pub["event_hash"] if pub else "0" * 64)
+    if result_audit:
+        p = pub["payload"] if pub else {}
+        verdict["experiment_config_hash"] = p.get(
+            "experiment_config_hash", "0" * 64)
+        verdict["run_id"] = p.get("run_id", "run-x")
+        verdict["run_dir"] = p.get("run_dir", "logs/runs/run-x")
+        verdict["evidence_inventory_hash"] = p.get(
+            "evidence_inventory_hash", "0" * 64)
+        verdict["validation_report_hash"] = p.get(
+            "validation_report_hash", "0" * 64)
+        verdict["replay_result"] = "replayed_ok"
+        verdict["counts"] = {"scenarios_run": 1, "validations_passed": 1,
+                             "validations_failed": 0}
+        verdict["conclusion_scope"] = "test evidence approved"
+
+
 def append(root: str, cfg: Config, event_type: str, sender: str,
            request_id: str, repo: str, commit: str, payload=None) -> dict:
     """Raw append helper. Verdict events must carry a schema-valid nested
@@ -181,16 +231,39 @@ def append(root: str, cfg: Config, event_type: str, sender: str,
     both autofilled when a test passes no explicit payload/token, so
     drive-style sequences stay terse. Tests probing either boundary pass
     their own (invalid) payloads explicitly."""
+    # publication events carry the request_payload_hash + expected count
+    # that verdict bindings reference (the real publish path sets these;
+    # synthetic FSM-drive appends get a deterministic stand-in)
+    if not payload and event_type in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+        import hashlib
+        payload = {
+            "request_payload_hash": hashlib.sha256(
+                request_id.encode()).hexdigest(),
+            "expected_test_count": 147, "scope": ["scope item"],
+            "expected_test_command": TEST_COMMAND,
+            "blockers_addressed": ["b"]}
+    if not payload and event_type == "RESULT_AUDIT_REQUESTED":
+        # the real runner pins the evidence bindings here; synthetic
+        # drives get deterministic stand-ins so result verdicts can bind
+        import hashlib
+        h = hashlib.sha256(request_id.encode()).hexdigest()
+        payload = {
+            "task_id": "t-x", "run_id": "run-" + request_id,
+            "run_dir": "logs/runs/run-" + request_id,
+            "experiment_config_hash": h, "evidence_inventory_hash": h,
+            "validation_report_hash": h, "validations": []}
     if not payload and event_type in _EVENT_TO_VERDICT:
         from tools.council.schemas import compute_verdict_payload_hash
+        result_audit = event_type in ("RESULT_APPROVED", "RESULT_BLOCKED")
         payload = make_verdict(commit, request_id,
                                verdict=_EVENT_TO_VERDICT[event_type])
-        # new (2.0) verdict events must be domain-separated (H2): stamp
-        # the matching v2 schema_version the way submit_verdict does
+        # new (2.0) verdict events are domain-separated + authority-bound
+        # (H2/H3): stamp schema_version and the chain-derived bindings the
+        # way submit_verdict does
         payload["schema_version"] = (
-            "result-verdict.v2"
-            if event_type in ("RESULT_APPROVED", "RESULT_BLOCKED")
-            else "source-verdict.v2")
+            "result-verdict.v2" if result_audit else "source-verdict.v2")
+        _inject_test_bindings(root, payload, request_id, commit,
+                              result_audit)
         payload["verdict_payload_hash"] = \
             compute_verdict_payload_hash(payload)
     from tools.council.schemas import HUMAN_TOKEN_REQUIRED_EVENT_TYPES

@@ -222,6 +222,30 @@ safe relative path fields. Verdict validation additionally enforces an
 `audit_mode` enum and an ISO-8601 UTC `timestamp_utc` (carried from the
 codex-auto-launcher-audit-002 conditions).
 
+## Authority-context bindings + evidence manifest (hardening H3)
+
+Every v2 verdict binds to its exact authority context (item 3), verified
+against the chain at the append boundary (`crosscheck_verdict_bindings`):
+`request_payload_hash`, `publication_event_id`+`publication_event_hash`,
+`audit_cycle`, `auditor` (must be codex), plus the schema-version domain.
+`tests_observed` must equal the request's event-pinned
+`expected_test_count` (the semantic check deferred from H2). A result
+verdict additionally binds `experiment_config_hash`, `run_id`, `run_dir`,
+`evidence_inventory_hash`, `validation_report_hash`, `replay_result`,
+`counts`, and `conclusion_scope`. `codex_watch.submit_verdict` populates
+the derivable bindings from the verified request and chain, so the
+auditor supplies only its judgments; a forged or mismatched binding is
+refused at append.
+
+The runner pins an EVIDENCE MANIFEST before `EXPERIMENT_COMPLETE`: a
+sorted relpath→sha256 map over the produced `run_dir`, hashed under
+`council:evidence-inventory:v1` (CONTENT-only — no wall-clock, so it is
+deterministic), stored as a sibling `<run_dir>.manifest.json` outside the
+manifested tree. `EXPERIMENT_COMPLETE` and `RESULT_AUDIT_REQUESTED` pin
+the inventory hash, so a result approval binds exactly the bytes the
+runner produced. `cli verify-evidence <rid>` recomputes and compares,
+detecting any post-audit tamper.
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

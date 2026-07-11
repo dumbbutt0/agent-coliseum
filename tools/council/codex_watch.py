@@ -130,6 +130,37 @@ def finalize_incomplete(root: str, cfg) -> list:
     return healed
 
 
+def _inject_bindings(root, verdict, request, rid, result_audit) -> None:
+    """Populate the H3 derivable binding fields from the verified request
+    and the chain (the auditor never forges them)."""
+    chain = events.read_chain(root)
+    projection = state_machine.project(chain)
+    pub = None
+    src_pub = None
+    for e in chain:
+        if e["request_id"] != rid:
+            continue
+        if e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+            src_pub = e
+        if result_audit and e["event_type"] == "RESULT_AUDIT_REQUESTED":
+            pub = e
+    if not result_audit:
+        pub = src_pub
+    if pub is None or src_pub is None:
+        raise SchemaViolation(
+            f"cannot bind verdict for {rid}: missing publication event")
+    verdict["auditor"] = "codex"
+    verdict["audit_cycle"] = projection.get(rid, {}).get("audit_cycles")
+    verdict["request_payload_hash"] = \
+        src_pub["payload"].get("request_payload_hash")
+    verdict["publication_event_id"] = pub["event_id"]
+    verdict["publication_event_hash"] = pub["event_hash"]
+    if result_audit:
+        for field in ("experiment_config_hash", "run_id", "run_dir",
+                      "evidence_inventory_hash", "validation_report_hash"):
+            verdict[field] = pub["payload"].get(field)
+
+
 def submit_verdict(root: str, cfg, verdict: dict,
                    result_audit: bool = False) -> dict:
     """Append the verdict event (payload = the verdict), write
@@ -139,13 +170,6 @@ def submit_verdict(root: str, cfg, verdict: dict,
     then refuses the duplicate."""
     finalize_incomplete(root, cfg)
     verdict = dict(verdict)
-    # H2 completion: stamp the matching v2 schema_version so every new
-    # verdict is domain-separated (the auditor need not supply it); the
-    # hash is then computed under the source/result verdict domain
-    verdict["schema_version"] = ("result-verdict.v2" if result_audit
-                                 else "source-verdict.v2")
-    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
-    validate_verdict(verdict, result_audit=result_audit)
     rid = verdict["request_id"]
 
     claimed_path = storage.safe_request_path(root, "claimed", rid)
@@ -158,6 +182,17 @@ def submit_verdict(root: str, cfg, verdict: dict,
         raise SchemaViolation(
             f"audited_commit {verdict['audited_commit'][:12]} does not match "
             f"the request's target_commit {request['target_commit'][:12]}")
+
+    # H2 completion + H3: stamp the v2 schema_version AND the derivable
+    # authority-context bindings from the verified request + chain, so the
+    # auditor supplies only its JUDGMENTS (verdict, findings, and for
+    # result audits replay_result/counts/conclusion_scope). The append
+    # boundary then cross-checks all of it against the chain.
+    verdict["schema_version"] = ("result-verdict.v2" if result_audit
+                                 else "source-verdict.v2")
+    _inject_bindings(root, verdict, request, rid, result_audit)
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    validate_verdict(verdict, result_audit=result_audit)
 
     table = RESULT_VERDICT_TO_EVENT if result_audit else VERDICT_TO_EVENT
     if verdict["verdict"] not in table:

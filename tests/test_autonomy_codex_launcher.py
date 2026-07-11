@@ -55,7 +55,11 @@ def verdict_for(rid, commit, kind):
             "tests_observed": 147, "verdict": kind,
             "summary": "fake verdict", "blockers": [], "conditions": [],
             "findings": [], "commands_run": ["python3 -m pytest tests/ -q"],
-            "timestamp_utc": storage.utc_now()}
+            "timestamp_utc": storage.utc_now(),
+            "replay_result": "replayed_ok",
+            "counts": {"scenarios_run": 1, "validations_passed": 1,
+                       "validations_failed": 0},
+            "conclusion_scope": "fake evidence approved"}
 """
 
 FAKE_GO = _VERDICT_BODY + """

@@ -730,8 +730,7 @@ def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):
     repo, head = make_repo(tmp_path)
     cfg = make_cfg(repo, root)
     ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
-    events.append_event(root, cfg, "AUDIT_GO", "codex", RID, repo, head,
-                        _legacy_go(head))
+    append(root, cfg, "AUDIT_GO", "codex", RID, repo, head)  # autofills v2
     events.append_event(root, cfg, "HUMAN_APPROVAL_REQUIRED", "claude",
                         RID, repo, head, {})
     events.append_event(root, cfg, "EXPERIMENT_APPROVED", "human", RID,

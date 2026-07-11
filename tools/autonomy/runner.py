@@ -76,6 +76,38 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def build_evidence_manifest(repo: str, run_dir_rel: str, run_id: str):
+    """(manifest, inventory_hash) over the produced run_dir (H3): a sorted
+    map of relpath -> sha256 for every evidence file, hashed under the
+    council:evidence-inventory:v1 domain. Written OUTSIDE the manifested
+    tree (a sibling) so writing it never perturbs the pinned bytes; a
+    result verdict binds inventory_hash so the auditor proves it audited
+    exactly the bytes the runner produced."""
+    from tools.council.schemas import domain_hash, EVIDENCE_INVENTORY_DOMAIN
+    abs_dir = os.path.join(repo, run_dir_rel)
+    files = {}
+    if os.path.isdir(abs_dir):
+        for dirpath, _dirs, names in os.walk(abs_dir):
+            for name in sorted(names):
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, abs_dir)
+                files[rel] = _sha256_file(full)
+    # the inventory hash covers CONTENT ONLY (run identity + file digests),
+    # never wall-clock — two manifests of the same bytes hash identically
+    content = {"schema_version": "evidence-manifest.v1", "run_id": run_id,
+               "run_dir": run_dir_rel, "file_count": len(files),
+               "files": dict(sorted(files.items()))}
+    inventory_hash = domain_hash(EVIDENCE_INVENTORY_DOMAIN, content)
+    manifest = dict(content, inventory_hash=inventory_hash,
+                    generated_utc=storage.utc_now())
+    return manifest, inventory_hash
+
+
+def validation_report_hash(validations) -> str:
+    from tools.council.schemas import domain_hash, VALIDATION_REPORT_DOMAIN
+    return domain_hash(VALIDATION_REPORT_DOMAIN, validations)
+
+
 # ------------------------------------------------------- bounded execution
 
 def _kill_tree(proc) -> None:
@@ -382,16 +414,29 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     if limit_failures:
         return refuse(limit_failures)
 
+    # ---- H3 evidence manifest: pin every produced byte BEFORE completion
+    run_dir_rel = outcome.get("run_dir")
+    run_id = outcome.get("run_id")
+    manifest, inventory_hash = build_evidence_manifest(
+        repo, run_dir_rel, run_id)
+    manifest_file = run_dir_rel.rstrip("/") + ".manifest.json"
+    manifest_abs = os.path.join(repo, manifest_file)
+    os.makedirs(os.path.dirname(manifest_abs), exist_ok=True)
+    storage.atomic_write_json(manifest_abs, manifest)
+    validations = outcome.get("validations", [])
+    val_report_hash = validation_report_hash(validations)
+
     # ---- lifecycle: complete + validation
     events.append_event(
         root, cfg, "EXPERIMENT_COMPLETE", SENDER, request_id, repo, commit,
-        {"task_id": task["task_id"], "run_id": outcome.get("run_id"),
-         "run_dir": outcome.get("run_dir"),
+        {"task_id": task["task_id"], "run_id": run_id,
+         "run_dir": run_dir_rel,
          "final_actions": outcome.get("final_actions"),
+         "evidence_inventory_hash": inventory_hash,
+         "manifest_file": manifest_file,
          "elapsed_minutes": round(elapsed_min, 3),
          "storage_growth_mb": round(growth_mb, 3)})
 
-    validations = outcome.get("validations", [])
     events.append_event(
         root, cfg, "RESULT_VALIDATION_REQUIRED", SENDER, request_id, repo,
         commit, {"task_id": task["task_id"], "validations": validations})
@@ -409,12 +454,20 @@ def run_task(cfg: Config, request_id: str, config_path: str,
 
     events.append_event(
         root, cfg, "RESULT_AUDIT_REQUESTED", SENDER, request_id, repo, commit,
-        {"task_id": task["task_id"], "run_id": outcome.get("run_id"),
-         "run_dir": outcome.get("run_dir"), "validations": validations,
-         "instructions": ("read-only result audit: verify the evidence dir, "
-                          "replay determinism, limits, and validations. "
-                          "Submit APPROVED or BLOCKED via codex_watch "
-                          "--submit <verdict.json> --result-audit")})
+        {"task_id": task["task_id"], "run_id": run_id,
+         "run_dir": run_dir_rel, "validations": validations,
+         "experiment_config_hash": config_hash,
+         "evidence_inventory_hash": inventory_hash,
+         "manifest_file": manifest_file,
+         "validation_report_hash": val_report_hash,
+         "instructions": ("read-only result audit: verify the evidence dir "
+                          "against the pinned manifest, replay determinism, "
+                          "limits, and validations. The result verdict must "
+                          "bind evidence_inventory_hash, validation_report_"
+                          "hash, experiment_config_hash, run_id, run_dir, "
+                          "replay_result, counts, conclusion_scope. Submit "
+                          "via codex_watch --submit <verdict.json> "
+                          "--result-audit")})
     storage.append_log_md(root, "claude", (
         f"**Result audit requested: `{request_id}`** — task "
         f"`{task['task_id']}` ran under AUTO/human approval at `{commit}`.\n\n"

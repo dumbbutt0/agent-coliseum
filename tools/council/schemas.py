@@ -288,6 +288,75 @@ VERDICT_SCHEMA_DOMAINS = {
     "result-verdict.v2": RESULT_VERDICT_DOMAIN_V2,
 }
 
+# H3 authority-context bindings. A v2 verdict binds to the exact request,
+# publication event, cycle, commit, and auditor; a result verdict also
+# binds the frozen config, the evidence inventory, and the auditor's
+# replay/counts/conclusion. codex_watch.submit_verdict populates the
+# derivable fields; crosscheck_verdict_bindings verifies them against the
+# chain at the append boundary.
+SOURCE_VERDICT_BINDING_FIELDS = (
+    "request_payload_hash", "publication_event_id", "publication_event_hash",
+    "audit_cycle", "auditor",
+)
+RESULT_VERDICT_BINDING_FIELDS = SOURCE_VERDICT_BINDING_FIELDS + (
+    "experiment_config_hash", "run_id", "run_dir", "evidence_inventory_hash",
+    "validation_report_hash", "replay_result", "counts", "conclusion_scope",
+)
+REPLAY_RESULTS = ("replayed_ok", "replay_failed", "replay_not_supported")
+RESULT_COUNT_FIELDS = ("scenarios_run", "validations_passed",
+                       "validations_failed")
+_EVENT_ID_RE = re.compile(r"^\d{6}-[0-9a-f]{8}$")
+
+
+def _validate_verdict_bindings(verdict: dict, result_kind: bool) -> None:
+    """Type-check the H3 binding fields present on a v2 verdict (the chain
+    cross-check happens in crosscheck_verdict_bindings)."""
+    fields = (RESULT_VERDICT_BINDING_FIELDS if result_kind
+              else SOURCE_VERDICT_BINDING_FIELDS)
+    missing = [f for f in fields if f not in verdict]
+    if missing:
+        raise SchemaViolation(
+            f"v2 verdict missing binding fields: {missing}")
+    if not _SHA256_RE.match(str(verdict["request_payload_hash"])):
+        raise SchemaViolation("request_payload_hash must be a sha256")
+    if not _EVENT_ID_RE.match(str(verdict["publication_event_id"])):
+        raise SchemaViolation("publication_event_id malformed")
+    if not _SHA256_RE.match(str(verdict["publication_event_hash"])):
+        raise SchemaViolation("publication_event_hash must be a sha256")
+    if not isinstance(verdict["audit_cycle"], int) \
+            or isinstance(verdict["audit_cycle"], bool) \
+            or verdict["audit_cycle"] < 1:
+        raise SchemaViolation("audit_cycle must be an int >= 1")
+    if verdict["auditor"] != "codex":
+        raise SchemaViolation("auditor must be 'codex'")
+    if not result_kind:
+        return
+    for name in ("experiment_config_hash", "evidence_inventory_hash",
+                 "validation_report_hash"):
+        if not _SHA256_RE.match(str(verdict[name])):
+            raise SchemaViolation(f"{name} must be a sha256")
+    if not isinstance(verdict["run_id"], str) or not verdict["run_id"]:
+        raise SchemaViolation("run_id must be a non-empty string")
+    _validate_safe_relpath(verdict["run_dir"], "run_dir")
+    if verdict["replay_result"] not in REPLAY_RESULTS:
+        raise SchemaViolation(
+            f"replay_result must be in {REPLAY_RESULTS}")
+    counts = verdict["counts"]
+    if not isinstance(counts, dict) \
+            or set(counts) != set(RESULT_COUNT_FIELDS):
+        raise SchemaViolation(
+            f"counts must be exactly {RESULT_COUNT_FIELDS}")
+    for name in RESULT_COUNT_FIELDS:
+        if not isinstance(counts[name], int) \
+                or isinstance(counts[name], bool) or counts[name] < 0:
+            raise SchemaViolation(f"counts.{name} must be a non-neg int")
+    if not isinstance(verdict["conclusion_scope"], str) \
+            or not verdict["conclusion_scope"] \
+            or len(verdict["conclusion_scope"]) > _MAX_FIELD_STRING:
+        raise SchemaViolation(
+            f"conclusion_scope must be a non-empty string "
+            f"<= {_MAX_FIELD_STRING} chars")
+
 
 def compute_verdict_payload_hash(verdict: dict) -> str:
     """A verdict's hash domain is UNAMBIGUOUS (cycle-1 blocker 1): a
@@ -575,6 +644,8 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
             raise SchemaViolation(
                 f"verdict schema_version {sv!r} does not match this audit "
                 f"kind (expected {expected_sv!r})")
+        # H3: a v2 verdict carries its authority-context bindings
+        _validate_verdict_bindings(verdict, result_audit)
     for name in ("blockers", "conditions", "commands_run"):
         value = verdict[name]
         if not isinstance(value, list) or \
@@ -707,6 +778,79 @@ def validate_verdict_event_payload(event: dict) -> None:
         raise SchemaViolation(
             f"verdict value {verdict['verdict']!r} does not map to event "
             f"type {etype!r}")
+
+
+def crosscheck_verdict_bindings(event: dict, chain: list,
+                                projection: dict) -> None:
+    """H3: verify a v2 verdict's authority-context bindings against the
+    CHAIN at the append boundary — the publication event exists with the
+    pinned hash and type, the request payload hash and audit cycle match,
+    tests_observed equals the request's expected count (the semantic check
+    deferred from H2), and for result verdicts the evidence bindings equal
+    the values the runner pinned in RESULT_AUDIT_REQUESTED. Legacy (1.0)
+    verdicts carry no bindings and are skipped."""
+    if _obj_version(event) != "2.0":
+        return
+    etype = event["event_type"]
+    result_kind = etype in RESULT_VERDICT_EVENT_TYPES
+    verdict = event["payload"]
+    rid = event["request_id"]
+
+    # the pinned publication event (source: latest AUDIT_REQUESTED/
+    # READY_FOR_REAUDIT; result: the RESULT_AUDIT_REQUESTED)
+    pub_types = (("RESULT_AUDIT_REQUESTED",) if result_kind
+                 else ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"))
+    pub = None
+    for e in chain:
+        if e["request_id"] == rid and e["event_type"] in pub_types:
+            pub = e
+    if pub is None:
+        raise SchemaViolation(
+            f"no {pub_types} publication event for {rid} — cannot bind")
+    if verdict["publication_event_id"] != pub["event_id"] \
+            or verdict["publication_event_hash"] != pub["event_hash"]:
+        raise SchemaViolation(
+            "verdict publication_event binding does not match the chain's "
+            f"pinned {pub['event_type']} event")
+    req_state = projection.get(rid, {})
+    if verdict["audit_cycle"] != req_state.get("audit_cycles"):
+        raise SchemaViolation(
+            f"verdict audit_cycle {verdict['audit_cycle']} != the request's "
+            f"cycle count {req_state.get('audit_cycles')}")
+    # request_payload_hash: source binds the payload hash pinned by the
+    # publication event; result binds the request's payload hash too
+    pinned_req_hash = None
+    for e in chain:
+        if e["request_id"] == rid and e["event_type"] in (
+                "AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+            pinned_req_hash = e["payload"].get("request_payload_hash")
+    # verify only what the publication event actually pins (the real
+    # publish/runner path always pins these; a synthetic/legacy event
+    # that pins nothing has nothing to cross-check against)
+    if pinned_req_hash is not None \
+            and verdict["request_payload_hash"] != pinned_req_hash:
+        raise SchemaViolation(
+            "verdict request_payload_hash does not match the pinned request")
+    # deferred from H2/-002: tests_observed must equal the request's
+    # event-pinned expected_test_count (source audits declare it)
+    pinned_expected = None
+    for e in chain:
+        if e["request_id"] == rid and e["event_type"] in (
+                "AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+            pinned_expected = e["payload"].get("expected_test_count")
+    if pinned_expected is not None \
+            and verdict["tests_observed"] != pinned_expected:
+        raise SchemaViolation(
+            f"verdict tests_observed {verdict['tests_observed']} != the "
+            f"request's expected_test_count {pinned_expected}")
+    if result_kind:
+        for field in ("experiment_config_hash", "evidence_inventory_hash",
+                      "validation_report_hash", "run_id", "run_dir"):
+            pinned = pub["payload"].get(field)
+            if pinned is not None and verdict[field] != pinned:
+                raise SchemaViolation(
+                    f"verdict {field} does not match the runner-pinned "
+                    "RESULT_AUDIT_REQUESTED value")
 
 
 def protocol_version() -> str:

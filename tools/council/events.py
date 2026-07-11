@@ -123,6 +123,11 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         validate_event(event, for_append=True)
         requests = state_machine.project(chain)
         state_machine.check(event, requests)
+        # H3: verdict authority-context bindings verified against the chain
+        from tools.council.schemas import (crosscheck_verdict_bindings,
+                                           VERDICT_PAYLOAD_EVENT_TYPES)
+        if event_type in VERDICT_PAYLOAD_EVENT_TYPES:
+            crosscheck_verdict_bindings(event, chain, requests)
         # H1: burn the human one-time token (if this event type requires
         # one) durably BEFORE the line lands — a crash here wastes a
         # token, it never leaves a spendable one behind an appended event

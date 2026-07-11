@@ -484,6 +484,35 @@ def cmd_clear_lock(args) -> int:
     return 0
 
 
+def cmd_verify_evidence(args) -> int:
+    """Recompute the evidence inventory for a request's run_dir and compare
+    it to the hash pinned in RESULT_AUDIT_REQUESTED — detects any tamper
+    of the produced evidence after the result audit was requested."""
+    from tools.autonomy.runner import build_evidence_manifest
+    _cfg_, root = _cfg(args)
+    chain = events.read_chain(root)
+    rar = None
+    for e in chain:
+        if e["request_id"] == args.request_id \
+                and e["event_type"] == "RESULT_AUDIT_REQUESTED":
+            rar = e
+    if rar is None:
+        print(f"no RESULT_AUDIT_REQUESTED for {args.request_id}",
+              file=sys.stderr)
+        return 1
+    repo = rar["repository"]
+    pinned = rar["payload"].get("evidence_inventory_hash")
+    _m, recomputed = build_evidence_manifest(
+        repo, rar["payload"]["run_dir"], rar["payload"].get("run_id"))
+    if recomputed == pinned:
+        print(f"evidence OK: {args.request_id} inventory matches the "
+              f"pinned hash {pinned[:12]}")
+        return 0
+    print(f"EVIDENCE TAMPERED: {args.request_id} recomputed "
+          f"{recomputed[:12]} != pinned {str(pinned)[:12]}", file=sys.stderr)
+    return 1
+
+
 def cmd_milestone_status(args) -> int:
     _cfg_, root = _cfg(args)
     pol, _hash = policy.load_policy(root)
@@ -509,6 +538,9 @@ def main(argv=None) -> int:
     sub.add_parser("verify-chain")
     sub.add_parser("rebuild-state")
     sub.add_parser("milestone-status")
+
+    p = sub.add_parser("verify-evidence")
+    p.add_argument("request_id")
 
     p = sub.add_parser("show")
     p.add_argument("request_id")
@@ -583,7 +615,8 @@ def main(argv=None) -> int:
                 "identity-rotate": cmd_identity_rotate,
                 "status-set": cmd_status_set,
                 "cancel": cmd_cancel, "clear-lock": cmd_clear_lock,
-                "milestone-status": cmd_milestone_status}
+                "milestone-status": cmd_milestone_status,
+                "verify-evidence": cmd_verify_evidence}
     try:
         return handlers[args.command](args)
     except CouncilError as exc:

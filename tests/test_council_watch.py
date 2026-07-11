@@ -25,6 +25,16 @@ def env(tmp_path, monkeypatch):
     return root, repo, head, cfg
 
 
+def _result_bindings(root, rid, head):
+    """The H3 result-verdict bindings derived from the chain (for raw
+    RESULT_* appends that also set custom findings/summary)."""
+    from tests.council_util import _inject_test_bindings
+    v = {}
+    _inject_test_bindings(root, v, rid, head, True)
+    v["schema_version"] = "result-verdict.v2"
+    return v
+
+
 def _signed(head, result_audit=False, **overrides):
     verdict = make_verdict(head, request_id=overrides.pop("request_id", RID),
                            **overrides)
@@ -665,8 +675,7 @@ def test_watcher_wakes_on_result_approved_and_records_milestone(env, capsys):
     the loop advances instead of sleeping forever."""
     root, repo, head, cfg = env
     _drive_to_result_audit(root, cfg, repo, head)
-    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
-           _signed(head, result_audit=True, verdict="APPROVED"))
+    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head)
     rc = claude_watch.main(["--once", "--request-id", RID])
     out = capsys.readouterr().out
     assert rc == 0
@@ -682,8 +691,7 @@ def test_watcher_result_approved_is_idempotent(env, capsys):
     root, repo, head, cfg = env
     _drive_to_result_audit(root, cfg, repo, head)
     saved = storage.read_cursor(root, "claude")
-    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
-           _signed(head, result_audit=True, verdict="APPROVED"))
+    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head)
     assert claude_watch.main(["--once", "--request-id", RID]) == 0
     length = len(events.read_chain(root))
     # simulate a crash that lost the cursor advance: replay from before
@@ -699,10 +707,13 @@ def test_watcher_result_approved_is_idempotent(env, capsys):
 def test_watcher_result_blocked_prints_and_stops(env, capsys):
     root, repo, head, cfg = env
     _drive_to_result_audit(root, cfg, repo, head)
-    append(root, cfg, "RESULT_BLOCKED", "codex", RID, repo, head,
-           _signed(head, result_audit=True, verdict="BLOCKED",
-                   blockers=["evidence dir incomplete"],
-                   summary="result blocked"))
+    from tools.council.schemas import compute_verdict_payload_hash
+    payload = {**make_verdict(head, RID, verdict="BLOCKED",
+                              blockers=["evidence dir incomplete"],
+                              summary="result blocked"),
+               **_result_bindings(root, RID, head)}
+    payload["verdict_payload_hash"] = compute_verdict_payload_hash(payload)
+    append(root, cfg, "RESULT_BLOCKED", "codex", RID, repo, head, payload)
     length = len(events.read_chain(root))
     rc = claude_watch.main(["--once", "--request-id", RID])
     out = capsys.readouterr().out
