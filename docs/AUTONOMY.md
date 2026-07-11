@@ -138,7 +138,14 @@ WATCHER_ERROR and three consecutive failures per published cycle pause
 autonomy. STATUS/STOP, the paused flag, and the milestone stop it cleanly.
 Service unit (shipped disabled): `tools/systemd/coliseum-codex-launcher.
 service` — install only after this capability's own audit returns GO.
-Stateless: crash recovery is a restart; nothing depends on process memory.
+DEPLOYMENT MODEL (owner-ratified 2026-07-11, H7 condition 2): USER
+service — the unit installs at `~/.config/systemd/user/` and is managed
+exclusively with `systemctl --user` (+ `loginctl enable-linger` so it
+survives logout/WSL restart). No sudo and no `/etc/systemd/system`
+anywhere in the activation surface; the gate-5/7 runbooks and
+`scripts/council_staging.py::gate5_install_status` all check the user
+manager. Stateless: crash recovery is a restart; nothing depends on
+process memory.
 
 A process that automatically LAUNCHES new writable CLAUDE builder sessions
 remains a recorded FUTURE capability: it must be committed separately and

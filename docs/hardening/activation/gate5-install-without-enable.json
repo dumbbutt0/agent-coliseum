@@ -1,19 +1,22 @@
 {
   "checks": {
+    "deployment_mode": "user-service (systemctl --user)",
     "enabled": false,
-    "installed_at_etc": false,
+    "installed_at_user_dir": false,
     "unit_in_repo": true,
     "unit_sha256": "0e6a90260e4eb3457fdb9b08fdea6501c414f1a185beea562a22b6b200f5c313"
   },
-  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "commit": "0abe32051f1196aa58a4738ad40788c762314c6e",
   "gate": "gate5-install-without-enable",
-  "generated_utc": "2026-07-11T20:54:30Z",
-  "note": "install is owner-attended (sudo); the gate verifies the unit exists in-repo and is NOT enabled anywhere",
+  "generated_utc": "2026-07-11T21:43:55Z",
+  "note": "install is owner-attended; USER-mode manager (systemctl --user) per the ratified deployment model \u2014 the gate verifies the unit exists in-repo and is NOT enabled",
   "ok": true,
   "owner_attended": true,
   "owner_commands": [
-    "sudo cp /home/dummy/agent-coliseum/tools/systemd/coliseum-codex-launcher.service /etc/systemd/system/coliseum-codex-launcher.service",
-    "sudo systemctl daemon-reload",
-    "systemctl is-enabled coliseum-codex-launcher.service  # must print 'disabled'"
+    "mkdir -p /home/dummy/.config/systemd/user",
+    "cp /home/dummy/agent-coliseum/tools/systemd/coliseum-codex-launcher.service /home/dummy/.config/systemd/user/coliseum-codex-launcher.service",
+    "systemctl --user daemon-reload",
+    "systemctl --user is-enabled coliseum-codex-launcher.service  # must print 'disabled'",
+    "loginctl enable-linger $USER  # survive logout/WSL restart"
   ]
 }

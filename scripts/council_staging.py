@@ -433,11 +433,19 @@ def gate4_noservice(out_dir: str, scratch: str, live_root: str) -> bool:
 
 # ------------------------------------------------------------------- gate 5
 
+def _user_unit_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+
+
 def gate5_install_status(out_dir: str, scratch: str, live_root: str) -> bool:
-    installed = os.path.exists(os.path.join("/etc/systemd/system", UNIT_NAME))
+    """USER-SERVICE deployment (owner-ratified 2026-07-11, H7 condition 2):
+    the unit installs under ~/.config/systemd/user and is managed with
+    `systemctl --user` — matching the shipped unit's own header. No sudo
+    anywhere in the runbook."""
+    installed = os.path.exists(os.path.join(_user_unit_dir(), UNIT_NAME))
     enabled = False
     if installed:
-        p = subprocess.run(["systemctl", "is-enabled", UNIT_NAME],
+        p = subprocess.run(["systemctl", "--user", "is-enabled", UNIT_NAME],
                            capture_output=True, text=True)
         enabled = p.stdout.strip() == "enabled"
     ok = os.path.exists(UNIT_SRC) and not enabled
@@ -446,13 +454,19 @@ def gate5_install_status(out_dir: str, scratch: str, live_root: str) -> bool:
         "checks": {"unit_in_repo": os.path.exists(UNIT_SRC),
                    "unit_sha256": _sha256(UNIT_SRC) if os.path.exists(
                        UNIT_SRC) else None,
-                   "installed_at_etc": installed, "enabled": enabled},
+                   "installed_at_user_dir": installed, "enabled": enabled,
+                   "deployment_mode": "user-service (systemctl --user)"},
         "owner_commands": [
-            f"sudo cp {UNIT_SRC} /etc/systemd/system/{UNIT_NAME}",
-            "sudo systemctl daemon-reload",
-            f"systemctl is-enabled {UNIT_NAME}  # must print 'disabled'"],
-        "note": ("install is owner-attended (sudo); the gate verifies the "
-                 "unit exists in-repo and is NOT enabled anywhere")})
+            f"mkdir -p {_user_unit_dir()}",
+            f"cp {UNIT_SRC} {_user_unit_dir()}/{UNIT_NAME}",
+            "systemctl --user daemon-reload",
+            f"systemctl --user is-enabled {UNIT_NAME}  "
+            "# must print 'disabled'",
+            "loginctl enable-linger $USER  # survive logout/WSL restart"],
+        "note": ("install is owner-attended; USER-mode manager "
+                 "(systemctl --user) per the ratified deployment model — "
+                 "the gate verifies the unit exists in-repo and is NOT "
+                 "enabled")})
     return ok
 
 
@@ -471,9 +485,10 @@ def gate67_runbooks(out_dir: str, scratch: str, live_root: str) -> bool:
     _artifact(out_dir, "gate7-owner-enable", {
         "ok": False, "owner_attended": True,
         "owner_commands": [
-            f"sudo systemctl enable --now {UNIT_NAME}",
-            f"systemctl status {UNIT_NAME}"],
-        "note": ("owner enables ONLY the codex launcher; builder/experiment/"
+            f"systemctl --user enable --now {UNIT_NAME}",
+            f"systemctl --user status {UNIT_NAME}"],
+        "note": ("owner enables ONLY the codex launcher (USER-mode manager "
+                 "per the ratified deployment model); builder/experiment/"
                  "society automation stay disabled and need their own "
                  "audits")})
     return True
