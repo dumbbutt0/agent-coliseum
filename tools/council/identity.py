@@ -367,6 +367,18 @@ def replay_identity(chain: list):
             continue
         token = payload.get("human_token") if isinstance(payload, dict) \
             else None
+        if token is not None:
+            # cycle-4 blocker: the burn and the ACTION it authorized are
+            # inseparable on replay — recompute the binding exactly as
+            # append time did; an in-place payload rewrite (same token,
+            # re-hashed event) fails here
+            expected_binds = binding_hash(
+                etype, event["request_id"], event["target_commit"],
+                {k: v for k, v in payload.items() if k != "human_token"})
+            if token.get("binds") != expected_binds:
+                raise IdentityError(
+                    f"token binding in event {event['event_id']} does not "
+                    "match the event content — history rewritten; refused")
         if etype == "HUMAN_IDENTITY_ROTATED":
             if state is None or token is None:
                 raise IdentityError(

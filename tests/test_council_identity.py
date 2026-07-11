@@ -686,6 +686,40 @@ def test_verifier_deletion_pauses_everything(env):
     append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
 
 
+def test_rewritten_burned_event_payload_fails_replay(env):
+    """Cycle-5 probe: rewrite a genuinely token-burned PAUSED status
+    event in place to ACTIVE (keeping its token and binds, re-hashing the
+    event) — replay must refuse, control reads fail-closed, appends stay
+    refused. The burn and its authorized action are inseparable."""
+    from tools.council.schemas import canonical_json, compute_event_hash
+    root, repo, head, cfg = env
+    core = {"status": "paused", "paused_roles": ["all"], "reason": "owner"}
+    event = append(root, cfg, "STATUS_CHANGED", "human", "council-control",
+                   repo, "0" * 40, dict(core))
+    storage.write_control(root, "paused", ["all"], "owner",
+                          event["event_id"])
+    # in-place history rewrite of the LAST event: paused -> active
+    path = storage.events_path(root)
+    lines = open(path, encoding="utf-8").read().splitlines()
+    rewritten = json.loads(lines[-1])
+    rewritten["payload"]["status"] = "active"
+    rewritten["payload"]["paused_roles"] = []
+    rewritten["event_hash"] = compute_event_hash(rewritten)
+    lines[-1] = canonical_json(rewritten)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    assert events.verify_chain(root).ok  # hash-consistent rewrite...
+    storage.write_control(root, "active", [], "owner",
+                          rewritten["event_id"])
+    # ...but the binding no longer matches: everything fails closed
+    with pytest.raises(identity.IdentityError):
+        identity.replay_identity(events.read_chain(root))
+    assert storage.read_control(root)["status"] == "paused"
+    assert storage.emergency_stop_reason(root) is not None
+    with pytest.raises(CouncilError):
+        append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+
+
 def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):
     """A legacy root (no verifier, no pin) keeps its old behavior — the
     cutover is explicit, never implicit."""
