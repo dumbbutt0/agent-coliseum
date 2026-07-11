@@ -44,30 +44,50 @@ def acquire(root: str, name: str, role: str, request_id: str,
     recovery can release a lock the process died holding); otherwise one is
     minted here."""
     path = storage.lock_path(root, name)
+    token = owner_token or secrets.token_hex(16)
+    body = canonical_json({"schema_version": "lock.v1",
+                           "request_id": request_id, "role": role,
+                           "pid": os.getpid(),
+                           "host": socket.gethostname(),
+                           "timestamp_utc": storage.utc_now(),
+                           "owner_token": token,
+                           "lease_expires_utc": _lease_expiry(lease_seconds),
+                           "kind": kind})
+    _create_lock(root, name, path, body)
+    return Lock(path=path, name=name, role=role, root=root,
+                owner_token=token)
+
+
+def _create_lock(root: str, name: str, path: str, body: str) -> None:
+    """The single durable lock-create boundary (H6 completeness fix): O_EXCL
+    create then write the whole body. CRASH-SAFE: if the write/fsync fails
+    after the create, unlink the partial (tokenless) file so no lock is
+    stranded that compare-and-delete could never remove. O_EXCL guarantees
+    we only ever unlink a lock WE just created — never another holder's."""
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         holder = read_lock(root, name)
         raise LockHeld(f"lock {name!r} already held: {holder}")
-    token = owner_token or secrets.token_hex(16)
     try:
-        body = canonical_json({"schema_version": "lock.v1",
-                               "request_id": request_id, "role": role,
-                               "pid": os.getpid(),
-                               "host": socket.gethostname(),
-                               "timestamp_utc": storage.utc_now(),
-                               "owner_token": token,
-                               "lease_expires_utc": _lease_expiry(
-                                   lease_seconds), "kind": kind})
         os.write(fd, (body + "\n").encode("utf-8"))
         try:
             os.fsync(fd)
         except OSError:
             pass
-    finally:
+    except BaseException:
+        # partial create: remove the half-written lock before re-raising
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    else:
         os.close(fd)
-    return Lock(path=path, name=name, role=role, root=root,
-                owner_token=token)
 
 
 def _write_lock_excl(path: str, body: dict) -> bool:

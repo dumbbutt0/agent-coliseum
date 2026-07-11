@@ -314,10 +314,13 @@ paths (`cli clear-lock`, the launcher stale-gate, which now reads
 
 ## Fault matrix (hardening H6)
 
-Every council write funnels through four durable-mutation primitives —
+Every council write funnels through five durable-mutation boundaries —
 `os.rename`, `os.unlink`, `storage.append_line`,
-`storage.atomic_write_json`. `tests/fault_util.py` wraps all four in a
-counting injector that can raise a `CrashInjected` at any single boundary
+`storage.atomic_write_json`, and `locking._create_lock` (the O_EXCL
+create+write inside `acquire`, added after the audit showed the direct
+`os.open`/`os.write` there was an uncovered boundary that could strand a
+tokenless lock). `tests/fault_util.py` wraps all five in a counting injector
+that can raise a `CrashInjected` at any single boundary
 (by op-index or global index), simulating a process death or an emergency
 STOP at exactly that point. `tests/test_fault_matrix.py` then, for each
 RECOVERABLE operation (claim, verdict submission, publish), dry-runs it to

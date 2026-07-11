@@ -233,6 +233,26 @@ def test_injector_fires_precisely(tmp_path):
     assert json.load(open(p))["n"] == 1
 
 
+def test_acquire_cleans_up_partial_lock_on_write_failure(tmp_path, monkeypatch):
+    """H6 cycle-1 finding: locking.acquire must not strand a TOKENLESS lock
+    if the body write fails after the O_EXCL create — compare-and-delete
+    needs the token, so a half-written lock could never be removed. The
+    O_EXCL create guarantees the cleanup only ever unlinks a lock we just
+    made, never another holder's."""
+    root = make_root(tmp_path)
+    real_write = os.write
+
+    def boom(fd, data):
+        raise OSError("simulated crash writing the lock body")
+
+    monkeypatch.setattr(os, "write", boom)
+    with pytest.raises(OSError):
+        locking.acquire(root, "lk-partial", "codex", "lk-partial-rid",
+                        kind="claim")
+    monkeypatch.setattr(os, "write", real_write)
+    assert locking.read_lock(root, "lk-partial") is None   # no stranded lock
+
+
 def test_injector_global_index(tmp_path):
     """fail_global(k) fires at the kth boundary across ALL ops, and the
     trace is a faithful ordered record used to drive the matrix."""

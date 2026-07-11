@@ -18,9 +18,13 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
-from tools.council import storage
+from tools.council import locking, storage
 
-OPS = ("rename", "unlink", "append_line", "atomic_write_json")
+# The five durable-mutation boundaries every council write funnels through.
+# lock_create (H6 cycle-2) is the O_EXCL create+write inside locking.acquire —
+# a direct os.open/os.write the other four wrappers never observed, which let
+# an interrupted lock acquisition strand a tokenless lock.
+OPS = ("rename", "unlink", "append_line", "atomic_write_json", "lock_create")
 
 
 class CrashInjected(OSError):
@@ -77,6 +81,7 @@ def inject(injector: FaultInjector | None = None):
     fi = injector or FaultInjector()
     real_rename, real_unlink = os.rename, os.unlink
     real_append, real_awj = storage.append_line, storage.atomic_write_json
+    real_create_lock = locking._create_lock
 
     def w_rename(src, dst, *a, **k):
         fi._tick("rename", str(dst))
@@ -94,13 +99,19 @@ def inject(injector: FaultInjector | None = None):
         fi._tick("atomic_write_json", str(path))
         return real_awj(path, obj)
 
+    def w_create_lock(root, name, path, body):
+        fi._tick("lock_create", str(path))
+        return real_create_lock(root, name, path, body)
+
     os.rename, os.unlink = w_rename, w_unlink
     storage.append_line, storage.atomic_write_json = w_append, w_awj
+    locking._create_lock = w_create_lock
     try:
         yield fi
     finally:
         os.rename, os.unlink = real_rename, real_unlink
         storage.append_line, storage.atomic_write_json = real_append, real_awj
+        locking._create_lock = real_create_lock
 
 
 def count_boundaries(fn) -> list:
