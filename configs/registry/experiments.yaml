@@ -1,0 +1,89 @@
+# Experiment registry — First Gladiator M4. The citability gate: an
+# experiment not registered here (or disagreeing with its evidence) cannot
+# be cited. Machine-checked by coliseum/textlab/registry.py::
+# lint_experiments_registry (manifest existence + tier validation + row
+# counts + interaction-mode agreement + held-out enforcement + frozen
+# entry_hash tamper evidence). Validation tiers: full = current-schema
+# manifest_load against run evidence (required for citable statuses);
+# legacy = demoted historical datasets preserved AS-IS, never citable.
+# held_out: SPEC E6 — content listed here may never appear in ANY
+# registered manifest before the M14 evaluation; the L4 hidden twins and
+# reserved variants of newly authored families land here at authoring
+# time (M8+). Empty today because the entire existing corpus carries the
+# baseline evidence (nothing already-used can be held out honestly).
+registry_version: '1'
+held_out:
+  policy: 'Held-out evaluation content is declared here at authoring time (SPEC
+    E6): the L4 hidden structural twins and one reserved wording variant per newly
+    authored family. Listed content may never appear in any registered manifest
+    before the M14 evaluation; lint enforces this mechanically.'
+  scenarios: []
+  scenario_hashes: []
+experiments:
+- experiment_id: pilot-cross-model-sweep
+  status: pilot-demoted
+  validation: legacy
+  manifest: derived/textlab/sweep-manifest.jsonl
+  rows: 105
+  interaction_mode: independent_vignettes
+  generalization_level: L2
+  approvals: []
+  replay: 'not-reproducible (pre-hardening evidence; demoted 2026-07-10 review:
+    6 correctness + 3 rigor defects)'
+  reports:
+  - reports/session-2026-07-10-4/sweep_report.md
+  wiki: coliseum-first-cross-model-sweep
+  demotion_reason: 'Codex review 2026-07-10: aggregation + provenance defects; superseded
+    by sweep-v2'
+  frozen: true
+  entry_hash: 93ecd4e540777a2186d077deb7647390c3ad4cbaa40b195cb2883c2dd936cfb0
+- experiment_id: sweep-v2
+  status: legacy-demoted
+  validation: legacy
+  manifest: derived/textlab/sweep-v2-manifest.jsonl
+  rows: 105
+  interaction_mode: independent_vignettes
+  generalization_level: L2
+  approvals: []
+  replay: CONFIG DRIFT by construction (no stored behavioral_config); refused by
+    the strict loader; never citable as reportable
+  reports:
+  - reports/session-2026-07-10-5/sweep_report.md
+  wiki: coliseum-sweep-v2-reportable
+  demotion_reason: 'full-audit 2026-07-10: legacy exploratory deterministic dataset'
+  frozen: true
+  entry_hash: 7b8b5a19f55b473957d8d0306449b9aeefdca0b472ceaa7ad94d0489a42fa105
+- experiment_id: exp1-gemma3-reversal
+  status: complete
+  validation: full
+  manifest: derived/textlab/exp1-gemma3-reversal-manifest.jsonl
+  rows: 15
+  interaction_mode: independent_vignettes
+  generalization_level: L2
+  approvals:
+  - 'council: owner-directed stochastic gate (pre-protocol-v2)'
+  replay: offline replay byte-identical (session-9 verification bundle)
+  reports:
+  - reports/session-2026-07-10-7/sweep_report.md
+  wiki: coliseum-exp1-reversal-refuted
+  finding: "reflex-lie/planner-admit reversal 0/5 on v0_granary \u2014 honest negative;\
+    \ wording-specificity evidence"
+  frozen: true
+  entry_hash: 1563d3bc4a02b5cfcdfc7857b3cdb3df163c34b949dcab1209f13a2eddbb2e7e
+- experiment_id: exp2-v1cistern-replication
+  status: complete
+  validation: full
+  manifest: derived/textlab/exp2-v1cistern-manifest.jsonl
+  rows: 5
+  interaction_mode: independent_vignettes
+  generalization_level: L1
+  approvals:
+  - 'council: owner-directed pre-registered replication (pre-protocol-v2)'
+  replay: offline replay byte-identical (session-9 verification bundle)
+  reports:
+  - reports/session-2026-07-10-8/sweep_report.md
+  wiki: coliseum-exp2-reversal-replicated
+  finding: "reversal 5/5 on original v1_cistern wording \u2014 deliberation layer\
+    \ is the wording-sensitive layer"
+  frozen: true
+  entry_hash: aeb5fc4c3abba87f71ab30199d310bf0a75db5cd9eef68f7b2514cb8b38bbcc0
