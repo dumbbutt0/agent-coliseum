@@ -143,6 +143,36 @@ def cmd_approve(args) -> int:
     return 0
 
 
+def cmd_approve_conditions(args) -> int:
+    """Owner sign-off that a conditional verdict's conditions are met —
+    the ONLY thing that unlocks CHANGE_INTEGRATED after
+    AUDIT_GO_WITH_CONDITIONS. Binds to the exact commit."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation(
+            "approve-conditions is an owner action: --role human")
+    validate_request_id(args.request_id)
+    request = publish.read_request(root, args.request_id)
+    if validate_commit(args.commit) != request["target_commit"]:
+        raise SchemaViolation(
+            f"approval commit {args.commit[:12]} does not match the "
+            f"request's target_commit {request['target_commit'][:12]} — "
+            "a condition sign-off for one commit must not apply to another")
+    event = events.append_event(root, cfg, "CONDITIONS_SATISFIED", "human",
+                                args.request_id, request["repository"],
+                                request["target_commit"],
+                                {"reviewed_by": "human",
+                                 "approval_commit": args.commit,
+                                 "note": args.note or ""})
+    storage.append_log_md(root, "human", (
+        f"**CONDITIONS_SATISFIED** for `{args.request_id}` at "
+        f"`{args.commit}` (event `{event['event_id']}`)"
+        + (f" — {args.note}" if args.note else "") + "."))
+    print(f"conditions satisfied for {args.request_id} at {args.commit[:12]} "
+          f"(event {event['event_id']}); integration is now unlocked")
+    return 0
+
+
 def cmd_cancel(args) -> int:
     cfg, root = _cfg(args)
     if args.role not in ("claude", "human"):
@@ -223,6 +253,11 @@ def main(argv=None) -> int:
     p.add_argument("request_id")
     p.add_argument("--commit", required=True)
 
+    p = sub.add_parser("approve-conditions")
+    p.add_argument("request_id")
+    p.add_argument("--commit", required=True)
+    p.add_argument("--note", default=None)
+
     p = sub.add_parser("cancel")
     p.add_argument("request_id")
     p.add_argument("--reason", required=True)
@@ -238,6 +273,7 @@ def main(argv=None) -> int:
                 "rebuild-state": cmd_rebuild_state,
                 "publish-request": cmd_publish_request,
                 "record": cmd_record, "approve": cmd_approve,
+                "approve-conditions": cmd_approve_conditions,
                 "cancel": cmd_cancel, "clear-lock": cmd_clear_lock,
                 "milestone-status": cmd_milestone_status}
     try:

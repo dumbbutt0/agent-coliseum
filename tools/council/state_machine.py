@@ -67,8 +67,12 @@ TRANSITIONS = {
     "RESULT_BLOCKED": (frozenset({RESULT_AUDIT}), RESULT_BLOCKED),
     # source-change tasks terminate at GO -> integration (no experiment
     # lifecycle); the integrated commit must be the GO-audited commit,
-    # which the commit binding below enforces
+    # which the commit binding below enforces. A CONDITIONAL verdict
+    # additionally requires the owner's CONDITIONS_SATISFIED first —
+    # enforced in check(), not by prose.
     "CHANGE_INTEGRATED": (frozenset({GO}), INTEGRATED),
+    # human sign-off that the verdict's conditions are met; state stays go
+    "CONDITIONS_SATISFIED": (frozenset({GO}), GO),
     "NEXT_MILESTONE_READY": (frozenset({RESULT_APPROVED, INTEGRATED}),
                              NEXT_MILESTONE_READY),
 }
@@ -91,7 +95,7 @@ _BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,
 def _blank_request() -> dict:
     return {"state": NONE, "target_commit": None, "claimed_by": None,
             "audit_cycles": 0, "history": [], "last_event_id": None,
-            "last_verdict": None}
+            "last_verdict": None, "conditions_satisfied": False}
 
 
 def check(event: dict, requests: dict) -> None:
@@ -128,6 +132,24 @@ def check(event: dict, requests: dict) -> None:
         raise TransitionError(
             f"{etype} not allowed from state {state!r} for request "
             f"{event['request_id']!r} (allowed from: {sorted(allowed_from)})")
+
+    # a CONDITIONAL verdict never integrates on Claude's authority alone:
+    # the owner must have recorded CONDITIONS_SATISFIED for this request
+    # (cycle-2 audit blocker — the gate is mechanical, not printed advice)
+    if etype == "CHANGE_INTEGRATED":
+        last = (req.get("last_verdict") or {}).get("event_type")
+        if last == "AUDIT_GO_WITH_CONDITIONS" \
+                and not req.get("conditions_satisfied"):
+            raise TransitionError(
+                f"request {event['request_id']!r} carries a conditional "
+                "verdict (AUDIT_GO_WITH_CONDITIONS) — integration is "
+                "refused until a human records CONDITIONS_SATISFIED")
+    if etype == "CONDITIONS_SATISFIED":
+        last = (req.get("last_verdict") or {}).get("event_type")
+        if last != "AUDIT_GO_WITH_CONDITIONS":
+            raise TransitionError(
+                "CONDITIONS_SATISFIED only applies to a request whose "
+                f"last verdict is conditional (got {last!r})")
 
     # commit binding: an approval/audit for one commit never applies to
     # another. The binding is set when the request is published.
@@ -170,6 +192,10 @@ def apply(event: dict, requests: dict) -> dict:
         req["last_verdict"] = {"event_type": etype,
                                "event_id": event["event_id"],
                                "verdict": event["payload"].get("verdict")}
+        # a fresh verdict always invalidates any earlier condition sign-off
+        req["conditions_satisfied"] = False
+    if etype == "CONDITIONS_SATISFIED":
+        req["conditions_satisfied"] = True
     return requests
 
 

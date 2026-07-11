@@ -167,13 +167,16 @@ def _handle_source_go(event: dict, commit: str) -> None:
     commit-bound CHANGE_INTEGRATED recorded by the integration step
     (builder launcher or `tools.autonomy.cli integrate`)."""
     verdict = event["payload"]
-    print(f"\n{event['event_type']} on {event['request_id']} at "
+    rid = event["request_id"]
+    print(f"\n{event['event_type']} on {rid} at "
           f"{commit[:12]} (source task) — summary: {verdict['summary']}")
     if event["event_type"] == "AUDIT_GO_WITH_CONDITIONS":
-        print("conditions attached — owner review is required before any "
-              "integration:")
+        print("conditions attached — the state machine REFUSES "
+              "CHANGE_INTEGRATED until the owner signs them off:")
         for cond in verdict.get("conditions", []):
             print(f"  - {cond}")
+        print(f"owner: python3 -m tools.council.cli approve-conditions "
+              f"{rid} --commit {commit} --role human")
     print("no policy evaluation for source tasks; state remains `go`. "
           "Integration (fast-forward + CHANGE_INTEGRATED, bound to "
           f"{commit[:12]}) belongs to the integration step, never to this "

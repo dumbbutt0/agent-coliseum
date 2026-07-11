@@ -66,6 +66,10 @@ EVENT_TYPES = (
     # candidate is folded into the mainline by fast-forward only; the event
     # records exactly which audited commit master advanced to
     "CHANGE_INTEGRATED",
+    # human-only condition sign-off: a conditional source verdict
+    # (AUDIT_GO_WITH_CONDITIONS) mechanically refuses CHANGE_INTEGRATED
+    # until the owner records this event — printed advice never gates
+    "CONDITIONS_SATISFIED",
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
@@ -100,6 +104,7 @@ SENDER_ALLOWED = {
     "RESULT_APPROVED": frozenset({"codex"}),
     "RESULT_BLOCKED": frozenset({"codex"}),
     "CHANGE_INTEGRATED": frozenset({"claude"}),
+    "CONDITIONS_SATISFIED": frozenset({"human"}),
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),

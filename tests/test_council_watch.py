@@ -187,18 +187,57 @@ def test_source_go_stays_at_go_then_integrates_commit_bound(env, capsys):
     assert state_machine.project(chain)[RID]["state"] == "integrated"
 
 
-def test_source_go_with_conditions_also_stays_at_go(env, capsys):
+def test_source_conditional_verdict_gates_integration_on_human(env, capsys):
+    """Codex cycle-2 blocker regression: after source GO_WITH_CONDITIONS,
+    CHANGE_INTEGRATED is mechanically refused until a HUMAN records
+    CONDITIONS_SATISFIED; the sign-off is commit-bound; and after it a
+    wrong-commit integration still refuses while the audited commit
+    integrates."""
     root, repo, head, cfg = env
     _submit(root, cfg, head, "GO_WITH_CONDITIONS", task_kind="source")
     rc = claude_watch.main(["--once", "--request-id", RID])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "conditions attached" in out and "owner review" in out
+    assert "conditions attached" in out and "approve-conditions" in out
     from tools.council import state_machine
     chain = events.read_chain(root)
     assert "POLICY_VALIDATION_REQUIRED" not in \
         [e["event_type"] for e in chain]
     assert state_machine.project(chain)[RID]["state"] == "go"
+    # 1. no human sign-off -> integration refused
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, head,
+               {"integrated_commit": head})
+    # 2. claude cannot forge the sign-off (human-only role)
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CONDITIONS_SATISFIED", "claude", RID, repo, head)
+    # 3. the human sign-off itself is commit-bound
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CONDITIONS_SATISFIED", "human", RID, repo,
+               "e" * 40)
+    # 4. authoritative human sign-off via the owner CLI
+    from tools.council import cli as council_cli
+    rc = council_cli.main(["--role", "human", "approve-conditions", RID,
+                           "--commit", head])
+    assert rc == 0
+    # 5. wrong commit still refused; the audited commit integrates
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, "e" * 40,
+               {"integrated_commit": "e" * 40})
+    append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, head,
+           {"integrated_commit": head, "integration_method": "fast-forward"})
+    chain = events.read_chain(root)
+    assert state_machine.project(chain)[RID]["state"] == "integrated"
+
+
+def test_conditions_satisfied_requires_conditional_verdict(env):
+    """The sign-off is meaningless (and refused) when the last verdict is
+    an unconditional GO."""
+    root, repo, head, cfg = env
+    _submit(root, cfg, head, "GO", task_kind="source")
+    assert claude_watch.main(["--once", "--request-id", RID]) == 0
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CONDITIONS_SATISFIED", "human", RID, repo, head)
 
 
 def test_experiment_go_still_enters_policy_validation(env, capsys):
