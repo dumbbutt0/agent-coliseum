@@ -17,6 +17,13 @@ verdicts matching the current request, validates them hard, and then:
                              watcher itself NEVER launches experiments);
                              outside policy -> HUMAN_APPROVAL_REQUIRED, stop.
 
+Root of trust (cycle-3 blocker): before ANY verdict is handled the mutable
+request file is verified against the schema and the payload hash pinned by
+its AUDIT_REQUESTED/READY_FOR_REAUDIT event via publish.verified_request —
+the same routine the runner and policy-continue use. Any mismatch fails
+closed: AUTONOMY_PAUSED immediately, before POLICY_VALIDATION_REQUIRED or
+policy.evaluate, with coordinates from the pinned event.
+
 Emergency stop (STATUS != active, or council/STOP exists) and the society
 milestone stop the watcher safely. Three consecutive watcher errors ->
 AUTONOMY_PAUSED and exit. A timeout exits cleanly (code 0).
@@ -38,9 +45,26 @@ SENDER = "claude"
 MAX_CONSECUTIVE_ERRORS = 3
 
 
-def _validate_verdict_event(root: str, event: dict, request_id) -> dict:
-    """Every rejection reason the protocol names, in one place. Returns the
-    request dict on success; raises CouncilError with the reason."""
+class RequestIntegrityError(CouncilError):
+    """The mutable request file contradicts its event-pinned root of trust.
+    Unlike a malformed verdict (WATCHER_ERROR, retryable), this is treated
+    as tampering: the watcher fails closed to AUTONOMY_PAUSED."""
+
+    def __init__(self, failures: list, repository: str, target_commit: str):
+        super().__init__("; ".join(failures))
+        self.failures = failures
+        self.repository = repository
+        self.target_commit = target_commit
+
+
+def _validate_verdict_event(root: str, cfg, event: dict,
+                            request_id) -> tuple:
+    """Every rejection reason the protocol names, in one place. Returns
+    (request, repository, target_commit) on success, where the request is
+    verified against the event-pinned payload hash and the coordinates come
+    from the pinned publish event (cycle-3 blocker: NEVER from the mutable
+    JSON). Raises RequestIntegrityError on tampering, CouncilError
+    otherwise."""
     if event["sender"] != "codex":
         raise SchemaViolation(
             f"verdict event {event['event_id']} signed by "
@@ -53,11 +77,14 @@ def _validate_verdict_event(root: str, event: dict, request_id) -> dict:
     if verdict["request_id"] != event["request_id"]:
         raise SchemaViolation("verdict payload request_id differs from the "
                               "event's request_id")
-    request = publish.read_request(root, event["request_id"])
-    if verdict["audited_commit"] != request["target_commit"]:
+    request, failures, repo, commit = publish.verified_request(
+        root, cfg, event["request_id"])
+    if failures:
+        raise RequestIntegrityError(failures, repo, commit)
+    if verdict["audited_commit"] != commit:
         raise SchemaViolation(
-            f"audited_commit {verdict['audited_commit'][:12]} != request "
-            f"target_commit {request['target_commit'][:12]}")
+            f"audited_commit {verdict['audited_commit'][:12]} != pinned "
+            f"target_commit {commit[:12]}")
     chain = events.read_chain(root)
     claimed = any(e["event_type"] == "AUDIT_CLAIMED"
                   and e["request_id"] == event["request_id"]
@@ -67,7 +94,7 @@ def _validate_verdict_event(root: str, event: dict, request_id) -> dict:
     report = events.verify_chain(root)
     if not report.ok:
         raise CouncilError(f"event chain invalid: {report.error}")
-    return request
+    return request, repo, commit
 
 
 def _handle_blocked(event: dict) -> None:
@@ -83,10 +110,11 @@ def _handle_blocked(event: dict) -> None:
           "to record FIX_STARTED and implement the fixes.")
 
 
-def _handle_go(root: str, cfg, event: dict, request: dict) -> None:
+def _handle_go(root: str, cfg, event: dict, request: dict, repo: str,
+               commit: str) -> None:
+    """repo/commit are the PINNED publish-event coordinates from
+    _validate_verdict_event, not fields of any mutable file."""
     rid = event["request_id"]
-    repo = event["repository"]
-    commit = event["target_commit"]
     verdict = event["payload"]
     print(f"\n{event['event_type']} on {rid} at {commit[:12]} — "
           f"summary: {verdict['summary']}")
@@ -120,7 +148,7 @@ def _handle_go(root: str, cfg, event: dict, request: dict) -> None:
         for reason in decision.reasons:
             print(f"  - {reason}")
         print(f"owner: python3 -m tools.council.cli approve {rid} "
-              f"--commit {event['target_commit']} --role human")
+              f"--commit {commit} --role human")
     print("stopping; the experiment gate is closed to this process.")
 
 
@@ -195,8 +223,26 @@ def main(argv=None) -> int:
                         continue
 
                     try:
-                        request = _validate_verdict_event(
-                            root, event, args.request_id)
+                        request, pin_repo, pin_commit = \
+                            _validate_verdict_event(
+                                root, cfg, event, args.request_id)
+                    except RequestIntegrityError as exc:
+                        # fail closed (cycle-3 blocker): a tampered request
+                        # must never reach policy evaluation — pause NOW,
+                        # with coordinates from the pinned event
+                        storage.write_cursor(root, SENDER, offset, prev_hash,
+                                             event["event_id"])
+                        events.pause_autonomy(
+                            root, cfg, SENDER, event["request_id"],
+                            exc.repository, exc.target_commit,
+                            "request file failed root-of-trust "
+                            f"verification: {exc}")
+                        print("claude_watch: request integrity failure — "
+                              "AUTONOMY_PAUSED recorded; the owner decides "
+                              "next:", file=sys.stderr)
+                        for failure in exc.failures:
+                            print(f"  - {failure}", file=sys.stderr)
+                        return 1
                     except CouncilError as exc:
                         consecutive_errors += 1
                         print(f"claude_watch: invalid verdict ignored "
@@ -226,7 +272,8 @@ def main(argv=None) -> int:
                     if etype == "AUDIT_BLOCKED":
                         _handle_blocked(event)
                     else:
-                        _handle_go(root, cfg, event, request)
+                        _handle_go(root, cfg, event, request, pin_repo,
+                                   pin_commit)
                     return 0
                 cursor = storage.read_cursor(root, SENDER)
             except CouncilError as exc:

@@ -39,7 +39,6 @@ from tools.autonomy import default_roadmap_path, guard
 from tools.autonomy import roadmap as roadmap_mod
 from tools.autonomy.drivers import DRIVERS, RunnerRefusal
 from tools.council import Config, events, publish, storage
-from tools.council.schemas import CouncilError, validate_request
 
 SENDER = "claude"
 
@@ -153,47 +152,12 @@ def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
 def verified_request(cfg: Config, request_id: str) -> tuple:
     """(request, failures, authoritative_repo, authoritative_commit).
 
-    Cycle-2 audit blocker: the request JSON in ready/claimed/complete is a
-    MUTABLE lifecycle file — it is trusted only when (a) it validates
-    against the full request schema including its own canonical
-    request_payload_hash, and (b) that hash equals the hash pinned by the
-    authoritative AUDIT_REQUESTED/READY_FOR_REAUDIT event for the same
-    request and commit. Post-audit edits — with a stale OR a freshly
-    recomputed self-consistent hash — fail (b) and never reach a driver.
-    The pause coordinates come from the pinned EVENT, not the file."""
-    root = cfg.council_root
-    request = publish.read_request(root, request_id)
-    failures: list = []
-    chain = events.read_chain(root)  # hash-verified end to end
-    pins = [e for e in chain
-            if e["request_id"] == request_id
-            and e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")]
-    if not pins:
-        failures.append(
-            "no publish event pins this request — the file has no "
-            "authoritative root of trust")
-        return (request, failures, request.get("repository", ""),
-                request.get("target_commit", "0" * 40))
-    pin = pins[-1]
-    repo = pin["repository"]
-    commit = pin["target_commit"]
-    try:
-        validate_request(request, cfg.repo_roots)
-    except CouncilError as exc:
-        failures.append(f"request file no longer validates: {exc}")
-    pinned_hash = pin["payload"].get("request_payload_hash")
-    if request.get("request_payload_hash") != pinned_hash:
-        failures.append(
-            "request file payload hash "
-            f"{str(request.get('request_payload_hash'))[:12]} does not "
-            f"match the hash pinned by event {pin['event_id']} "
-            f"({str(pinned_hash)[:12]}) — the file was modified after the "
-            "audit request was published")
-    if request.get("target_commit") != commit:
-        failures.append(
-            "request file target_commit differs from the pinned event — "
-            "post-audit tampering")
-    return request, failures, repo, commit
+    Cycle-2 audit blocker: the mutable request file is trusted only after
+    schema + event-pinned hash verification. Cycle-3 moved the shared
+    routine to tools/council/publish.verified_request so the automatic
+    claude_watch path uses the identical root of trust; this wrapper keeps
+    the runner/CLI call sites and their pause semantics unchanged."""
+    return publish.verified_request(cfg.council_root, cfg, request_id)
 
 
 # -------------------------------------------------------------- the runner

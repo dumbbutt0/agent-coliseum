@@ -151,10 +151,99 @@ def test_validate_rejects_unclaimed_and_wrong_sender(env):
               "request_id": RID, "payload": verdict, "target_commit": head,
               "repository": repo}
     with pytest.raises(CouncilError):
-        claude_watch._validate_verdict_event(root, forged, RID)
+        claude_watch._validate_verdict_event(root, cfg, forged, RID)
     forged["sender"] = "codex"
     with pytest.raises(CouncilError):  # request never existed/claimed
-        claude_watch._validate_verdict_event(root, forged, RID)
+        claude_watch._validate_verdict_event(root, cfg, forged, RID)
+
+
+# --------------------- cycle-3 blocker: watcher-path request root of trust
+
+def _tamper_request_file(root, rid, rehash: bool):
+    """The cycle-3 Codex probe: post-verdict edit of the mutable request
+    file that flips the human gate off (the escalation AUTO_APPROVED would
+    grant) and rewrites target_commit. rehash=False leaves
+    request_payload_hash stale; rehash=True recomputes it so the file is
+    self-consistent — both must fail against the event-pinned hash."""
+    import json
+    from tests.council_util import make_autonomy_block
+    from tools.council.schemas import compute_request_payload_hash
+    for bucket in ("ready", "claimed", "complete"):
+        path = storage.safe_request_path(root, bucket, rid)
+        if os.path.exists(path):
+            break
+    with open(path, encoding="utf-8") as fh:
+        request = json.load(fh)
+    request["human_approval_required"] = False
+    request["autonomy"] = make_autonomy_block()
+    request["target_commit"] = "e" * 40
+    if rehash:
+        request["request_payload_hash"] = \
+            compute_request_payload_hash(request)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(request, fh)
+
+
+def _assert_watcher_paused_before_policy(root, repo, head, rc, chain_before):
+    chain = events.read_chain(root)
+    types = [e["event_type"] for e in chain]
+    assert rc == 1
+    assert "POLICY_VALIDATION_REQUIRED" not in types
+    assert "AUTO_APPROVED" not in types
+    last = chain[-1]
+    assert last["event_type"] == "AUTONOMY_PAUSED"
+    assert "root-of-trust" in last["payload"]["reason"]
+    # coordinates come from the pinned publish event, not the tampered JSON
+    assert last["repository"] == repo
+    assert last["target_commit"] == head
+    assert last["target_commit"] != "e" * 40
+    # the pause is the ONLY event the watcher appended
+    assert len(chain) == chain_before + 1
+
+
+def test_watcher_pauses_on_stale_hash_request_tamper(env, capsys):
+    """Real claude_watch.main from GO with a stale request_payload_hash:
+    AUTONOMY_PAUSED before POLICY_VALIDATION_REQUIRED/AUTO_APPROVED."""
+    root, repo, head, cfg = env
+    policy.write_initial_policy(root)
+    _submit(root, cfg, head, "GO")  # published human-gated
+    _tamper_request_file(root, RID, rehash=False)
+    chain_before = len(events.read_chain(root))
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    err = capsys.readouterr().err
+    assert "request integrity failure" in err
+    _assert_watcher_paused_before_policy(root, repo, head, rc, chain_before)
+
+
+def test_watcher_pauses_on_recomputed_hash_request_tamper(env, capsys):
+    """Codex's second variant: a SELF-CONSISTENT recomputed
+    request_payload_hash still contradicts the event-pinned hash — the
+    real watcher path must pause, never evaluate policy."""
+    root, repo, head, cfg = env
+    policy.write_initial_policy(root)
+    _submit(root, cfg, head, "GO")
+    _tamper_request_file(root, RID, rehash=True)
+    chain_before = len(events.read_chain(root))
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    err = capsys.readouterr().err
+    assert "does not match the hash pinned" in err
+    _assert_watcher_paused_before_policy(root, repo, head, rc, chain_before)
+
+
+def test_watcher_pauses_on_blocked_verdict_with_tampered_request(env,
+                                                                 capsys):
+    """Fail-closed is unconditional: even a BLOCKED verdict for a tampered
+    request pauses instead of printing findings from an untrusted file."""
+    root, repo, head, cfg = env
+    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
+    verdict = _signed(head, verdict="BLOCKED", blockers=["x"],
+                      summary="blocked")
+    codex_watch.submit_verdict(root, cfg, verdict)
+    locking.release(ctx["lock"])
+    _tamper_request_file(root, RID, rehash=True)
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    assert rc == 1
+    assert events.read_chain(root)[-1]["event_type"] == "AUTONOMY_PAUSED"
 
 
 def test_timeout_exits_cleanly(env):

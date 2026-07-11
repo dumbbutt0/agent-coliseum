@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 
 from tools.council import Config, events, git_state, state_machine, storage
-from tools.council.schemas import (SchemaViolation, TransitionError,
+from tools.council.schemas import (CouncilError, SchemaViolation,
+                                   TransitionError,
                                    compute_request_payload_hash,
                                    validate_request)
 
@@ -152,3 +153,54 @@ def read_request(root: str, request_id: str) -> dict:
                 return json.load(fh)
     raise SchemaViolation(f"request {request_id!r} not found in "
                           "ready/claimed/complete")
+
+
+def verified_request(root: str, cfg: Config, request_id: str) -> tuple:
+    """(request, failures, authoritative_repo, authoritative_commit).
+
+    The request JSON in ready/claimed/complete is a MUTABLE lifecycle
+    file — it is trusted only when (a) it validates against the full
+    request schema including its own canonical request_payload_hash, and
+    (b) that hash equals the hash pinned by the authoritative
+    AUDIT_REQUESTED/READY_FOR_REAUDIT event for the same request and
+    commit. Post-audit edits — with a stale OR a freshly recomputed
+    self-consistent hash — fail (b). The authoritative coordinates come
+    from the pinned EVENT, not the file.
+
+    Council-level on purpose (cycle-3 audit blocker): EVERY policy
+    evaluation path — the automatic claude_watch handler, manual
+    policy-continue, and the runner — must obtain the request through
+    this one routine; tools/autonomy delegates here rather than the
+    watcher importing upward."""
+    request = read_request(root, request_id)
+    failures: list = []
+    chain = events.read_chain(root)  # hash-verified end to end
+    pins = [e for e in chain
+            if e["request_id"] == request_id
+            and e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")]
+    if not pins:
+        failures.append(
+            "no publish event pins this request — the file has no "
+            "authoritative root of trust")
+        return (request, failures, request.get("repository", ""),
+                request.get("target_commit", "0" * 40))
+    pin = pins[-1]
+    repo = pin["repository"]
+    commit = pin["target_commit"]
+    try:
+        validate_request(request, cfg.repo_roots)
+    except CouncilError as exc:
+        failures.append(f"request file no longer validates: {exc}")
+    pinned_hash = pin["payload"].get("request_payload_hash")
+    if request.get("request_payload_hash") != pinned_hash:
+        failures.append(
+            "request file payload hash "
+            f"{str(request.get('request_payload_hash'))[:12]} does not "
+            f"match the hash pinned by event {pin['event_id']} "
+            f"({str(pinned_hash)[:12]}) — the file was modified after the "
+            "audit request was published")
+    if request.get("target_commit") != commit:
+        failures.append(
+            "request file target_commit differs from the pinned event — "
+            "post-audit tampering")
+    return request, failures, repo, commit
