@@ -301,16 +301,34 @@ Locks are now leases (item 7). A `lock.v1` body carries an `owner_token`
 (`secrets.token_hex`), a `lease_expires_utc`, and a `kind`. `release()` is
 COMPARE-AND-DELETE on the token: the holder is read, the token verified,
 and only then is the lock removed (rename-then-unlink, a drvfs-safe commit
-point). `renew()` is an ownership-preserving COMPARE-AND-SWAP: it atomically
-moves the live lock aside, confirms the moved body is still ours, updates
-the lease, and restores it with an `O_EXCL` create — so if the holder was
-released and re-acquired between a stale owner's read and write, the stale
-renew fails closed (`LockHeld`) and never overwrites the replacement's
-token or lease. A wrong or absent token is a no-op, so a reused PID cannot
-steal a live lock — authority is the random token, not the pid. Expiry only
-makes a lock ELIGIBLE for the existing logged clearance paths (`cli
-clear-lock`, the launcher stale-gate, which now reads `lease_expires_utc`
-instead of file mtime) — never a silent steal.
+point). `renew()` is ownership-preserving: it first CONFIRMS ownership by
+reading (a lock that is not ours is left completely untouched and renew
+fails closed — a stale owner never disturbs a replacement), then moves only
+its OWN lock aside and restores it with a non-clobbering `O_EXCL` create; a
+lock re-acquired in the brief swap vacancy is never overwritten. No path
+overwrites another holder's lock. A wrong or absent token is a no-op, so a
+reused PID cannot steal a live lock — authority is the random token, not the
+pid. Expiry only makes a lock ELIGIBLE for the existing logged clearance
+paths (`cli clear-lock`, the launcher stale-gate, which now reads
+`lease_expires_utc` instead of file mtime) — never a silent steal.
+
+## Fault matrix (hardening H6)
+
+Every council write funnels through four durable-mutation primitives —
+`os.rename`, `os.unlink`, `storage.append_line`,
+`storage.atomic_write_json`. `tests/fault_util.py` wraps all four in a
+counting injector that can raise a `CrashInjected` at any single boundary
+(by op-index or global index), simulating a process death or an emergency
+STOP at exactly that point. `tests/test_fault_matrix.py` then, for each
+RECOVERABLE operation (claim, verdict submission, publish), dry-runs it to
+enumerate every boundary it crosses and re-runs it once per boundary —
+crashing there, invoking the operation's recovery path, and asserting the
+operation's INVARIANT holds: the request sits in exactly the state its
+chain's terminal event implies, recovery is idempotent, and a crash is
+either fully absorbed or fully compensated — never a half-state. Two
+completeness tests assert every primitive and every operation is actually
+exercised, so the matrix can never silently shrink. This is the harness
+that surfaced the `publish_request` orphan-rollback gap fixed in H5.
 
 ## Protocol integrity
 
