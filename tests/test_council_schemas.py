@@ -364,13 +364,14 @@ def test_verdict_lists_and_strings_are_bounded():
     """H2 cycle-3 blocker: verdict content is bounded symmetrically with
     requests — 201 blockers, a 4001+ char summary, and 201 findings are
     all refused even with a self-consistent payload hash."""
-    from tools.council.schemas import (_MAX_LIST_ITEMS, _MAX_FINDING_STRING)
+    from tools.council.schemas import (_MAX_LIST_ITEMS, _MAX_FIELD_STRING,
+                                       _MAX_FINDING_STRING)
     base = make_verdict("a" * 40, verdict="BLOCKED")
     cases = [
         dict(base, blockers=["b"] * (_MAX_LIST_ITEMS + 1)),
         dict(base, conditions=["c"] * (_MAX_LIST_ITEMS + 1)),
         dict(base, commands_run=["x"] * (_MAX_LIST_ITEMS + 1)),
-        dict(base, summary="s" * (_MAX_FINDING_STRING + 1)),
+        dict(base, summary="s" * (_MAX_FIELD_STRING + 1)),  # 4000 cap
         dict(base, blockers=["b" * (_MAX_FINDING_STRING + 1)]),
         dict(base, findings=[make_finding()] * (_MAX_LIST_ITEMS + 1)),
         dict(base, findings=[make_finding(

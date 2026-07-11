@@ -553,10 +553,12 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
     for name in ("summary", "audit_mode", "timestamp_utc"):
         if not isinstance(verdict[name], str) or not verdict[name]:
             raise SchemaViolation(f"{name} must be a non-empty string")
-    # H2 item 11 (cycle-3 blocker: verdicts were unbounded): cap summary
-    if len(verdict["summary"]) > _MAX_FINDING_STRING:
+    # H2 item 11 (cycle-3/4 blockers): summary is a short scalar field,
+    # capped at _MAX_FIELD_STRING (4000) — the larger _MAX_FINDING_STRING
+    # applies only to finding prose (evidence, failure_mode, ...)
+    if len(verdict["summary"]) > _MAX_FIELD_STRING:
         raise SchemaViolation(
-            f"summary exceeds {_MAX_FINDING_STRING} chars")
+            f"summary exceeds {_MAX_FIELD_STRING} chars")
     # H2 (carried from codex-auto-launcher-audit-002 GO_WITH_CONDITIONS):
     # audit_mode is an enum and timestamp_utc is a REAL UTC timestamp
     if verdict["audit_mode"] not in AUDIT_MODES:
