@@ -76,6 +76,43 @@ codex_watch.submit_verdict(
     result_audit=True)
 """
 
+FAKE_CLAIM_ONLY = _VERDICT_BODY + """
+rid = codex_watch.list_ready(root)[0]
+codex_watch.claim(root, cfg, rid)
+"""
+
+FAKE_CLAIM_THEN_CRASH = _VERDICT_BODY + """
+rid = codex_watch.list_ready(root)[0]
+codex_watch.claim(root, cfg, rid)
+sys.exit(1)
+"""
+
+FAKE_RESUME_GO = _VERDICT_BODY + """
+claimed = os.path.join(root, "requests", "claimed")
+rid = [f[:-5] for f in os.listdir(claimed) if f.endswith(".json")][0]
+req = json.load(open(os.path.join(claimed, rid + ".json")))
+codex_watch.submit_verdict(root, cfg,
+                           verdict_for(rid, req["target_commit"], "GO"))
+"""
+
+FAKE_WATCHER_ERROR_ONLY = _VERDICT_BODY + """
+from tools.council import events, publish
+rid = codex_watch.list_ready(root)[0]
+req = publish.read_request(root, rid)
+events.append_event(root, cfg, "WATCHER_ERROR", "codex", rid,
+                    req["repository"], req["target_commit"],
+                    {"reason": "fake session noise"})
+"""
+
+FAKE_UNRELATED_STATE_CHANGE = _VERDICT_BODY + """
+from tools.council import events, publish
+rid = codex_watch.list_ready(root)[0]
+req = publish.read_request(root, rid)
+events.append_event(root, cfg, "BUILD_STARTED", "claude",
+                    "unrelated-req-001", req["repository"],
+                    req["target_commit"], {})
+"""
+
 FAKE_NOOP = 'open(MARKER, "a").write("launched\\n")\n'
 FAKE_FAIL = 'open(MARKER, "a").write("launched\\n")\nsys.exit(1)\n'
 FAKE_SLEEP = 'import time\nopen(MARKER, "a").write("launched\\n")\n' \
@@ -220,7 +257,100 @@ def test_exit_zero_without_advancing_is_a_failure(env, tmp_path, monkeypatch):
     assert codex_launcher.main(["--once"]) == 0
     last = events.read_chain(root)[-1]
     assert last["event_type"] == "WATCHER_ERROR"
-    assert "without advancing" in last["payload"]["reason"]
+    assert "without the expected codex-signed terminal verdict" in \
+        last["payload"]["reason"]
+
+
+# ----------------------- terminal-verdict verification (cycle-2 blocker 1)
+
+def _failure_events(root, rid=RID):
+    return [e for e in events.read_chain(root)
+            if e["event_type"] == "WATCHER_ERROR"
+            and e["request_id"] == rid
+            and e["payload"].get("failure") is True]
+
+
+def test_claim_only_session_is_failure_then_recoverable(env, tmp_path,
+                                                        monkeypatch):
+    """Codex's probe: a session that claims and exits 0 must NEVER count
+    as success — it is a recorded failure, the stale claim lock is cleared
+    through a logged operation, and a resume session (no re-claim) can
+    finish the audit."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_CLAIM_ONLY)
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert _state(root) == "claimed"
+    assert len(_failure_events(root)) == 1
+    # the stale lock was cleared via the LOGGED operation, never silently
+    assert locking.read_lock(root, RID) is None
+    clears = [e for e in events.read_chain(root)
+              if e["payload"].get("operation") == "clear_stale_lock"]
+    assert len(clears) == 1 and clears[0]["payload"]["previous_holder"]
+    # recovery: a resume session submits WITHOUT claiming again
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_RESUME_GO)
+    assert codex_launcher.main(["--once"]) == 0
+    assert _state(root) == "go"
+    assert len(_failure_events(root)) == 1  # the resume was a success
+
+
+def test_claim_then_crash_is_failure_and_recoverable(env, tmp_path,
+                                                     monkeypatch):
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_CLAIM_THEN_CRASH)
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert _state(root) == "claimed"
+    assert len(_failure_events(root)) == 1
+    assert locking.read_lock(root, RID) is None
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_RESUME_GO)
+    assert codex_launcher.main(["--once"]) == 0
+    assert _state(root) == "go"
+
+
+def test_watcher_error_only_session_is_failure(env, tmp_path, monkeypatch):
+    """A session may append events — only the EXPECTED terminal verdict
+    counts as success."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_WATCHER_ERROR_ONLY)
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert len(_failure_events(root)) == 1
+    assert _state(root) == "requested"
+
+
+def test_unrelated_state_change_is_not_success(env, tmp_path, monkeypatch):
+    """Concurrent chain growth (another request advancing) must not be
+    mistaken for this session's success."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_UNRELATED_STATE_CHANGE)
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert len(_failure_events(root)) == 1
+    assert _state(root) == "requested"
+
+
+def test_resume_waits_for_young_foreign_lock(env, tmp_path, monkeypatch):
+    """A claimed request whose lock is younger than the audit timeout may
+    belong to a LIVE session this launcher did not start — the launcher
+    must wait, not clear or relaunch. Once the lock outlives the bound it
+    is cleared (logged) and the resume session runs."""
+    root, repo, head, cfg = env
+    marker = _install_fake_codex(tmp_path, monkeypatch, FAKE_RESUME_GO)
+    _publish_requested(root, cfg, repo, head)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    codex_watch.claim(root, codex_cfg, RID)  # foreign session, lock fresh
+    assert codex_launcher.main(["--once"]) == 0
+    assert not os.path.exists(marker)  # waited: no launch
+    assert locking.read_lock(root, RID) is not None
+    assert _failure_events(root) == []
+    # the lock outlives the audit bound -> logged clearance + resume
+    lock_file = storage.lock_path(root, RID)
+    old = os.path.getmtime(lock_file) - 4000
+    os.utime(lock_file, (old, old))
+    assert codex_launcher.main(["--once"]) == 0
+    assert os.path.exists(marker)
+    assert _state(root) == "go"
 
 
 def test_three_consecutive_failures_pause_autonomy(env, tmp_path,

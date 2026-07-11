@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,34 @@ def _sha256_file(path: str) -> str:
 
 # ------------------------------------------------------- bounded execution
 
+def _kill_tree(proc) -> None:
+    """SIGKILL the child's entire process group (it was started in its own
+    session), reap the direct child, and wait briefly until the group has
+    no signalable members — descendants must never outlive the bound. On
+    non-POSIX platforms (unsupported today) only the direct child dies."""
+    if os.name == "posix":
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        proc.kill()
+        proc.wait()
+        if pgid is not None:
+            for _ in range(100):  # ~5 s upper bound; SIGKILL is prompt
+                try:
+                    os.killpg(pgid, 0)
+                except (ProcessLookupError, PermissionError):
+                    return
+                time.sleep(0.05)
+        return
+    proc.kill()
+    proc.wait()
+
 def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
                      storage_cap_mb: float, size_before_mb: float,
                      cwd: str, stdout=None, stderr=None, env=None) -> None:
@@ -88,13 +117,20 @@ def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
     would otherwise fill the PIPE buffers (default keeps the PIPE capture).
     env: a SANITIZED environment for launcher children (default inherits
     the parent environment, unchanged behavior); PYTHONPATH always gains
-    cwd so tools/ imports resolve."""
+    cwd so tools/ imports resolve.
+
+    The child runs in its OWN process group (POSIX start_new_session), and
+    every kill path kills the WHOLE group — a bounded audit/experiment that
+    spawns pytest or probe subprocesses must not outlive its deadline
+    through descendants (launcher audit blocker 2, 2026-07-11)."""
     env = dict(os.environ) if env is None else dict(env)
     env["PYTHONPATH"] = cwd + os.pathsep + env.get("PYTHONPATH", "")
+    posix = os.name == "posix"
     proc = subprocess.Popen(
         argv, cwd=cwd,
         stdout=subprocess.PIPE if stdout is None else stdout,
-        stderr=subprocess.PIPE if stderr is None else stderr, env=env)
+        stderr=subprocess.PIPE if stderr is None else stderr, env=env,
+        start_new_session=posix)
     started = time.monotonic()
     try:
         while True:
@@ -102,24 +138,21 @@ def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
             if rc is not None:
                 break
             if time.monotonic() - started > deadline_seconds:
-                proc.kill()
-                proc.wait()
+                _kill_tree(proc)
                 raise RunnerRefusal(
                     f"wall/compute deadline {deadline_seconds:.0f}s "
-                    "exceeded — child killed")
+                    "exceeded — child process group killed")
             if os.path.isdir(storage_root):
                 growth = tree_size_mb(storage_root) - size_before_mb
                 if growth > storage_cap_mb:
-                    proc.kill()
-                    proc.wait()
+                    _kill_tree(proc)
                     raise RunnerRefusal(
                         f"storage growth {growth:.1f} MB exceeded the cap "
-                        f"{storage_cap_mb} MB — child killed")
+                        f"{storage_cap_mb} MB — child process group killed")
             time.sleep(_POLL_SECONDS)
     finally:
         if proc.poll() is None:
-            proc.kill()
-            proc.wait()
+            _kill_tree(proc)
     if rc != 0:
         if stderr is None:
             tail = proc.stderr.read().decode("utf-8", "replace")[-500:]

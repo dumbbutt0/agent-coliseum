@@ -393,6 +393,55 @@ def test_execute_bounded_kills_storage_overrun(tmp_path):
     assert time.monotonic() - started < 15
 
 
+# --------- launcher audit blocker 2: the bound covers the WHOLE process tree
+
+def _grandchild_spawner(marker: str, occupy: str = "time.sleep(60)") -> str:
+    """A child that spawns a detached-feeling grandchild which would write
+    a marker after 2.5s, then occupies itself — if the group kill misses
+    the grandchild, the marker appears after _execute_bounded returns."""
+    return (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c',\n"
+        f"    \"import time; time.sleep(2.5); open({marker!r}, 'w')"
+        ".write('leaked')\"])\n"
+        f"{occupy}\n")
+
+
+def test_timeout_kills_entire_process_group(tmp_path):
+    marker = str(tmp_path / "leaked-by-timeout.marker")
+    try:
+        runner._execute_bounded(
+            [sys.executable, "-c", _grandchild_spawner(marker)],
+            deadline_seconds=1.0, storage_root=str(tmp_path),
+            storage_cap_mb=1024, size_before_mb=0.0, cwd=str(tmp_path))
+        raise AssertionError("hung child was not killed")
+    except RunnerRefusal as exc:
+        assert "process group killed" in str(exc)
+    time.sleep(3.0)  # past the grandchild's write time
+    assert not os.path.exists(marker), \
+        "a descendant outlived the declared hard bound"
+
+
+def test_storage_overrun_kills_entire_process_group(tmp_path):
+    out = tmp_path / "growth"
+    out.mkdir()
+    marker = str(tmp_path / "leaked-by-storage.marker")
+    occupy = (f"open(os.path.join({str(out)!r}, 'fat.bin'), 'wb')"
+              f".write(b'\\0' * (3 * 1024 * 1024)); time.sleep(60)")
+    body = "import os\n" + _grandchild_spawner(marker, occupy=occupy)
+    try:
+        runner._execute_bounded(
+            [sys.executable, "-c", body],
+            deadline_seconds=30.0, storage_root=str(out),
+            storage_cap_mb=1, size_before_mb=0.0, cwd=str(tmp_path))
+        raise AssertionError("storage-overrunning child was not killed")
+    except RunnerRefusal as exc:
+        assert "process group killed" in str(exc)
+    time.sleep(3.0)
+    assert not os.path.exists(marker), \
+        "a descendant outlived the storage kill"
+
+
 def test_scenario_cardinality_over_limit_refused_before_start(tmp_path,
                                                               monkeypatch):
     config_path, config_sha = write_mock_config(tmp_path, scenario_count=20)

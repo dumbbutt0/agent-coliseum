@@ -9,6 +9,10 @@ depends on process memory. Launches ONE bounded, non-interactive
 `codex exec` session at a time:
 
   request state `requested`    -> source audit (the session claims first)
+  request state `claimed`      -> RESUME source audit (a prior session died
+                                  after claiming; no re-claim; the stale
+                                  claim lock is cleared via a logged
+                                  operation, gated on the audit timeout)
   request state `result_audit` -> result audit (file already in claimed/)
 
 Root of trust: the prompt is built ONLY from publish.verified_request —
@@ -19,10 +23,13 @@ there is no shell. The Codex session performs claim/submit itself through
 tools.council.codex_watch, so every codex-role event is signed by the
 Codex process and the O_EXCL claim lock stays the single claim authority.
 
-Afterwards the launcher trusts only the chain: the request must have left
-its trigger state via codex-signed events. A session that exits without
-advancing the request records WATCHER_ERROR (phase codex_launcher); three
-consecutive launcher failures within the same published cycle pause
+Afterwards the launcher trusts only the chain: success is EXCLUSIVELY the
+expected codex-signed terminal verdict (source: AUDIT_BLOCKED/AUDIT_GO/
+AUDIT_GO_WITH_CONDITIONS; result: RESULT_APPROVED/RESULT_BLOCKED) at the
+pinned commit, appearing after the pre-launch chain position — never the
+exit code, and never an intermediate state change such as AUDIT_CLAIMED.
+Anything less records WATCHER_ERROR (phase codex_launcher, failure:true);
+three consecutive session failures within the same published cycle pause
 autonomy. Emergency STATUS/STOP, the global paused flag, and the society
 milestone stop the launcher cleanly (exit 0, so a service manager with
 Restart=on-failure does not resurrect it).
@@ -48,8 +55,24 @@ STORAGE_CAP_MB = 2048.0
 LAUNCHER_LOCK = "_codex_launcher"
 MAX_CONSECUTIVE_FAILURES = 3
 
-# request state -> the kind of Codex session that resolves it
-TRIGGER_STATES = {"requested": "source_audit", "result_audit": "result_audit"}
+# request state -> the kind of Codex session that resolves it. `claimed`
+# is the recovery trigger: a session that claimed and then died stranded
+# the request there (launcher audit blocker 1) — the resume session audits
+# and submits WITHOUT claiming again.
+TRIGGER_STATES = {"requested": "source_audit",
+                  "claimed": "source_audit_resume",
+                  "result_audit": "result_audit"}
+
+# success is ONLY the expected codex-signed terminal verdict at the pinned
+# commit appearing in the post-launch chain segment — never "some state
+# change" and never the session's exit code
+EXPECTED_TERMINAL = {
+    "source_audit": frozenset({"AUDIT_BLOCKED", "AUDIT_GO",
+                               "AUDIT_GO_WITH_CONDITIONS"}),
+    "source_audit_resume": frozenset({"AUDIT_BLOCKED", "AUDIT_GO",
+                                      "AUDIT_GO_WITH_CONDITIONS"}),
+    "result_audit": frozenset({"RESULT_APPROVED", "RESULT_BLOCKED"}),
+}
 
 
 class RequestIntegrityError(CouncilError):
@@ -80,9 +103,11 @@ def actionable(chain: list, requests: dict) -> list:
 
 
 def launcher_failures(chain: list, rid: str) -> int:
-    """Consecutive codex_launcher failures for rid since its current
-    published cycle began (a new publish or result-audit request resets
-    the count) — derived from the chain, never from process memory."""
+    """Consecutive codex_launcher SESSION failures for rid since its
+    current published cycle began (a new publish or result-audit request
+    resets the count) — derived from the chain, never from process memory.
+    Only events flagged failure:true count; logged stale-lock clearances
+    are bookkeeping, not failures."""
     count = 0
     for event in chain:
         if event["request_id"] != rid:
@@ -91,9 +116,23 @@ def launcher_failures(chain: list, rid: str) -> int:
                                    "RESULT_AUDIT_REQUESTED"):
             count = 0
         elif event["event_type"] == "WATCHER_ERROR" and \
-                event["payload"].get("phase") == "codex_launcher":
+                event["payload"].get("phase") == "codex_launcher" and \
+                event["payload"].get("failure") is True:
             count += 1
     return count
+
+
+def _terminal_verdict_in(segment: list, rid: str, kind: str,
+                         commit: str) -> bool:
+    """True iff the post-launch chain segment contains the EXPECTED
+    codex-signed terminal verdict for rid at the pinned commit."""
+    for event in segment:
+        if event["request_id"] == rid \
+                and event["sender"] == "codex" \
+                and event["event_type"] in EXPECTED_TERMINAL[kind] \
+                and event["target_commit"] == commit:
+            return True
+    return False
 
 
 # ------------------------------------------------------------------ the prompt
@@ -137,6 +176,14 @@ def build_audit_prompt(root: str, cfg, rid: str, kind: str):
     if kind == "source_audit":
         claim = (f"Claim first: python3 -m tools.council.codex_watch "
                  f"--claim {rid}")
+        submit = (f"python3 -m tools.council.codex_watch --submit "
+                  f"/tmp/{rid}-verdict.json")
+        verdicts = "BLOCKED | GO | GO_WITH_CONDITIONS"
+        result_note = ""
+    elif kind == "source_audit_resume":
+        claim = ("This request is ALREADY CLAIMED (a prior session ended "
+                 "before submitting its verdict); do NOT claim again — "
+                 "audit and submit directly.")
         submit = (f"python3 -m tools.council.codex_watch --submit "
                   f"/tmp/{rid}-verdict.json")
         verdicts = "BLOCKED | GO | GO_WITH_CONDITIONS"
@@ -194,13 +241,14 @@ def _log_paths(repo: str, rid: str, kind: str) -> tuple:
 
 def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
                     commit: str, reason: str, logs: tuple) -> str:
-    """WATCHER_ERROR now; AUTONOMY_PAUSED after the third consecutive
-    failure in this published cycle. Returns 'failed' or 'paused'."""
+    """WATCHER_ERROR (failure:true) now; AUTONOMY_PAUSED after the third
+    consecutive session failure in this published cycle. Returns 'failed'
+    or 'paused'."""
     print(f"codex_launcher: {kind} session for {rid} failed — {reason}",
           file=sys.stderr)
     events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo,
                         commit, {"phase": "codex_launcher", "kind": kind,
-                                 "reason": reason,
+                                 "failure": True, "reason": reason,
                                  "stdout_log": logs[0], "stderr_log": logs[1]})
     chain = events.read_chain(root)
     failures = launcher_failures(chain, rid)
@@ -215,11 +263,55 @@ def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
     return "failed"
 
 
-def process_one(cfg, root: str, requests: dict, rid: str, kind: str,
-                audit_timeout: float) -> str:
-    """Launch one bounded Codex session and verify advancement from the
-    chain alone. Returns 'ok', 'failed', or 'paused'."""
-    state_before = requests[rid]["state"]
+def _clear_stale_claim_lock(cfg, root: str, rid: str, repo: str,
+                            commit: str, why: str) -> None:
+    """The ONLY lock clearance the launcher performs, and only for a claim
+    lock known to be stale (the launcher's own bounded session is dead, or
+    the lock outlived the audit timeout). Logged FIRST — the same
+    contract as cli clear-lock; never counted as a session failure."""
+    holder = locking.read_lock(root, rid)
+    if holder is None:
+        return
+    events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo,
+                        commit, {"phase": "codex_launcher",
+                                 "operation": "clear_stale_lock",
+                                 "lock_name": rid,
+                                 "previous_holder": holder,
+                                 "reason": why})
+    locking.clear_lock(root, rid)
+    print(f"codex_launcher: cleared stale claim lock for {rid} ({why})")
+
+
+def _stale_lock_gate(cfg, root: str, rid: str, repo: str, commit: str,
+                     audit_timeout: float) -> bool:
+    """Resume safety: if a claim lock still exists it may belong to a live
+    session this launcher did not start (owner-launched, or an orphan of a
+    crashed launcher). Wait until the lock is older than the audit timeout
+    — then it is provably beyond its bound — before the logged clearance.
+    Returns True when it is safe to launch the resume session."""
+    holder = locking.read_lock(root, rid)
+    if holder is None:
+        return True
+    try:
+        age = time.time() - os.path.getmtime(storage.lock_path(root, rid))
+    except OSError:
+        age = None
+    if age is not None and age < audit_timeout:
+        print(f"codex_launcher: {rid} is claimed and its lock is "
+              f"{age:.0f}s old (< {audit_timeout:.0f}s audit bound) — a "
+              "session may still be running; waiting")
+        return False
+    _clear_stale_claim_lock(cfg, root, rid, repo, commit,
+                            "claim lock outlived the audit timeout")
+    return True
+
+
+def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
+                kind: str, audit_timeout: float) -> str:
+    """Launch one bounded Codex session and verify success from the chain
+    alone: ONLY the expected codex-signed terminal verdict at the pinned
+    commit, appearing after the pre-launch chain position, counts.
+    Returns 'ok', 'failed', 'paused', or 'waiting'."""
     try:
         prompt, repo, commit = build_audit_prompt(root, cfg, rid, kind)
     except RequestIntegrityError as exc:
@@ -231,10 +323,17 @@ def process_one(cfg, root: str, requests: dict, rid: str, kind: str,
               "AUTONOMY_PAUSED, no session launched", file=sys.stderr)
         return "paused"
 
+    if kind == "source_audit_resume" and \
+            not _stale_lock_gate(cfg, root, rid, repo, commit,
+                                 audit_timeout):
+        return "waiting"
+
+    pre_length = len(chain)
     logs = _log_paths(cfg.repo_roots[0], rid, kind)
     print(f"codex_launcher: launching {kind} session for {rid} at "
           f"{commit[:12]} (timeout {audit_timeout:.0f}s, logs {logs[0]})")
     size_before = tree_size_mb(repo)
+    refusal = None
     try:
         with open(logs[0], "w", encoding="utf-8") as out, \
                 open(logs[1], "w", encoding="utf-8") as err:
@@ -243,19 +342,29 @@ def process_one(cfg, root: str, requests: dict, rid: str, kind: str,
                              stdout=out, stderr=err,
                              env=codex_env(root, repo))
     except RunnerRefusal as exc:
-        return _record_failure(cfg, root, rid, kind, repo, commit,
-                               f"session did not complete: {exc}", logs)
+        refusal = f"session did not complete: {exc}"
 
-    chain = events.read_chain(root)
-    state_now = state_machine.project(chain).get(rid, {}).get("state")
-    if state_now == state_before:
-        return _record_failure(
-            cfg, root, rid, kind, repo, commit,
-            "session exited 0 without advancing the request "
-            f"(state still {state_before!r})", logs)
-    print(f"codex_launcher: {rid} advanced {state_before!r} -> "
-          f"{state_now!r} (codex-signed events verified by the chain)")
-    return "ok"
+    chain_after = events.read_chain(root)
+    segment = chain_after[pre_length:]
+    if _terminal_verdict_in(segment, rid, kind, commit):
+        state_now = state_machine.project(chain_after)[rid]["state"]
+        print(f"codex_launcher: {rid} resolved -> {state_now!r} (expected "
+              "codex-signed terminal verdict verified in the chain)")
+        return "ok"
+
+    state_now = state_machine.project(chain_after).get(rid, {}).get("state")
+    reason = refusal or (
+        "session ended without the expected codex-signed terminal verdict "
+        f"(state now {state_now!r})")
+    outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
+                              logs)
+    if state_now == "claimed" and kind == "source_audit":
+        # our own bounded session claimed and died — its lock is provably
+        # stale NOW; clear it (logged) so the resume trigger can act
+        _clear_stale_claim_lock(cfg, root, rid, repo, commit,
+                                "launcher's own session ended after "
+                                "claiming, before any verdict")
+    return outcome
 
 
 # -------------------------------------------------------------------- the loop
@@ -317,13 +426,18 @@ def _run(cfg, root: str, args) -> int:
             return 0
 
         work = actionable(chain, requests)
-        if work:
-            rid, kind = work[0]
-            outcome = process_one(cfg, root, requests, rid, kind,
+        launched = False
+        for rid, kind in work:
+            outcome = process_one(cfg, root, chain, requests, rid, kind,
                                   args.audit_timeout_seconds)
+            if outcome == "waiting":
+                continue  # a later work item may be actionable now
+            launched = True
             launches += 1
             if outcome == "paused":
                 return 1
+            break  # one session per cycle
+        if launched:
             if args.max_launches and launches >= args.max_launches:
                 print(f"codex_launcher: max launches ({args.max_launches}) "
                       "reached — stopping")
