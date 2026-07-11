@@ -50,22 +50,28 @@ no game-production polish · no weight training without the SC-8 scoped
 exception · no LLM-judge for primary metrics · no cloud execution through
 M13 · no J-lens work (Phase-3 blueprint, untouched).
 
-## 4. Governing rulings (inherited, binding)
+## 4. Governing rules (binding)
 
-1. Arbitration named + logged on every node.
-2. Delta ops = state truth; absolute state derived.
+Rules 1–7 are INHERITED (wiki rulings + audited implementation); rule 8 is
+OWNER-ORIGINATED (ratified new by the 2026-07-11 Master Directive, no
+prior wiki precedent).
+
+1. Arbitration named + logged on every node. *(inherited)*
+2. Delta ops = state truth; absolute state derived. *(inherited)*
 3. Interaction modes never pool (independent_vignettes vs
-   sequential_history; memory-on vs memory-off likewise).
+   sequential_history; memory-on vs memory-off likewise). *(inherited)*
 4. Reflex = same model under token-budget pressure; latency log-only;
-   stated confidence stored, never arbitrating.
+   stated confidence stored, never arbitrating. *(inherited)*
 5. Measure-never-reward: no moral-index scalar; decomposed rates only;
-   in-world incentives are design variables.
+   in-world incentives are design variables. *(inherited)*
 6. Contamination hedge: internal archetype names; **≥2 paraphrase variants
-   per scenario** (permanently mandated by the exp-1/exp-2 evidence).
+   per scenario** — the variant floor was inherited practice, its
+   PERMANENT mandate is owner-ratified 2026-07-11 on the exp-1/exp-2
+   evidence. *(inherited + owner-strengthened)*
 7. Effective sample size = distinct variant×sampler units, retries
-   collapsed; never reported as raw run count.
+   collapsed; never reported as raw run count. *(inherited)*
 8. **Anti-sprawl**: no scenario outside scenario-pack-v1's 8 archetypes
-   without an owner-signed amendment to this SPEC.
+   without an owner-signed amendment to this SPEC. *(owner-originated)*
 
 ## 5. Research claim lifecycle (binding)
 
@@ -86,59 +92,103 @@ observation → replication → generalization study → independent audit
 - Wiki pages carry the ladder position; **paper drafts cite ACCEPTED
   findings only** (enforced by the M15 phase-report generator).
 
-## 6. Exit criteria (the completion definition; each needs linked evidence)
+## 6. Exit criteria (the completion definition)
+
+Each criterion names its EVIDENCE TYPE — the artifact class that proves it
+in `READINESS.md` at M15. A criterion without its named evidence linked is
+NOT met; completion is determinable from this table alone.
 
 **Infrastructure**
 - E1 council-v1 active and stable (launcher enabled, crash recovery
   validated, no protocol changes except reproduced defects).
+  *Evidence:* `council-v1` git tag + M0 gate artifacts
+  (`docs/hardening/activation/`) + `systemctl --user` status capture +
+  chain-report output showing zero un-audited `tools/council/` changes
+  since the tag.
 - E2 experiment runs resumable; replay byte-identical where required.
+  *Evidence:* M7 chaos-test results (kill-resume, unchanged effective-n) +
+  per-experiment `cli replay` byte-gate outputs recorded in the experiment
+  registry rows.
 - E3 run identity collision-resistant; all provenance fields present.
-- E4 reports (run/regime/experiment/phase) reproduce idempotently from
-  artifacts; Program Dashboard current.
+  *Evidence:* registry lint report (zero missing-provenance rows across
+  `configs/registry/experiments.yaml`) + the schema's regime-hash tests
+  green at the audited commit.
+- E4 reports reproduce idempotently from artifacts; Dashboard current.
+  *Evidence:* M5 golden-file test results + a double-generation
+  byte-identity check output + the committed `DASHBOARD.md` regenerated at
+  the M15 commit.
 
 **Scenarios**
 - E5 all 8 families implemented, registered, ≥2 paraphrase variants each,
-  twins/controls where the family design requires them, frozen in the
-  registry after clean pilots.
-- E6 held-out scenario set frozen (M4) and never used by any experiment,
-  pilot, or training run before the M14 evaluation.
+  twins/controls where the family design requires them, frozen after
+  clean pilots.
+  *Evidence:* `configs/registry/scenarios.yaml` rows (family, variants,
+  twin links, `status: frozen`, content hashes) + the pilot
+  RESULT_APPROVED event ids per family.
+- E6 held-out scenario set frozen (M4) and never used before the M14
+  evaluation.
+  *Evidence:* the held-out declaration in the registry (M4 commit hash) +
+  the contamination-lint report (no held-out scenario hash appears in any
+  prior run manifest).
 - E7 scenario defects found in pilots resolved or documented.
+  *Evidence:* `docs/ISSUES.md` entries (closed or accepted-limitation) +
+  the fixing commits' audit verdicts.
 
 **Agents**
 - E8 reflex, planner, arbitration paths validated; parser failures bounded
   and visible.
+  *Evidence:* suite results for the agent/parser test files + parser
+  failure-rate figures in the M6 regime reports (bounded per METRICS-v1).
 - E9 versioned personas with measured intervention strength; persona
   regimes never pooled.
+  *Evidence:* `configs/personas/*.yaml` content hashes in regime ids +
+  M9 intervention-strength experiment report + pooling-refusal lint tests.
 - E10 memory modes available; ONE representation frozen from pilot
   evidence; memory regimes never pooled.
-- E11 two-agent execution validated (scripted×scripted then llm×llm) with
-  named turn-order policy and actor-bound records.
+  *Evidence:* the M12 pilot experiment reports + the freeze commit's audit
+  verdict + pooling-refusal tests.
+- E11 two-agent execution validated with named turn-order policy and
+  actor-bound records.
+  *Evidence:* M11 replay-determinism test results + the scripted×scripted
+  and llm×llm validation runs' RESULT_APPROVED events.
 
 **Measurements**
-- E12 METRICS-v1 frozen (SC-5); any later change is METRICS-v2 with
+- E12 METRICS-v1 frozen (SC-5); later changes only as METRICS-v2 with
   migration note.
+  *Evidence:* `docs/metrics/METRICS-v1.md` at its audited commit + the
+  SC-5 ratification chain event + (if any) METRICS-v2 migration notes.
 - E13 seed variance, paraphrase sensitivity, model sensitivity, persona
   sensitivity, memory sensitivity measured; reversal taxonomy classified.
+  *Evidence:* one experiment-registry row + experiment report per
+  sensitivity, each RESULT_APPROVED; the M10 reversal-taxonomy report with
+  its pre-registration hash.
 - E14 effective-n accounting correct in every report.
+  *Evidence:* report-generator tests asserting effective-n columns +
+  spot-audit note in the M15 independent audit.
 
 **Experiments**
-- E15 deterministic + stochastic baselines complete; wording-replication
-  studies complete; memory studies complete; longitudinal arcs complete;
-  small two-agent validation complete.
-- E16 major findings independently audited (claim ladder); failed
-  hypotheses recorded.
-
-**Training**
+- E15 deterministic + stochastic baselines, wording-replication, memory
+  studies, longitudinal arcs, and two-agent validation all complete.
+  *Evidence:* the experiment registry filtered to these six categories —
+  every row bearing a RESULT_APPROVED event id and a report link.
+- E16 major findings independently audited; failed hypotheses recorded.
+  *Evidence:* `configs/registry/claims.yaml` — every `accepted` row citing
+  its finding-audit verdict; `refuted`/`demoted` rows preserved with
+  reasons.
 - E17 the SC-8 decision resolved explicitly: EITHER a scoped LoRA-scale
   intervention completed with pre/post held-out evaluation, side-effect
   audit, and checkpoint lineage, OR this criterion formally amended by
   owner sign-off (never silently skipped).
+  *Evidence:* the SC-8 owner chain event; if approved — the training
+  design's audit verdict + pre/post comparison report + checkpoint-lineage
+  manifest; if amended — the owner-signed SPEC amendment commit.
 
 **Documentation**
 - E18 architecture, operator, research, scenario-registry, and
-  experiment-registry documentation current; limitations explicit
-  (including any surviving RELEASE-BLOCKERS items as accepted
-  limitations).
+  experiment-registry documentation current; limitations explicit.
+  *Evidence:* `docs/` + registry files at the M15 commit + the
+  RELEASE-BLOCKERS disposition table (each item closed or listed as an
+  accepted limitation in READINESS.md).
 
 ## 7. Scorecard disposition (proposed; decided by SC-3 sign-off)
 

@@ -251,7 +251,7 @@ tasks:
       - tools/council/
       - autonomy_policy.json
       - PROTOCOL.md
-    audit_scope: budget-pressure isolation pilots, latency log-only preserved, time_pressure and self_preservation families authored with twins and variants
+    audit_scope: budget-pressure isolation pilots, latency log-only preserved, time_pressure and self_preservation families authored under the batch pattern (at most 2 families per request, twins, at least 2 paraphrase variants each, internal archetype names, registry lint, scripted pilot before ollama pilot)
     experiment_class: ollama_local
     maximum_fix_cycles: 5
     maximum_runtime_minutes: 240
@@ -259,11 +259,16 @@ tasks:
     expected_tests: python3 -m pytest tests/ -q green at the audited commit
     success_criteria:
       - mechanism-adequacy decision resolved from pilot evidence
-      - both families frozen in the registry after clean pilots
+      - at most 2 new families in this request each with twins and at least 2 paraphrase variants under internal archetype names
+      - registry lint green before any pilot run
+      - scripted pilot completed clean BEFORE the ollama pilot
+      - both families frozen in the registry only after clean pilots
     failure_criteria:
       - manipulation confounded and unfixable within scope
+      - a family authored outside the batch pattern or frozen before clean pilots
     evidence_required:
       - pilot run dirs + registry freeze entries
+      - registry lint output at the audited commit
     requires_human: false
     next_tasks:
       - m9-personas
@@ -285,7 +290,7 @@ tasks:
       - tools/council/
       - autonomy_policy.json
       - PROTOCOL.md
-    audit_scope: persona hashing into behavioral_config, legacy-implicit-v0 mapping, pooling prevention, intervention-strength pilots, scenario batch B
+    audit_scope: persona hashing into behavioral_config, legacy-implicit-v0 mapping, pooling prevention, intervention-strength pilots, scenario batch B under the same batch pattern (at most 2 families per request, twins, at least 2 paraphrase variants each, internal archetype names, registry lint, scripted pilot before ollama pilot)
     experiment_class: ollama_local
     maximum_fix_cycles: 5
     maximum_runtime_minutes: 240
@@ -294,9 +299,11 @@ tasks:
     success_criteria:
       - persona change produces a new regime hash
       - measured effects justify the persona set before any expansion
+      - batch B families follow the batch pattern and freeze only after clean pilots
     failure_criteria:
       - persona pooling possible
       - parser stability degrades under personas
+      - a family authored outside the batch pattern or frozen before clean pilots
     evidence_required:
       - persona pilot run dirs + regime-hash tests
     requires_human: false

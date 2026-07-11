@@ -1,7 +1,7 @@
 # First Gladiator roadmap — canonical M0–M15
 
 Machine twin: `configs/autonomy-roadmap.yaml` (validated, milestone
-`first-gladiator`, 15 tasks, hash `e16e49e80f9e2d05…`). **The Markdown and
+`first-gladiator`, 15 tasks, hash `501e470bc8dcc9b6…`). **The Markdown and
 YAML must agree exactly; divergence is a defect.** The twin ACTIVATES at
 SC-4 (owner roadmap transition — until then the live roadmap at
 `Claude-Wiki/coliseum/autonomy-roadmap.yaml`, milestone `society-substrate`,
