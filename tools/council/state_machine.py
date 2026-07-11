@@ -32,6 +32,7 @@ RESULT_VALIDATION = "result_validation"
 RESULT_AUDIT = "result_audit"
 RESULT_APPROVED = "result_approved"
 RESULT_BLOCKED = "result_blocked"
+INTEGRATED = "integrated"
 NEXT_MILESTONE_READY = "next_milestone_ready"
 CANCELED = "canceled"
 AUTONOMY_PAUSED = "autonomy_paused"
@@ -64,7 +65,11 @@ TRANSITIONS = {
     "RESULT_AUDIT_REQUESTED": (frozenset({RESULT_VALIDATION}), RESULT_AUDIT),
     "RESULT_APPROVED": (frozenset({RESULT_AUDIT}), RESULT_APPROVED),
     "RESULT_BLOCKED": (frozenset({RESULT_AUDIT}), RESULT_BLOCKED),
-    "NEXT_MILESTONE_READY": (frozenset({RESULT_APPROVED}),
+    # source-change tasks terminate at GO -> integration (no experiment
+    # lifecycle); the integrated commit must be the GO-audited commit,
+    # which the commit binding below enforces
+    "CHANGE_INTEGRATED": (frozenset({GO}), INTEGRATED),
+    "NEXT_MILESTONE_READY": (frozenset({RESULT_APPROVED, INTEGRATED}),
                              NEXT_MILESTONE_READY),
 }
 
@@ -80,7 +85,7 @@ _BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,
                          AUTO_APPROVED, AWAITING_HUMAN, APPROVED,
                          EXPERIMENT_RUNNING, EXPERIMENT_COMPLETE,
                          RESULT_VALIDATION, RESULT_AUDIT, RESULT_APPROVED,
-                         RESULT_BLOCKED, NEXT_MILESTONE_READY})
+                         RESULT_BLOCKED, INTEGRATED, NEXT_MILESTONE_READY})
 
 
 def _blank_request() -> dict:

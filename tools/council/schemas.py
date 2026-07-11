@@ -62,6 +62,10 @@ EVENT_TYPES = (
     "RESULT_AUDIT_REQUESTED",
     "RESULT_APPROVED",
     "RESULT_BLOCKED",
+    # launcher extension (owner-ratified 2026-07-11): a GO-audited source
+    # candidate is folded into the mainline by fast-forward only; the event
+    # records exactly which audited commit master advanced to
+    "CHANGE_INTEGRATED",
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
@@ -95,6 +99,7 @@ SENDER_ALLOWED = {
     "RESULT_AUDIT_REQUESTED": frozenset({"claude"}),
     "RESULT_APPROVED": frozenset({"codex"}),
     "RESULT_BLOCKED": frozenset({"codex"}),
+    "CHANGE_INTEGRATED": frozenset({"claude"}),
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
@@ -272,7 +277,13 @@ def validate_request(request: dict, repo_roots) -> None:
         raise SchemaViolation("request_payload_hash does not match content")
 
 
-def validate_verdict(verdict: dict) -> None:
+AUDIT_VERDICT_VALUES = ("BLOCKED", "GO", "GO_WITH_CONDITIONS")
+RESULT_VERDICT_VALUES = ("APPROVED", "BLOCKED")
+
+
+def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
+    """Source audits verdict in AUDIT_VERDICT_VALUES; result audits in
+    RESULT_VERDICT_VALUES. Both share the same required fields and hash."""
     if not isinstance(verdict, dict):
         raise SchemaViolation("verdict must be an object")
     missing = [f for f in VERDICT_REQUIRED_FIELDS if f not in verdict]
@@ -280,8 +291,12 @@ def validate_verdict(verdict: dict) -> None:
         raise SchemaViolation(f"verdict missing required fields: {missing}")
     validate_request_id(verdict["request_id"])
     validate_commit(verdict["audited_commit"])
-    if verdict["verdict"] not in ("BLOCKED", "GO", "GO_WITH_CONDITIONS"):
-        raise SchemaViolation(f"unknown verdict {verdict['verdict']!r}")
+    allowed = RESULT_VERDICT_VALUES if result_audit else AUDIT_VERDICT_VALUES
+    if verdict["verdict"] not in allowed:
+        kind = "result" if result_audit else "audit"
+        raise SchemaViolation(
+            f"unknown {kind} verdict {verdict['verdict']!r} "
+            f"(allowed: {allowed})")
     if not isinstance(verdict["working_tree_clean"], bool):
         raise SchemaViolation("working_tree_clean must be a bool")
     if not isinstance(verdict["tests_observed"], int):

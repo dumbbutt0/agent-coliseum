@@ -361,9 +361,7 @@ def run_task(cfg: Config, request_id: str, config_path: str,
          "run_dir": outcome.get("run_dir"), "validations": validations,
          "instructions": ("read-only result audit: verify the evidence dir, "
                           "replay determinism, limits, and validations. "
-                          "APPROVED: record RESULT_APPROVED via "
-                          "tools.council.cli record (codex role) with the "
-                          "verdict as payload; BLOCKED: codex_watch "
+                          "Submit APPROVED or BLOCKED via codex_watch "
                           "--submit <verdict.json> --result-audit")})
     storage.append_log_md(root, "claude", (
         f"**Result audit requested: `{request_id}`** — task "
@@ -376,13 +374,10 @@ def run_task(cfg: Config, request_id: str, config_path: str,
         f"- validations: " + ", ".join(
             f"{v['name']}={'ok' if v.get('ok') else 'FAILED'}"
             for v in validations) + "\n\n"
-        "Codex: audit the evidence READ-ONLY. APPROVED completes the task — "
-        "record it via `python3 -m tools.council.cli --role codex record "
-        f"--type RESULT_APPROVED --request-id {request_id} --repository "
-        f"{repo} --commit {commit} --payload-json '<verdict JSON>'` "
-        "(codex_watch --result-audit cannot submit APPROVED — known council "
-        "defect, see docs/AUTONOMY.md). BLOCKED returns the task to the fix "
-        "loop via `codex_watch --submit <verdict.json> --result-audit`."))
+        "Codex: audit the evidence READ-ONLY, then submit the result "
+        "verdict (APPROVED completes the task; BLOCKED returns it to the "
+        "fix loop) via `python3 -m tools.council.codex_watch --submit "
+        "<verdict.json> --result-audit`."))
 
     print(f"runner: task {task['task_id']} complete pending Codex result "
           f"audit (run {outcome.get('run_id')}, {elapsed_min:.2f} min, "

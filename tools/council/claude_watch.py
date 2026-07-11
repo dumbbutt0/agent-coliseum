@@ -16,6 +16,11 @@ verdicts matching the current request, validates them hard, and then:
                              (the sandboxed runner may then start it — this
                              watcher itself NEVER launches experiments);
                              outside policy -> HUMAN_APPROVAL_REQUIRED, stop.
+  RESULT_APPROVED         -> NEXT_MILESTONE_READY (idempotent: skipped if the
+                             chain already carries it), stop. The task is
+                             complete; selection of the next one belongs to
+                             the builder launcher, never to this watcher.
+  RESULT_BLOCKED          -> print the scoped findings (fixes required), stop.
 
 Root of trust (cycle-3 blocker): before ANY verdict is handled the mutable
 request file is verified against the schema and the payload hash pinned by
@@ -43,6 +48,9 @@ from tools.council.schemas import (CouncilError, SchemaViolation,
 
 SENDER = "claude"
 MAX_CONSECUTIVE_ERRORS = 3
+
+RESULT_VERDICT_EVENT_TYPES = frozenset({"RESULT_APPROVED", "RESULT_BLOCKED"})
+WAKE_EVENT_TYPES = VERDICT_EVENT_TYPES | RESULT_VERDICT_EVENT_TYPES
 
 
 class RequestIntegrityError(CouncilError):
@@ -73,7 +81,9 @@ def _validate_verdict_event(root: str, cfg, event: dict,
         raise SchemaViolation(
             f"verdict for {event['request_id']!r}, expected {request_id!r}")
     verdict = event["payload"]
-    validate_verdict(verdict)
+    validate_verdict(
+        verdict,
+        result_audit=event["event_type"] in RESULT_VERDICT_EVENT_TYPES)
     if verdict["request_id"] != event["request_id"]:
         raise SchemaViolation("verdict payload request_id differs from the "
                               "event's request_id")
@@ -108,6 +118,41 @@ def _handle_blocked(event: dict) -> None:
         print(f"  finding: {finding}")
     print("this watcher makes no source changes; start a fresh Claude task "
           "to record FIX_STARTED and implement the fixes.")
+
+
+def _handle_result_blocked(event: dict) -> None:
+    verdict = event["payload"]
+    print(f"\nRESULT_BLOCKED on {event['request_id']} at "
+          f"{verdict['audited_commit'][:12]} — evidence fixes are required.")
+    print(f"summary: {verdict['summary']}")
+    for i, blocker in enumerate(verdict.get("blockers", []), 1):
+        print(f"  blocker {i}: {blocker}")
+    for finding in verdict.get("findings", []):
+        print(f"  finding: {finding}")
+    print("this watcher makes no changes; a fresh Claude task decides to "
+          "record FIX_STARTED and address the result findings.")
+
+
+def _handle_result_approved(root: str, cfg, event: dict, request: dict,
+                            repo: str, commit: str) -> None:
+    """The task's evidence is codex-approved — record NEXT_MILESTONE_READY
+    so selection can proceed. Idempotent across watcher restarts."""
+    rid = event["request_id"]
+    chain = events.read_chain(root)
+    already = any(e["event_type"] == "NEXT_MILESTONE_READY"
+                  and e["request_id"] == rid for e in chain)
+    if already:
+        print(f"\nRESULT_APPROVED on {rid} — NEXT_MILESTONE_READY already "
+              "recorded; nothing to do.")
+        return
+    events.append_event(root, cfg, "NEXT_MILESTONE_READY", SENDER, rid,
+                        repo, commit,
+                        {"completed_request": rid,
+                         "task_id": request.get("task_id"),
+                         "result_verdict_event_id": event["event_id"]})
+    print(f"\nRESULT_APPROVED on {rid} at {commit[:12]} — "
+          "NEXT_MILESTONE_READY recorded. Task selection belongs to the "
+          "builder launcher; this watcher stops here.")
 
 
 def _handle_go(root: str, cfg, event: dict, request: dict, repo: str,
@@ -215,7 +260,7 @@ def main(argv=None) -> int:
                               f"{event['sender']} — stopping "
                               f"({event['payload'].get('reason', '')})")
                         return 0
-                    if etype not in VERDICT_EVENT_TYPES or (
+                    if etype not in WAKE_EVENT_TYPES or (
                             args.request_id is not None
                             and event["request_id"] != args.request_id):
                         storage.write_cursor(root, SENDER, offset, prev_hash,
@@ -271,6 +316,11 @@ def main(argv=None) -> int:
                                          event["event_id"])
                     if etype == "AUDIT_BLOCKED":
                         _handle_blocked(event)
+                    elif etype == "RESULT_BLOCKED":
+                        _handle_result_blocked(event)
+                    elif etype == "RESULT_APPROVED":
+                        _handle_result_approved(root, cfg, event, request,
+                                                pin_repo, pin_commit)
                     else:
                         _handle_go(root, cfg, event, request, pin_repo,
                                    pin_commit)

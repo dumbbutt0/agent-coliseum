@@ -23,11 +23,17 @@ eligible roadmap task
   -> commit by-name -> clean-tree check -> BUILD_READY -> publish request
   -> Codex claims + audits the EXACT commit
   -> BLOCKED: FIX_STARTED, scoped fixes only, max 5 audit cycles
-  -> GO: POLICY_VALIDATION_REQUIRED -> all conditions hold -> AUTO_APPROVED
-  -> run-task (this layer): EXPERIMENT_STARTED -> driver under limits
-  -> EXPERIMENT_COMPLETE -> RESULT_VALIDATION_REQUIRED
-  -> RESULT_AUDIT_REQUESTED -> Codex result audit
-  -> RESULT_APPROVED: task complete -> roadmap + wiki updated -> next task
+  -> GO, experiment task:
+       POLICY_VALIDATION_REQUIRED -> all conditions hold -> AUTO_APPROVED
+       -> run-task (this layer): EXPERIMENT_STARTED -> driver under limits
+       -> EXPERIMENT_COMPLETE -> RESULT_VALIDATION_REQUIRED
+       -> RESULT_AUDIT_REQUESTED -> Codex result audit
+       -> RESULT_APPROVED -> NEXT_MILESTONE_READY: task complete
+  -> GO, source-change task:
+       fast-forward-only integration of the audited candidate commit
+       -> CHANGE_INTEGRATED -> NEXT_MILESTONE_READY: task complete
+       (non-fast-forward pauses; nothing is ever rebased or rewritten)
+  -> next task
 ```
 
 No conversational statement replaces a structured council event. Any failed
@@ -71,7 +77,7 @@ min(wall, compute) deadline passes or when live-monitored storage growth
 exceeds the cap (overrun bounded by the 0.25 s poll interval), then pauses
 autonomy with the exact reason.
 
-## Result audits (file mechanics + a known council defect)
+## Result audits (file mechanics)
 
 `codex_watch --submit <verdict.json> --result-audit` requires the request
 file in `requests/claimed/`; the initial audit moved it to `complete/`.
@@ -79,16 +85,13 @@ file in `requests/claimed/`; the initial audit moved it to `complete/`.
 `RESULT_AUDIT_REQUESTED` — a protocol file operation, not a content edit.
 Codex's submit moves it to `complete/` again.
 
-KNOWN COUNCIL DEFECT (discovered 2026-07-11, not fixed here because
-`tools/council/` is protected): `submit_verdict(result_audit=True)` runs
-`validate_verdict`, which only accepts BLOCKED/GO/GO_WITH_CONDITIONS — so
-the convenience wrapper can never submit an APPROVED result verdict. The
-protocol itself is fine: `RESULT_APPROVED` is codex-role in SENDER_ALLOWED
-and legal from `result_audit` in the FSM. v1 therefore instructs Codex to
-record APPROVED result verdicts via the generic
-`tools.council.cli --role codex record --type RESULT_APPROVED …` with the
-full verdict as the payload (BLOCKED still works through the wrapper).
-Fixing the wrapper is queued for the next DEDICATED council protocol audit.
+Result verdicts use the same required fields and hashing as audit verdicts;
+`validate_verdict(..., result_audit=True)` accepts APPROVED/BLOCKED, so
+both result outcomes go through `codex_watch --submit --result-audit`.
+(A 2026-07-11 council defect — the wrapper rejecting APPROVED — was fixed
+in the dedicated council-protocol-delta-001 audit; the generic `cli record`
+workaround is no longer needed.) After RESULT_APPROVED lands, the Claude
+watcher wakes and records NEXT_MILESTONE_READY, completing the task.
 
 ## Roadmap
 

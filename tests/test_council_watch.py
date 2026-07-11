@@ -157,6 +157,104 @@ def test_validate_rejects_unclaimed_and_wrong_sender(env):
         claude_watch._validate_verdict_event(root, cfg, forged, RID)
 
 
+# ------------------------- result-verdict handling (council-protocol-delta)
+
+def _drive_to_result_audit(root, cfg, repo, head):
+    """GO through the human gate to result_audit, with the watcher cursor
+    advanced past the GO event (the watcher handled it)."""
+    _submit(root, cfg, head, "GO")
+    assert claude_watch.main(["--once", "--request-id", RID]) == 0
+    append(root, cfg, "EXPERIMENT_APPROVED", "human", RID, repo, head,
+           {"approved_by": "human"})
+    append(root, cfg, "EXPERIMENT_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_COMPLETE", "claude", RID, repo, head)
+    append(root, cfg, "RESULT_VALIDATION_REQUIRED", "claude", RID, repo, head)
+    append(root, cfg, "RESULT_AUDIT_REQUESTED", "claude", RID, repo, head)
+
+
+def test_result_audit_approved_submits_through_wrapper(env, capsys):
+    """The 2026-07-11 defect regression: codex_watch --submit --result-audit
+    must accept an APPROVED result verdict (no generic-record workaround)."""
+    root, repo, head, cfg = env
+    _drive_to_result_audit(root, cfg, repo, head)
+    # the runner moves the request file back to claimed/ for the result
+    # audit; mimic that protocol file operation
+    os.rename(storage.safe_request_path(root, "complete", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="APPROVED")
+    event = codex_watch.submit_verdict(root, codex_cfg, verdict,
+                                       result_audit=True)
+    assert event["event_type"] == "RESULT_APPROVED"
+    from tools.council import state_machine
+    requests = state_machine.project(events.read_chain(root))
+    assert requests[RID]["state"] == "result_approved"
+
+
+def test_result_audit_approved_refused_on_source_audit_path(env):
+    """APPROVED stays invalid for SOURCE audits — only the result-audit
+    wrapper accepts it."""
+    root, repo, head, cfg = env
+    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="APPROVED")
+    with pytest.raises(CouncilError):
+        codex_watch.submit_verdict(root, codex_cfg, verdict)
+    locking.release(ctx["lock"])
+
+
+def test_watcher_wakes_on_result_approved_and_records_milestone(env, capsys):
+    """After RESULT_APPROVED the watcher records NEXT_MILESTONE_READY —
+    the loop advances instead of sleeping forever."""
+    root, repo, head, cfg = env
+    _drive_to_result_audit(root, cfg, repo, head)
+    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
+           _signed(head, verdict="APPROVED"))
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "NEXT_MILESTONE_READY recorded" in out
+    chain = events.read_chain(root)
+    assert chain[-1]["event_type"] == "NEXT_MILESTONE_READY"
+    assert chain[-1]["payload"]["completed_request"] == RID
+
+
+def test_watcher_result_approved_is_idempotent(env, capsys):
+    """A cursor replay (crash/restart) must not duplicate
+    NEXT_MILESTONE_READY."""
+    root, repo, head, cfg = env
+    _drive_to_result_audit(root, cfg, repo, head)
+    saved = storage.read_cursor(root, "claude")
+    append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
+           _signed(head, verdict="APPROVED"))
+    assert claude_watch.main(["--once", "--request-id", RID]) == 0
+    length = len(events.read_chain(root))
+    # simulate a crash that lost the cursor advance: replay from before
+    storage.write_cursor(root, "claude", saved["byte_offset"],
+                         saved["last_event_hash"], saved["last_event_id"])
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already recorded" in out
+    assert len(events.read_chain(root)) == length
+
+
+def test_watcher_result_blocked_prints_and_stops(env, capsys):
+    root, repo, head, cfg = env
+    _drive_to_result_audit(root, cfg, repo, head)
+    append(root, cfg, "RESULT_BLOCKED", "codex", RID, repo, head,
+           _signed(head, verdict="BLOCKED",
+                   blockers=["evidence dir incomplete"],
+                   summary="result blocked"))
+    length = len(events.read_chain(root))
+    rc = claude_watch.main(["--once", "--request-id", RID])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "RESULT_BLOCKED" in out and "evidence dir incomplete" in out
+    # the record is the verdict itself: the watcher appends nothing
+    assert len(events.read_chain(root)) == length
+
+
 # --------------------- cycle-3 blocker: watcher-path request root of trust
 
 def _tamper_request_file(root, rid, rehash: bool):

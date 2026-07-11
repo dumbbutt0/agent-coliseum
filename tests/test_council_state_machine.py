@@ -60,6 +60,46 @@ def test_full_autonomy_path(env):
     assert requests[RID]["state"] == state_machine.NEXT_MILESTONE_READY
 
 
+SOURCE_TASK_PATH = (
+    ("BUILD_STARTED", "claude"), ("BUILD_READY", "claude"),
+    ("AUDIT_REQUESTED", "claude"), ("AUDIT_CLAIMED", "codex"),
+    ("AUDIT_GO", "codex"), ("CHANGE_INTEGRATED", "claude"),
+    ("NEXT_MILESTONE_READY", "claude"),
+)
+
+
+def test_source_task_path_go_to_integrated(env):
+    """Source-change tasks terminate at GO -> CHANGE_INTEGRATED (no
+    experiment lifecycle) and still chain into NEXT_MILESTONE_READY."""
+    root, repo, head, cfg = env
+    _drive(root, cfg, repo, head, *SOURCE_TASK_PATH)
+    from tools.council import events
+    requests = state_machine.project(events.read_chain(root))
+    assert requests[RID]["state"] == state_machine.NEXT_MILESTONE_READY
+
+
+def test_integration_only_from_go(env):
+    """CHANGE_INTEGRATED is illegal before the GO verdict — unaudited
+    candidates can never be recorded as integrated."""
+    root, repo, head, cfg = env
+    _drive(root, cfg, repo, head,
+           ("BUILD_STARTED", "claude"), ("BUILD_READY", "claude"),
+           ("AUDIT_REQUESTED", "claude"), ("AUDIT_CLAIMED", "codex"))
+    with pytest.raises(TransitionError):
+        append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, head)
+
+
+def test_integration_commit_bound(env):
+    """A GO for one commit never authorizes integrating another."""
+    root, repo, head, cfg = env
+    _drive(root, cfg, repo, head,
+           ("BUILD_STARTED", "claude"), ("BUILD_READY", "claude"),
+           ("AUDIT_REQUESTED", "claude"), ("AUDIT_CLAIMED", "codex"),
+           ("AUDIT_GO", "codex"))
+    with pytest.raises(TransitionError):
+        append(root, cfg, "CHANGE_INTEGRATED", "claude", RID, repo, "f" * 40)
+
+
 def test_blocked_to_fix_cycle(env):
     root, repo, head, cfg = env
     _drive(root, cfg, repo, head,
@@ -79,6 +119,7 @@ def test_blocked_to_fix_cycle(env):
     ("EXPERIMENT_STARTED", "human"),     # start before approval
     ("AUTO_APPROVED", "claude"),         # auto-approve without validation
     ("RESULT_APPROVED", "codex"),        # result verdict without audit
+    ("CHANGE_INTEGRATED", "claude"),     # integration without any audit
     ("BUILD_READY", "claude"),           # ready before started
 ])
 def test_invalid_transitions_rejected_from_none(env, event_type, sender):

@@ -57,7 +57,7 @@ def submit_verdict(root: str, cfg, verdict: dict,
     verdicts/<id>.json, move claimed/ -> complete/, mirror to log.md."""
     verdict = dict(verdict)
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
-    validate_verdict(verdict)
+    validate_verdict(verdict, result_audit=result_audit)
     rid = verdict["request_id"]
 
     claimed_path = storage.safe_request_path(root, "claimed", rid)

@@ -80,15 +80,15 @@ def publish_request(root: str, cfg: Config, request: dict,
     chain = events.read_chain(root)
     if autonomous:
         _check_scope_not_expanded(chain, request)
+    projection = state_machine.project(chain)
     # bounded loops: at most five build-audit cycles per request
-    cycles = state_machine.project(chain).get(
+    cycles = projection.get(
         request["request_id"], {"audit_cycles": 0})["audit_cycles"]
     if cycles >= 5:
         raise TransitionError(
             f"request {request['request_id']!r} already ran {cycles} "
             "build-audit cycles — the bounded-loop limit is five; "
             "escalate to the owner")
-
     storage.ensure_layout(root)
     rid = request["request_id"]
     ready_path = storage.safe_request_path(root, "ready", rid)
@@ -99,6 +99,17 @@ def publish_request(root: str, cfg: Config, request: dict,
             raise SchemaViolation(
                 f"request {rid!r} already exists at {existing} — request ids "
                 "are single-use")
+
+    # a refused transition must never leave an unpinned orphan in ready/
+    # (2026-07-11 wart: the rename used to precede this check): verify the
+    # projected state allows the publish event BEFORE any file lands
+    event_type = "READY_FOR_REAUDIT" if reaudit else "AUDIT_REQUESTED"
+    allowed_from, _to = state_machine.TRANSITIONS[event_type]
+    projected_state = projection.get(rid, {"state": "none"})["state"]
+    if projected_state not in allowed_from:
+        raise TransitionError(
+            f"{event_type} not allowed from state {projected_state!r} for "
+            f"request {rid!r} (allowed from: {sorted(allowed_from)})")
 
     draft_tmp = storage.safe_request_path(root, "draft", rid) + ".tmp"
     with open(draft_tmp, "w", encoding="utf-8") as fh:
@@ -111,15 +122,24 @@ def publish_request(root: str, cfg: Config, request: dict,
             pass
     os.rename(draft_tmp, ready_path)
 
-    event = events.append_event(
-        root, cfg, "READY_FOR_REAUDIT" if reaudit else "AUDIT_REQUESTED",
-        SENDER, rid, repo, target,
-        {"request_payload_hash": request["request_payload_hash"],
-         "request_file": f"requests/ready/{rid}.json",
-         "scope": request["scope"],
-         "expected_test_command": request["expected_test_command"],
-         "expected_test_count": request["expected_test_count"],
-         "blockers_addressed": request["blockers_addressed"]})
+    try:
+        event = events.append_event(
+            root, cfg, event_type, SENDER, rid, repo, target,
+            {"request_payload_hash": request["request_payload_hash"],
+             "request_file": f"requests/ready/{rid}.json",
+             "scope": request["scope"],
+             "expected_test_command": request["expected_test_command"],
+             "expected_test_count": request["expected_test_count"],
+             "blockers_addressed": request["blockers_addressed"]})
+    except CouncilError:
+        # the append is the authority; roll the file back so no unpinned
+        # request ever sits in ready/ (append_event re-checks under lock,
+        # so a concurrent interleaving can still refuse here)
+        try:
+            os.unlink(ready_path)
+        except OSError:
+            pass
+        raise
 
     scope_lines = "\n".join(f"  {i}. {s}" for i, s in
                             enumerate(request["scope"], 1))

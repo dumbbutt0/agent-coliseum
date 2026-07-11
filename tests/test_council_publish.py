@@ -36,6 +36,22 @@ def test_publish_lands_in_ready_with_no_draft_residue(env):
     assert event["event_type"] == "AUDIT_REQUESTED"
 
 
+def test_refused_publish_leaves_no_orphan_in_ready(env):
+    """2026-07-11 wart regression: a publish refused by the state machine
+    (here: request still in `building` — no BUILD_READY) must not leave an
+    unpinned request file behind in ready/."""
+    root, repo, head, cfg = env
+    other = "pub-req-orphan"
+    append(root, cfg, "BUILD_STARTED", "claude", other, repo, head)
+    with pytest.raises(TransitionError):
+        publish.publish_request(root, cfg, make_request(repo, head, other))
+    assert not os.path.exists(storage.safe_request_path(root, "ready", other))
+    with pytest.raises(TransitionError):  # reaudit path refused the same way
+        publish.publish_request(root, cfg, make_request(repo, head, other),
+                                reaudit=True)
+    assert not os.path.exists(storage.safe_request_path(root, "ready", other))
+
+
 def test_reaudit_flag_emits_ready_for_reaudit(env):
     root, repo, head, cfg = env
     event = publish.publish_request(root, cfg,
