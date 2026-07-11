@@ -304,7 +304,8 @@ def cmd_identity_init(args) -> int:
     else:
         enrollment_token = getpass.getpass(
             "enrollment token (owner-provisioned anchor): ")
-    identity.check_enrollment(enrollment_token)
+    # NOTE: enrollment is enforced by the authoritative writer
+    # (events.append_event), not here — the CLI only collects the proof
     if getattr(args, "passphrase_file", None):
         with open(args.passphrase_file, encoding="utf-8") as fh:
             passphrase = fh.read().strip()
@@ -322,7 +323,8 @@ def cmd_identity_init(args) -> int:
                "pbkdf2_iterations": verifier["pbkdf2_iterations"]}
     event = events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
                                 "human", IDENTITY_RID, cfg.repo_roots[0],
-                                NULL_COMMIT, payload)
+                                NULL_COMMIT, payload,
+                                enrollment_token=enrollment_token)
     identity.install_verifier(root, verifier)
     print(f"identity initialized: {verifier['counter']} one-time tokens; "
           f"tip pinned by event {event['event_id']}. Every human-authority "

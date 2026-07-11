@@ -168,10 +168,14 @@ def control_path(root: str) -> str:
 
 def read_control(root: str) -> dict:
     """The AUTHORITATIVE run/pause state (H1: STATUS moved out of log.md).
-    Missing, unreadable, or schema-invalid → paused-all (FAIL CLOSED) —
-    deleting or mangling the record can never resume autonomy. Changes
-    happen only through the human-token STATUS_CHANGED event (cli
-    status-set), which then derives this file."""
+    Missing, unreadable, or schema-invalid → paused-all (FAIL CLOSED).
+    A PAUSED record is honored as written — reducing authority needs no
+    proof. An ACTIVE record is honored ONLY when it binds to the verified
+    chain (cycle-2 blocker 2): its authorized_by_event must be the LAST
+    STATUS_CHANGED event, whose replay-validated payload exactly matches
+    the record — an attacker-written active file resumes nothing.
+    Pre-cutover roots (no identity pin in the chain) keep legacy
+    shape-only reads; the live council is pinned and fully bound."""
     path = control_path(root)
     if not os.path.exists(path):
         return dict(FAIL_CLOSED_CONTROL)
@@ -186,6 +190,30 @@ def read_control(root: str) -> dict:
             or not isinstance(control.get("paused_roles"), list) \
             or any(r not in _CONTROL_ROLES
                    for r in control.get("paused_roles", [])):
+        return dict(FAIL_CLOSED_CONTROL)
+    if control["status"] == "paused":
+        return control
+    # ACTIVE requires chain authorization (lazy imports: events/identity
+    # import storage at module load; by call time all are loaded)
+    from tools.council import events, identity
+    from tools.council.schemas import CouncilError
+    try:
+        chain = events.read_chain(root)
+        root_pin, _state = identity.replay_identity(chain)
+    except (CouncilError, KeyError, ValueError, OSError):
+        return dict(FAIL_CLOSED_CONTROL)
+    if root_pin is None:
+        return control  # pre-cutover legacy root (documented)
+    status_events = [e for e in chain
+                     if e["event_type"] == "STATUS_CHANGED"]
+    if not status_events:
+        return dict(FAIL_CLOSED_CONTROL)
+    last = status_events[-1]
+    payload = last["payload"]
+    if control.get("authorized_by_event") != last["event_id"] \
+            or payload.get("status") != control["status"] \
+            or payload.get("paused_roles") != control["paused_roles"] \
+            or payload.get("reason") != control.get("reason"):
         return dict(FAIL_CLOSED_CONTROL)
     return control
 

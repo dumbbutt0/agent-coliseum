@@ -93,8 +93,11 @@ def build_event(event_type: str, sender: str, request_id: str,
 
 def append_event(root: str, cfg: Config, event_type: str, sender: str,
                  request_id: str, repository: str, target_commit: str,
-                 payload: dict) -> dict:
-    """The one and only writer of events.jsonl."""
+                 payload: dict, enrollment_token: str = None) -> dict:
+    """The one and only writer of events.jsonl. enrollment_token is the
+    NON-PERSISTED bootstrap proof required exclusively by
+    HUMAN_IDENTITY_INITIALIZED (verified against the root-owned anchor
+    inside _verify_human_token; it never enters the chain)."""
     lock = locking.acquire_events_lock(root, sender, request_id)
     try:
         # emergency stop precedes every transition; only the events that
@@ -123,7 +126,7 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         # H1: burn the human one-time token (if this event type requires
         # one) durably BEFORE the line lands — a crash here wastes a
         # token, it never leaves a spendable one behind an appended event
-        _verify_human_token(root, chain, event)
+        _verify_human_token(root, chain, event, enrollment_token)
         storage.append_line(storage.events_path(root), canonical_json(event))
         try:  # state.json is best-effort cache; the append already succeeded
             state_machine.apply(event, requests)
@@ -136,19 +139,32 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         locking.release(lock)
 
 
-def _verify_human_token(root: str, chain: list, event: dict) -> None:
+def _verify_human_token(root: str, chain: list, event: dict,
+                        enrollment_token) -> None:
     """H1: human authority is a burned one-time token (tools/council/
     identity.py), never a caller-supplied sender string. Runs INSIDE the
-    events lock, immediately before the append. Pre-cutover chains (no
+    events lock, immediately before the append. The FIRST identity pin
+    requires a NON-PERSISTED enrollment proof verified against the
+    root-owned anchor (cycle-2 blocker 1: enforcement lives HERE in the
+    authoritative writer, not in any CLI). Pre-cutover chains (no
     verifier file AND no pinned identity event) stay tokenless so legacy
     roots replay; once either exists, these events fail closed."""
     from tools.council import identity
     etype = event["event_type"]
+    if etype == "HUMAN_IDENTITY_INITIALIZED":
+        pin, _state = identity.replay_identity(chain)
+        if pin is not None:
+            raise CouncilError(
+                "identity already rooted — re-rooting is impossible; use "
+                "rotation (old-chain token required)")
+        identity.check_enrollment(enrollment_token)
+        return
     if etype not in HUMAN_TOKEN_REQUIRED_EVENT_TYPES:
         return
     if etype == "REQUEST_CANCELED" and event["sender"] != "human":
         return  # agent cancels revoke authority; they never grant it
-    pin = identity.latest_pin(chain)
+    pin, expected_state = identity.replay_identity(chain)  # raises on
+    # inconsistent identity history — every consumer fails closed
     verifier_exists = identity.read_verifier(root) is not None
     if pin is None and not verifier_exists:
         return  # pre-cutover legacy behavior
@@ -165,10 +181,8 @@ def _verify_human_token(root: str, chain: list, event: dict) -> None:
     expected = identity.binding_hash(
         etype, event["request_id"], event["target_commit"],
         {k: v for k, v in payload.items() if k != "human_token"})
-    pinned_tip, pinned_counter = pin if pin is not None else (None, None)
     identity.verify_and_advance(root, payload.get("human_token"), expected,
-                                pinned_tip_hex=pinned_tip,
-                                pinned_counter=pinned_counter)
+                                expected_state=expected_state)
 
 
 def pause_autonomy(root: str, cfg: Config, sender: str, request_id: str,

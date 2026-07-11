@@ -60,21 +60,27 @@ def preflight(cfg: Config, repo: str | None = None,
         if flags["milestone_reached"]:
             failures.append("flags: society milestone reached — autonomous "
                             "continuation is forbidden")
-        # H1: identity lineage — a substituted or missing verifier where
-        # the chain pins one is a fail-closed condition
+        # H1: identity replay — the verifier must EQUAL the chain-replayed
+        # state; a substituted, missing, or diverged verifier (or any
+        # inconsistent burn/rotation history) is a fail-closed condition
         try:
             from tools.council import identity
-            pin = identity.latest_pin(chain)
+            pin, expected = identity.replay_identity(chain)
             verifier = identity.read_verifier(root)
             if pin is not None:
                 if verifier is None:
                     failures.append(
                         "identity: chain pins a token tip but the verifier "
                         "file is missing — identity-restore-from-pin")
-                elif not identity.verify_lineage(verifier, *pin):
-                    failures.append(
-                        "identity: verifier does not descend from the "
-                        "chain-pinned tip — possible substitution")
+                else:
+                    steps = expected["counter"] - verifier["counter"]
+                    if steps < 0 or identity.chain_value(
+                            bytes.fromhex(verifier["tip_hex"]),
+                            steps).hex() != expected["tip_hex"]:
+                        failures.append(
+                            "identity: verifier does not descend from the "
+                            "chain-replayed state — possible substitution "
+                            "or revived tokens")
         except CouncilError as exc:
             failures.append(f"identity: {exc}")
 

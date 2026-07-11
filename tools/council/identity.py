@@ -219,13 +219,12 @@ def binding_hash(event_type: str, request_id: str, target_commit: str,
 
 
 def verify_and_advance(root: str, token, expected_binding: str,
-                       pinned_tip_hex: str = None,
-                       pinned_counter: int = None) -> None:
+                       expected_state: dict = None) -> None:
     """Verify one token and BURN it (advance the tip) — the caller must
     hold the events lock and must append the event only AFTER this
-    returns. When the chain has a pinned tip (HUMAN_IDENTITY_INITIALIZED/
-    ROTATED), the current verifier must descend from it — a substituted
-    verifier file fails closed here."""
+    returns. When the chain has a replayed identity state, the verifier
+    must MATCH it exactly — a substituted, stale, or diverged verifier
+    file fails closed here (cycle-2: replay equality, not mere lineage)."""
     if not isinstance(token, dict) or \
             not isinstance(token.get("preimage_hex"), str) or \
             not isinstance(token.get("counter"), int) or \
@@ -240,11 +239,20 @@ def verify_and_advance(root: str, token, expected_binding: str,
         raise IdentityError(
             "no identity verifier — token-required events fail closed "
             "until identity-init runs")
-    if pinned_tip_hex is not None:
-        if not verify_lineage(verifier, pinned_tip_hex, pinned_counter):
+    if expected_state is not None:
+        # the verifier must DESCEND from the chain-replayed state: equal,
+        # or ahead by wasted burn-then-append tokens (whose preimages
+        # never went public). A verifier BEHIND the chain would revive
+        # spent tokens — refused.
+        steps = expected_state["counter"] - verifier["counter"]
+        if steps < 0 or chain_value(
+                bytes.fromhex(verifier["tip_hex"]), steps).hex() \
+                != expected_state["tip_hex"]:
             raise IdentityError(
-                "verifier does not descend from the chain-pinned tip — "
-                "possible verifier substitution; fail closed")
+                "verifier does not descend from the chain-replayed "
+                "identity state — possible substitution or revived "
+                "tokens; fail closed (identity-restore-from-pin realigns "
+                "a lost verifier)")
     if token["counter"] != verifier["counter"] - 1:
         raise IdentityError(
             f"token counter {token['counter']} is not the next in "
@@ -285,75 +293,125 @@ def verify_historical_token(token: dict, pinned_tip_hex: str,
                        steps).hex() == pinned_tip_hex
 
 
-def derive_current_from_chain(chain: list) -> dict:
-    """Rebuild the CURRENT verifier by replaying every post-pin token burn
-    recorded in the chain (cycle-1 blocker 1: restoring to the original
-    pin would revive every spent token — their preimages are public in
-    the chain). Each burn must descend strictly: counter exactly one
-    below, preimage hashing to the running tip. ANY inconsistency raises
-    before a caller writes anything."""
-    pin_event = None
+def _validate_burn(token, tip: str, counter: int, event_id: str) -> None:
+    """One historical burn must descend from the running state. Gaps are
+    legal (burn-then-append: a crash between burn and append WASTES a
+    token whose preimage never went public — the next recorded burn sits
+    more than one counter below), but the preimage must hash back to the
+    running tip in exactly the counter difference, and moving UP is
+    impossible."""
+    if not isinstance(token, dict):
+        raise IdentityError(
+            f"malformed historical token in event {event_id}")
+    preimage_hex = token.get("preimage_hex")
+    token_counter = token.get("counter")
+    if not isinstance(preimage_hex, str) \
+            or not isinstance(token_counter, int) \
+            or isinstance(token_counter, bool):
+        raise IdentityError(
+            f"malformed historical token in event {event_id} — refused; "
+            "owner review required")
+    steps = counter - token_counter
+    if steps < 1:
+        raise IdentityError(
+            f"historical burn in event {event_id} does not move the "
+            f"counter down (counter {token_counter}, running {counter}) "
+            "— refused")
+    try:
+        preimage = bytes.fromhex(preimage_hex)
+    except ValueError:
+        raise IdentityError(
+            f"historical token in event {event_id} is not hex — refused")
+    if chain_value(preimage, steps).hex() != tip:
+        raise IdentityError(
+            f"historical token in event {event_id} does not descend from "
+            "the running tip — refused")
+
+
+def replay_identity(chain: list):
+    """THE identity authority walk (cycle-2 blocker 1: the chain file is
+    agent-writable, so pins and rotations must be validated on replay,
+    never trusted by mere presence). Rules:
+
+    - The FIRST HUMAN_IDENTITY_INITIALIZED roots the chain. Any later
+      INITIALIZED is inert (re-rooting is impossible; only rotation
+      succeeds it) — a directly-appended second init grants nothing.
+    - Every human_token in any later event must burn strictly in
+      sequence from the running state; ANY inconsistency raises
+      (fail closed for every consumer).
+    - HUMAN_IDENTITY_ROTATED is valid ONLY when its own token burns
+      correctly from the running state; it then re-roots the state to
+      the newly pinned chain. A rotation without a valid owner token
+      raises.
+
+    Returns (root_pin, state) where root_pin is (tip_hex, counter) of the
+    ACTIVE pin lineage (rotations update it) or None pre-cutover, and
+    state is the expected CURRENT verifier content
+    {tip_hex, counter, chain_length, salt_hex, pbkdf2_iterations} or
+    None pre-cutover."""
+    root_pin = None
+    state = None
     for event in chain:
-        if event["event_type"] in ("HUMAN_IDENTITY_INITIALIZED",
-                                   "HUMAN_IDENTITY_ROTATED"):
-            pin_event = event
-    if pin_event is None:
+        etype = event["event_type"]
+        payload = event.get("payload", {})
+        if etype == "HUMAN_IDENTITY_INITIALIZED":
+            if root_pin is None:
+                root_pin = (payload["tip_hex"], payload["counter"])
+                state = {"tip_hex": payload["tip_hex"],
+                         "counter": payload["counter"],
+                         "chain_length": payload["chain_length"],
+                         "salt_hex": payload["salt_hex"],
+                         "pbkdf2_iterations": payload["pbkdf2_iterations"]}
+            # later INITIALIZED events are inert — never a re-root
+            continue
+        token = payload.get("human_token") if isinstance(payload, dict) \
+            else None
+        if etype == "HUMAN_IDENTITY_ROTATED":
+            if state is None or token is None:
+                raise IdentityError(
+                    f"rotation event {event['event_id']} lacks a valid "
+                    "owner token — identity history inconsistent; refused")
+            _validate_burn(token, state["tip_hex"], state["counter"],
+                           event["event_id"])
+            root_pin = (payload["tip_hex"], payload["counter"])
+            state = {"tip_hex": payload["tip_hex"],
+                     "counter": payload["counter"],
+                     "chain_length": payload["chain_length"],
+                     "salt_hex": payload["salt_hex"],
+                     "pbkdf2_iterations": payload["pbkdf2_iterations"]}
+            continue
+        if token is not None:
+            if state is None:
+                raise IdentityError(
+                    f"event {event['event_id']} carries a human token "
+                    "before any identity pin — history inconsistent")
+            _validate_burn(token, state["tip_hex"], state["counter"],
+                           event["event_id"])
+            state = dict(state, tip_hex=token["preimage_hex"],
+                         counter=token["counter"])
+    return root_pin, state
+
+
+def derive_current_from_chain(chain: list) -> dict:
+    """Rebuild the CURRENT verifier by replaying the full identity history
+    (cycle-1 blocker 1: restoring to the original pin would revive spent
+    tokens). Raises on any inconsistency before a caller writes."""
+    _root_pin, state = replay_identity(chain)
+    if state is None:
         raise IdentityError("no identity pin in the chain — use "
                             "identity-init")
-    payload = pin_event["payload"]
-    tip = payload["tip_hex"]
-    counter = payload["counter"]
-    past_pin = False
-    for event in chain:
-        if event is pin_event:
-            past_pin = True
-            continue
-        if not past_pin:
-            continue
-        token = event.get("payload", {}).get("human_token")
-        if not isinstance(token, dict):
-            continue
-        preimage_hex = token.get("preimage_hex")
-        token_counter = token.get("counter")
-        if not isinstance(preimage_hex, str) \
-                or not isinstance(token_counter, int) \
-                or isinstance(token_counter, bool):
-            raise IdentityError(
-                f"malformed historical token in event {event['event_id']} "
-                "— recovery refuses; owner review required")
-        if token_counter != counter - 1:
-            raise IdentityError(
-                f"historical burn in event {event['event_id']} is out of "
-                f"order (counter {token_counter}, expected {counter - 1}) "
-                "— recovery refuses")
-        try:
-            preimage = bytes.fromhex(preimage_hex)
-        except ValueError:
-            raise IdentityError(
-                f"historical token in event {event['event_id']} is not "
-                "hex — recovery refuses")
-        if _h(preimage).hex() != tip:
-            raise IdentityError(
-                f"historical token in event {event['event_id']} does not "
-                "descend from the running tip — recovery refuses")
-        tip = preimage_hex
-        counter = token_counter
     now = storage.utc_now()
     return {"schema_version": "identity.v1", "algo": "skey-sha256-v1",
-            "salt_hex": payload["salt_hex"],
-            "pbkdf2_iterations": payload["pbkdf2_iterations"],
-            "chain_length": payload["chain_length"],
-            "counter": counter, "tip_hex": tip,
+            "salt_hex": state["salt_hex"],
+            "pbkdf2_iterations": state["pbkdf2_iterations"],
+            "chain_length": state["chain_length"],
+            "counter": state["counter"], "tip_hex": state["tip_hex"],
             "created_utc": now, "updated_utc": now}
 
 
 def latest_pin(chain: list):
-    """(tip_hex, counter) from the most recent identity-pinning event in
-    the chain, or None before the cutover."""
-    pin = None
-    for event in chain:
-        if event["event_type"] in ("HUMAN_IDENTITY_INITIALIZED",
-                                   "HUMAN_IDENTITY_ROTATED"):
-            payload = event["payload"]
-            pin = (payload["tip_hex"], payload["counter"])
-    return pin
+    """(tip_hex, counter) of the ACTIVE pin lineage (replay-validated),
+    or None before the cutover. Raises IdentityError on inconsistent
+    identity history — every consumer fails closed."""
+    root_pin, _state = replay_identity(chain)
+    return root_pin

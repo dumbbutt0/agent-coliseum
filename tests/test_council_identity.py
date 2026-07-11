@@ -162,15 +162,6 @@ def test_verifier_deletion_fails_closed(env):
     identity."""
     root, repo, head, cfg = env
     # pin the identity into the chain (as identity-init would)
-    verifier = identity.read_verifier(root)
-    events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED", "human",
-                        "council-identity", repo, "0" * 40,
-                        {"schema_version": "identity.v1",
-                         "tip_hex": verifier["tip_hex"],
-                         "counter": verifier["counter"],
-                         "chain_length": verifier["chain_length"],
-                         "salt_hex": verifier["salt_hex"],
-                         "pbkdf2_iterations": verifier["pbkdf2_iterations"]})
     _drive_to_awaiting_human(root, cfg, repo, head)
     os.unlink(identity.verifier_path(root))
     with pytest.raises(CouncilError):
@@ -182,15 +173,6 @@ def test_substituted_verifier_fails_lineage(env):
     """An attacker-planted verifier (own chain) does not descend from the
     pinned tip: tokens minted from it are refused."""
     root, repo, head, cfg = env
-    verifier = identity.read_verifier(root)
-    events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED", "human",
-                        "council-identity", repo, "0" * 40,
-                        {"schema_version": "identity.v1",
-                         "tip_hex": verifier["tip_hex"],
-                         "counter": verifier["counter"],
-                         "chain_length": verifier["chain_length"],
-                         "salt_hex": verifier["salt_hex"],
-                         "pbkdf2_iterations": verifier["pbkdf2_iterations"]})
     os.unlink(identity.verifier_path(root))
     identity.init_identity(root, "attacker-passphrase",
                            chain_length=TEST_CHAIN_LENGTH,
@@ -395,14 +377,6 @@ def test_cli_identity_init_and_status_and_rotate(tmp_path, monkeypatch):
 def test_cli_identity_restore_from_pin(env):
     root, repo, head, cfg = env
     verifier = identity.read_verifier(root)
-    events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED", "human",
-                        "council-identity", repo, "0" * 40,
-                        {"schema_version": "identity.v1",
-                         "tip_hex": verifier["tip_hex"],
-                         "counter": verifier["counter"],
-                         "chain_length": verifier["chain_length"],
-                         "salt_hex": verifier["salt_hex"],
-                         "pbkdf2_iterations": verifier["pbkdf2_iterations"]})
     os.unlink(identity.verifier_path(root))
     assert cli.main(["identity-status"]) == 1  # fail closed
     assert cli.main(["--role", "human", "identity-restore-from-pin"]) == 0
@@ -431,7 +405,7 @@ def test_restore_replays_burns_and_keeps_tokens_dead(env):
                         "council-control", repo, "0" * 40,
                         dict(core2, human_token=t2))
     burned_to = identity.read_verifier(root)["counter"]
-    assert burned_to == TEST_CHAIN_LENGTH - 2
+    assert burned_to == TEST_CHAIN_LENGTH - 3  # 1 bootstrap + 2 here
     os.unlink(identity.verifier_path(root))
     assert cli.main(["--role", "human", "identity-restore-from-pin"]) == 0
     restored = identity.read_verifier(root)
@@ -568,6 +542,95 @@ def test_bootstrap_refused_with_wrong_enrollment_token(tmp_path,
     assert rc == 1
     assert identity.read_verifier(root) is None
     assert events.read_chain(root) == []
+
+
+# --------- cycle-3 blockers: authority lives in the writer/reader paths
+
+def test_append_event_cannot_self_pin_identity(tmp_path, monkeypatch):
+    """Cycle-3 blocker 1 probe: the AUTHORITATIVE WRITER refuses a
+    first-identity pin without the root-owned enrollment proof — a caller
+    with Config(role='claude') and sender='human' establishes nothing."""
+    root = str(tmp_path / "fresh")
+    os.makedirs(root)
+    storage.ensure_layout(root)
+    repo, head = make_repo(tmp_path)
+    cfg = make_cfg(repo, root, role="claude")
+    pin_payload = {"schema_version": "identity.v1", "tip_hex": "a" * 64,
+                   "counter": 8, "chain_length": 8, "salt_hex": "b" * 64,
+                   "pbkdf2_iterations": 100}
+    # no anchor provisioned at all
+    monkeypatch.setattr(identity, "ENROLLMENT_HASH_FILE",
+                        str(tmp_path / "missing" / "anchor"))
+    with pytest.raises(CouncilError):
+        events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
+                            "human", "council-identity", repo, "0" * 40,
+                            pin_payload)
+    # anchor provisioned, wrong (attacker-guessed) proof
+    anchor = tmp_path / "anchor.sha256"
+    anchor.write_text(identity.enrollment_hash("the-owner-secret"))
+    monkeypatch.setattr(identity, "ENROLLMENT_HASH_FILE", str(anchor))
+    with pytest.raises(CouncilError):
+        events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
+                            "human", "council-identity", repo, "0" * 40,
+                            pin_payload, enrollment_token="attacker-guess")
+    assert events.read_chain(root) == []  # nothing established
+    # the ENROLLED owner bootstrap still succeeds through the same writer
+    events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED", "human",
+                        "council-identity", repo, "0" * 40, pin_payload,
+                        enrollment_token="the-owner-secret")
+    assert events.read_chain(root)[-1]["event_type"] == \
+        "HUMAN_IDENTITY_INITIALIZED"
+
+
+def test_second_identity_pin_refused_even_with_enrollment(env):
+    """Re-rooting is impossible: once pinned, another INITIALIZED refuses
+    even with the correct enrollment proof (rotation is the only path)."""
+    from tests.council_util import TEST_ENROLLMENT_TOKEN
+    root, repo, head, cfg = env
+    with pytest.raises(CouncilError):
+        events.append_event(root, cfg, "HUMAN_IDENTITY_INITIALIZED",
+                            "human", "council-identity", repo, "0" * 40,
+                            {"schema_version": "identity.v1",
+                             "tip_hex": "a" * 64, "counter": 8,
+                             "chain_length": 8, "salt_hex": "b" * 64,
+                             "pbkdf2_iterations": 100},
+                            enrollment_token=TEST_ENROLLMENT_TOKEN)
+
+
+@pytest.mark.parametrize("variant", ["nonexistent_event", "mismatched_payload",
+                                     "stale_event"])
+def test_attacker_active_control_stays_fail_closed(env, variant):
+    """Cycle-3 blocker 2 probe: every schema-valid ACTIVE control.json an
+    attacker can write reads as fail-closed unless it binds to the
+    verified LAST STATUS_CHANGED event."""
+    root, repo, head, cfg = env
+    # owner pauses through the real path
+    core = {"status": "paused", "paused_roles": ["all"], "reason": "owner"}
+    event = append(root, cfg, "STATUS_CHANGED", "human", "council-control",
+                   repo, "0" * 40, dict(core))
+    storage.write_control(root, "paused", ["all"], "owner",
+                          event["event_id"])
+    assert storage.emergency_stop_reason(root) is not None
+    # attacker writes a schema-valid ACTIVE record
+    if variant == "nonexistent_event":
+        storage.write_control(root, "active", [], "forged",
+                              "000999-deadbeef")
+    elif variant == "mismatched_payload":
+        # correct event id, but the event's payload says PAUSED
+        storage.write_control(root, "active", [], "forged",
+                              event["event_id"])
+    else:  # stale_event: an OLD legitimately-active event id
+        chain = events.read_chain(root)
+        old_active = [e for e in chain
+                      if e["event_type"] == "STATUS_CHANGED"
+                      and e["payload"].get("status") == "active"][0]
+        storage.write_control(root, "active", [], "test root",
+                              old_active["event_id"])
+    control = storage.read_control(root)
+    assert control["status"] == "paused"          # fail closed
+    assert storage.emergency_stop_reason(root) is not None
+    with pytest.raises(CouncilError):              # appends stay refused
+        append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
 
 
 def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ TEST_COMMAND = "python3 -m pytest tests/ -q"
 # H1 test identity: tiny chain + cheap KDF so token minting is fast; the
 # math under test is identical to production parameters
 TEST_PASSPHRASE = "test-owner-passphrase"
+TEST_ENROLLMENT_TOKEN = "test-enrollment-secret"
 TEST_CHAIN_LENGTH = 64
 TEST_ITERATIONS = 1_000
 
@@ -28,7 +29,6 @@ def make_root(tmp_path) -> str:
     # absent) and human events require identity tokens — every test root
     # gets a FULLY bootstrapped identity (pin event #1 + verifier),
     # matching production: an unpinned verifier grants no authority.
-    storage.write_control(root, "active", [], "test root", None)
     verifier = identity.prepare_identity(TEST_PASSPHRASE,
                                          chain_length=TEST_CHAIN_LENGTH,
                                          iterations=TEST_ITERATIONS)
@@ -40,8 +40,20 @@ def make_root(tmp_path) -> str:
          "counter": verifier["counter"],
          "chain_length": verifier["chain_length"],
          "salt_hex": verifier["salt_hex"],
-         "pbkdf2_iterations": verifier["pbkdf2_iterations"]})
+         "pbkdf2_iterations": verifier["pbkdf2_iterations"]},
+        enrollment_token=TEST_ENROLLMENT_TOKEN)
     identity.install_verifier(root, verifier)
+    # activate through the REAL bound path: a token-burned STATUS_CHANGED
+    # event, then the control record derived from it (an unbound "active"
+    # file would fail closed — cycle-2 blocker 2)
+    core = {"status": "active", "paused_roles": [], "reason": "test root"}
+    token = human_token(root, "STATUS_CHANGED", "council-control",
+                        "0" * 40, core)
+    event = events.append_event(root, boot_cfg, "STATUS_CHANGED", "human",
+                                "council-control", root, "0" * 40,
+                                dict(core, human_token=token))
+    storage.write_control(root, "active", [], "test root",
+                          event["event_id"])
     return root
 
 

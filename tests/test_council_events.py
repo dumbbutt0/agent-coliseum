@@ -38,7 +38,7 @@ def test_genesis_event_chains_from_zero_hash(env):
     assert chain[0]["previous_event_hash"] == GENESIS_HASH
     event = append(root, cfg, "BUILD_STARTED", "claude", "req-aaa",
                    repo, head)
-    assert event["previous_event_hash"] == chain[0]["event_hash"]
+    assert event["previous_event_hash"] == chain[-1]["event_hash"]
     assert compute_event_hash(event) == event["event_hash"]
 
 
@@ -48,7 +48,7 @@ def test_events_chain_and_verify(env):
     e2 = append(root, cfg, "BUILD_READY", "claude", "req-aaa", repo, head)
     assert e2["previous_event_hash"] == e1["event_hash"]
     report = events.verify_chain(root)
-    assert report.ok and report.length == 3  # incl. the identity pin
+    assert report.ok and report.length == 4  # incl. the bootstrap events
     assert report.head_hash == e2["event_hash"]
 
 
@@ -56,8 +56,8 @@ def test_event_ids_are_sequential(env):
     root, repo, head, cfg = env
     e1 = append(root, cfg, "BUILD_STARTED", "claude", "req-aaa", repo, head)
     e2 = append(root, cfg, "BUILD_READY", "claude", "req-aaa", repo, head)
-    assert e1["event_id"].startswith("000002-")  # #1 is the identity pin
-    assert e2["event_id"].startswith("000003-")
+    assert e1["event_id"].startswith("000003-")  # 1-2 are bootstrap events
+    assert e2["event_id"].startswith("000004-")
 
 
 def test_every_required_field_present(env):
@@ -93,9 +93,9 @@ def test_torn_trailing_line_not_consumed(env):
     with open(path, "a", encoding="utf-8") as fh:
         fh.write('{"half": "written')  # no newline: torn write
     complete = list(storage.read_events_from(path, 0))
-    assert len(complete) == 2  # pin + append; torn line invisible
+    assert len(complete) == 3  # bootstrap + append; torn line invisible
     report = events.verify_chain(root)
-    assert report.ok and report.length == 2
+    assert report.ok and report.length == 3
 
 
 def test_append_refused_under_emergency_stop(env):

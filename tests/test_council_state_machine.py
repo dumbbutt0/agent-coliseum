@@ -213,6 +213,6 @@ def test_state_json_rebuild_matches_projection(env):
     chain = events.read_chain(root)
     state_machine.rebuild(root, chain, chain[-1]["event_hash"])
     cached = json.load(open(storage.state_path(root), encoding="utf-8"))
-    assert cached["chain_length"] == 3  # identity pin + two appends
+    assert cached["chain_length"] == 4  # bootstrap pair + two appends
     assert cached["requests"][RID]["state"] == state_machine.READY
     assert cached["note"].startswith("derived cache")
