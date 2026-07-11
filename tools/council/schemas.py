@@ -170,10 +170,13 @@ VERDICT_REQUIRED_FIELDS = (
 # The only test command an audit request may name (never executed here).
 ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q",)
 
-# H2 item 11 bounds on request content (reject unbounded strings/arrays)
+# H2 item 11 bounds on request AND verdict content (reject unbounded
+# strings/arrays). Finding prose (evidence, failure_mode, ...) gets a
+# larger cap than short scalar fields but is still bounded.
 _MAX_TEST_COUNT = 1_000_000
 _MAX_LIST_ITEMS = 200
 _MAX_FIELD_STRING = 4_000
+_MAX_FINDING_STRING = 20_000
 
 
 def _validate_safe_relpath(value, field: str) -> None:
@@ -513,6 +516,9 @@ def _validate_finding(finding) -> None:
         if not isinstance(finding[name], str) or not finding[name]:
             raise SchemaViolation(
                 f"finding {name} must be a non-empty string")
+        if len(finding[name]) > _MAX_FINDING_STRING:
+            raise SchemaViolation(
+                f"finding {name} exceeds {_MAX_FINDING_STRING} chars")
 
 
 def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
@@ -547,6 +553,10 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
     for name in ("summary", "audit_mode", "timestamp_utc"):
         if not isinstance(verdict[name], str) or not verdict[name]:
             raise SchemaViolation(f"{name} must be a non-empty string")
+    # H2 item 11 (cycle-3 blocker: verdicts were unbounded): cap summary
+    if len(verdict["summary"]) > _MAX_FINDING_STRING:
+        raise SchemaViolation(
+            f"summary exceeds {_MAX_FINDING_STRING} chars")
     # H2 (carried from codex-auto-launcher-audit-002 GO_WITH_CONDITIONS):
     # audit_mode is an enum and timestamp_utc is a REAL UTC timestamp
     if verdict["audit_mode"] not in AUDIT_MODES:
@@ -569,8 +579,18 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
                 any(not isinstance(x, str) or not x for x in value):
             raise SchemaViolation(
                 f"{name} must be a list of non-empty strings")
+        # H2 item 11 (cycle-3 blocker): bound the list and each string
+        if len(value) > _MAX_LIST_ITEMS:
+            raise SchemaViolation(
+                f"{name} has more than {_MAX_LIST_ITEMS} entries")
+        if any(len(x) > _MAX_FINDING_STRING for x in value):
+            raise SchemaViolation(
+                f"{name} entry exceeds {_MAX_FINDING_STRING} chars")
     if not isinstance(verdict["findings"], list):
         raise SchemaViolation("findings must be a list")
+    if len(verdict["findings"]) > _MAX_LIST_ITEMS:
+        raise SchemaViolation(
+            f"findings has more than {_MAX_LIST_ITEMS} entries")
     for finding in verdict["findings"]:
         _validate_finding(finding)
     want = compute_verdict_payload_hash(verdict)
