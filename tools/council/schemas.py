@@ -170,6 +170,24 @@ VERDICT_REQUIRED_FIELDS = (
 # The only test command an audit request may name (never executed here).
 ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q",)
 
+# H2 item 11 bounds on request content (reject unbounded strings/arrays)
+_MAX_TEST_COUNT = 1_000_000
+_MAX_LIST_ITEMS = 200
+_MAX_FIELD_STRING = 4_000
+
+
+def _validate_safe_relpath(value, field: str) -> None:
+    """A request path field must be a safe relative path: no absolute
+    root, no `..` traversal, no backslash, no NUL."""
+    if not isinstance(value, str) or not value:
+        raise SchemaViolation(f"{field} must be a non-empty string")
+    if value.startswith("/") or value.startswith("\\") \
+            or "\\" in value or "\x00" in value \
+            or ".." in value.split("/"):
+        raise SchemaViolation(
+            f"{field} {value!r} must be a safe relative path "
+            "(no leading slash, no '..', no backslash)")
+
 # Continuation kind after AUDIT_GO. "experiment": policy validation ->
 # AUTO_APPROVED/human gate -> bounded runner -> result audit. "source":
 # state REMAINS `go` — the only legal continuation is a commit-bound
@@ -194,22 +212,64 @@ def canonical_json(obj) -> str:
 
 
 def payload_hash(obj) -> str:
+    """LEGACY (protocol 1.0) hash: bare sha256 of canonical JSON, no
+    domain tag. Retained for verifying/extending the pre-H2 chain."""
     return hashlib.sha256(canonical_json(obj).encode("utf-8")).hexdigest()
 
 
+def domain_hash(domain: str, obj) -> str:
+    """Domain-separated hash (H2 item 12): sha256(domain + NUL + canonical
+    JSON). Distinct domains make a request, a verdict, an event, and an
+    evidence inventory that happen to canonicalize alike hash DIFFERENTLY,
+    so a payload can never be reinterpreted across schemas."""
+    return hashlib.sha256(
+        domain.encode("ascii") + b"\x00"
+        + canonical_json(obj).encode("utf-8")).hexdigest()
+
+
+# hashing domains (H2). v2 objects are domain-tagged; v1 objects keep the
+# bare payload_hash so the existing chain verifies unbroken.
+EVENT_DOMAIN_V2 = "council:event:v2"
+REQUEST_DOMAIN_V2 = "council:request:v2"
+SOURCE_VERDICT_DOMAIN_V2 = "council:source-verdict:v2"
+RESULT_VERDICT_DOMAIN_V2 = "council:result-verdict:v2"
+EVIDENCE_INVENTORY_DOMAIN = "council:evidence-inventory:v1"
+VALIDATION_REPORT_DOMAIN = "council:validation-report:v1"
+CONTROL_DOMAIN = "council:control:v1"
+
+
+def _obj_version(obj: dict, field: str = "protocol_version") -> str:
+    """The declared version of an event/object; absent = legacy 1.0."""
+    return obj.get(field) or "1.0"
+
+
 def compute_event_hash(event: dict) -> str:
-    """sha256 over the canonical event WITHOUT its event_hash field."""
+    """Version-DISPATCHED (H2): a 2.0 event is hashed under the event
+    domain; a 1.0 event keeps the bare formula. Verification recomputes
+    each event under ITS OWN version and compares stored hash strings, so
+    the first 2.0 event chains onto the last 1.0 event with no break."""
     body = {k: v for k, v in event.items() if k != "event_hash"}
+    if _obj_version(event) == "2.0":
+        return domain_hash(EVENT_DOMAIN_V2, body)
     return payload_hash(body)
 
 
 def compute_request_payload_hash(request: dict) -> str:
     body = {k: v for k, v in request.items() if k != "request_payload_hash"}
+    if _obj_version(request) == "2.0":
+        return domain_hash(REQUEST_DOMAIN_V2, body)
     return payload_hash(body)
 
 
 def compute_verdict_payload_hash(verdict: dict) -> str:
     body = {k: v for k, v in verdict.items() if k != "verdict_payload_hash"}
+    # verdict schema_version selects the domain; source vs result is by the
+    # verdict value's vocabulary (checked in validate_verdict)
+    sv = verdict.get("schema_version")
+    if sv == "source-verdict.v2":
+        return domain_hash(SOURCE_VERDICT_DOMAIN_V2, body)
+    if sv == "result-verdict.v2":
+        return domain_hash(RESULT_VERDICT_DOMAIN_V2, body)
     return payload_hash(body)
 
 
@@ -258,16 +318,26 @@ def validate_sender(event_type: str, sender: str) -> None:
             f"(allowed: {sorted(SENDER_ALLOWED[event_type])})")
 
 
-def validate_event(event: dict) -> None:
+SUPPORTED_PROTOCOL_VERSIONS = ("1.0", "2.0")
+
+
+def validate_event(event: dict, for_append: bool = False) -> None:
+    """Version-dispatched (H2): 1.0 events are valid on READ/replay only;
+    only the CURRENT protocol_version may be appended (for_append=True)."""
     missing = [f for f in EVENT_REQUIRED_FIELDS if f not in event]
     if missing:
         raise SchemaViolation(f"event missing required fields: {missing}")
     validate_sender(event["event_type"], event["sender"])
     validate_request_id(event["request_id"])
     validate_commit(event["target_commit"])
-    if event["protocol_version"] != protocol_version():
+    version = event["protocol_version"]
+    if version not in SUPPORTED_PROTOCOL_VERSIONS:
         raise SchemaViolation(
-            f"protocol_version {event['protocol_version']!r} unsupported")
+            f"protocol_version {version!r} unsupported")
+    if for_append and version != protocol_version():
+        raise SchemaViolation(
+            f"new events must be protocol_version {protocol_version()!r}, "
+            f"not {version!r} (1.0 is valid on replay only)")
     if not isinstance(event["payload"], dict):
         raise SchemaViolation("event payload must be an object")
     if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
@@ -288,8 +358,10 @@ def validate_request(request: dict, repo_roots) -> None:
     validate_commit(request["target_commit"])
     validate_commit(request["originating_blocked_commit"])
     validate_repository(request["repository"], repo_roots)
-    if request["protocol_version"] != protocol_version():
-        raise SchemaViolation("unsupported request protocol_version")
+    if request["protocol_version"] not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise SchemaViolation(
+            f"unsupported request protocol_version "
+            f"{request['protocol_version']!r}")
     if request["require_clean_tree"] is not True:
         raise SchemaViolation("require_clean_tree must be true")
     if request["live_experiment_allowed"] is not False:
@@ -314,18 +386,41 @@ def validate_request(request: dict, repo_roots) -> None:
         raise SchemaViolation(
             f"expected_test_command {request['expected_test_command']!r} "
             f"not in allowlist {ALLOWED_TEST_COMMANDS}")
+    # H2 item 11: bool is not an int (isinstance(True, int) is True in
+    # Python) and the count is bounded
     if not isinstance(request["expected_test_count"], int) \
-            or request["expected_test_count"] <= 0:
-        raise SchemaViolation("expected_test_count must be a positive int")
+            or isinstance(request["expected_test_count"], bool) \
+            or not (0 < request["expected_test_count"] <= _MAX_TEST_COUNT):
+        raise SchemaViolation(
+            f"expected_test_count must be an int in 1..{_MAX_TEST_COUNT}")
     for list_field in ("scope", "questions", "allowed_actions",
                        "forbidden_actions", "requested_verdicts",
                        "blockers_addressed"):
-        if not isinstance(request[list_field], list) or not request[list_field]:
+        value = request[list_field]
+        if not isinstance(value, list) or not value:
             raise SchemaViolation(f"{list_field} must be a non-empty list")
+        # H2 item 11: bounded lists of bounded non-empty strings — no
+        # unbounded arrays, no non-string authority-looking entries
+        if len(value) > _MAX_LIST_ITEMS:
+            raise SchemaViolation(
+                f"{list_field} has more than {_MAX_LIST_ITEMS} entries")
+        for entry in value:
+            if not isinstance(entry, str) or not entry:
+                raise SchemaViolation(
+                    f"{list_field} entries must be non-empty strings")
+            if len(entry) > _MAX_FIELD_STRING:
+                raise SchemaViolation(
+                    f"{list_field} entry exceeds {_MAX_FIELD_STRING} chars")
     for v in request["requested_verdicts"]:
         if v not in VERDICT_EVENT_TYPES:
             raise SchemaViolation(f"requested verdict {v!r} is not a "
                                   "verdict event type")
+    # H2 item 11: v2 requests must carry safe relative path fields (1.0
+    # requests keep the legacy permissive behavior on replay)
+    if request["protocol_version"] == "2.0":
+        for path_field in ("experiment_config_file",):
+            if path_field in request:
+                _validate_safe_relpath(request[path_field], path_field)
     want = compute_request_payload_hash(request)
     if request["request_payload_hash"] != want:
         raise SchemaViolation("request_payload_hash does not match content")
@@ -333,6 +428,12 @@ def validate_request(request: dict, repo_roots) -> None:
 
 AUDIT_VERDICT_VALUES = ("BLOCKED", "GO", "GO_WITH_CONDITIONS")
 RESULT_VERDICT_VALUES = ("APPROVED", "BLOCKED")
+
+# H2 carried follow-ups: audit_mode is a closed vocabulary and
+# timestamp_utc matches the council's utc_now() format
+AUDIT_MODES = ("narrow", "isolated_archive", "full", "result")
+_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
 
 FINDING_REQUIRED_FIELDS = (
     "claim", "evidence", "failure_mode", "file", "line_range",
@@ -400,6 +501,15 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
     for name in ("summary", "audit_mode", "timestamp_utc"):
         if not isinstance(verdict[name], str) or not verdict[name]:
             raise SchemaViolation(f"{name} must be a non-empty string")
+    # H2 (carried from codex-auto-launcher-audit-002 GO_WITH_CONDITIONS):
+    # audit_mode is an enum and timestamp_utc has the council's format
+    if verdict["audit_mode"] not in AUDIT_MODES:
+        raise SchemaViolation(
+            f"audit_mode {verdict['audit_mode']!r} not in {AUDIT_MODES}")
+    if not _TIMESTAMP_RE.match(verdict["timestamp_utc"]):
+        raise SchemaViolation(
+            "timestamp_utc must be ISO-8601 UTC "
+            "(YYYY-MM-DDTHH:MM:SS[.mmm]Z)")
     for name in ("blockers", "conditions", "commands_run"):
         value = verdict[name]
         if not isinstance(value, list) or \

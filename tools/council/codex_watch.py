@@ -16,7 +16,8 @@ import os
 import sys
 import time
 
-from tools.council import events, get_config, locking, state_machine, storage
+from tools.council import (events, get_config, locking, state_machine,
+                           storage, strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    VERDICT_TO_EVENT, RESULT_VERDICT_TO_EVENT,
                                    compute_verdict_payload_hash,
@@ -42,8 +43,8 @@ def claim(root: str, cfg, request_id: str) -> dict:
     if not os.path.exists(ready_path):
         raise SchemaViolation(f"request {request_id!r} is not in ready/")
     lock = locking.acquire(root, request_id, SENDER, request_id)
-    with open(ready_path, encoding="utf-8") as fh:
-        request = json.load(fh)
+    with open(ready_path, "rb") as fh:
+        request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
     os.rename(ready_path, claimed_path)
     return events.append_event(
         root, cfg, "AUDIT_CLAIMED", SENDER, request_id,
@@ -108,9 +109,9 @@ def finalize_incomplete(root: str, cfg) -> list:
                   "migration required", file=sys.stderr)
             continue
         try:
-            with open(verdict_path, encoding="utf-8") as fh:
-                have = json.load(fh)
-        except (OSError, ValueError):
+            with open(verdict_path, "rb") as fh:
+                have = strictjson.loads_strict(fh.read(), max_bytes=1_048_576)
+        except (OSError, ValueError, SchemaViolation):
             have = None
         if have != want:
             storage.atomic_write_json(verdict_path, want)
@@ -146,8 +147,8 @@ def submit_verdict(root: str, cfg, verdict: dict,
     if not os.path.exists(claimed_path):
         raise SchemaViolation(
             f"request {rid!r} was never claimed — claim before submitting")
-    with open(claimed_path, encoding="utf-8") as fh:
-        request = json.load(fh)
+    with open(claimed_path, "rb") as fh:
+        request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
     if verdict["audited_commit"] != request["target_commit"]:
         raise SchemaViolation(
             f"audited_commit {verdict['audited_commit'][:12]} does not match "
@@ -254,8 +255,9 @@ def main(argv=None) -> int:
                   "lock stays until the verdict is submitted")
             return 0
         if args.submit:
-            with open(args.submit, encoding="utf-8") as fh:
-                verdict = json.load(fh)
+            with open(args.submit, "rb") as fh:
+                verdict = strictjson.loads_strict(fh.read(),
+                                                  max_bytes=1_048_576)
             event = submit_verdict(root, cfg, verdict,
                                    result_audit=args.result_audit)
             print(f"verdict recorded: {event['event_type']} "

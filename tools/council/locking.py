@@ -56,10 +56,11 @@ def read_lock(root: str, name: str):
     path = storage.lock_path(root, name)
     if not os.path.exists(path):
         return None
+    from tools.council.strictjson import loads_strict, StrictJSONError
     try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+        with open(path, "rb") as fh:
+            return loads_strict(fh.read(), max_bytes=16_384)
+    except (OSError, ValueError, StrictJSONError):
         return {"unreadable": True}
 
 

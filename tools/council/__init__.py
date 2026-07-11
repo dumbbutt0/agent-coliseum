@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "2.0"
 
 DEFAULT_COUNCIL_ROOT = "/mnt/c/Users/dumbb/Docs/TheBrain/Claude-Wiki/council"
 DEFAULT_REPO_ROOTS = ("/home/dummy/agent-coliseum",)

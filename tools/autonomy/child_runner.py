@@ -30,8 +30,9 @@ def main(argv=None) -> int:
         result = {"ok": False, "error": f"no driver {args.driver!r}"}
     else:
         try:
-            with open(args.config, encoding="utf-8") as fh:
-                config = json.load(fh)
+            from tools.council.strictjson import loads_strict
+            with open(args.config, "rb") as fh:
+                config = loads_strict(fh.read(), max_bytes=1_048_576)
             deadline = time.monotonic() + args.deadline_seconds
             outcome = driver(args.repo, config, deadline)
             result = {"ok": True, "outcome": outcome}

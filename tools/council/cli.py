@@ -16,7 +16,7 @@ import json
 import sys
 
 from tools.council import (events, get_config, identity, locking, policy,
-                           publish, state_machine, storage)
+                           publish, state_machine, storage, strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    validate_commit, validate_request_id)
 
@@ -56,8 +56,8 @@ def _maybe_human_token(root, args, event_type: str, request_id: str,
             "closed; run identity-restore-from-pin or identity-rotate")
     token_file = getattr(args, "token_file", None)
     if token_file:
-        with open(token_file, encoding="utf-8") as fh:
-            token = json.load(fh)
+        with open(token_file, "rb") as fh:
+            token = strictjson.loads_strict(fh.read(), max_bytes=16_384)
         if not isinstance(token, dict):
             raise SchemaViolation("--token-file must contain a JSON object")
     else:
@@ -171,8 +171,8 @@ def cmd_rebuild_state(args) -> int:
 
 def cmd_publish_request(args) -> int:
     cfg, root = _cfg(args)
-    with open(args.file, encoding="utf-8") as fh:
-        request = json.load(fh)
+    with open(args.file, "rb") as fh:
+        request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
     event = publish.publish_request(root, cfg, request,
                                     reaudit=args.reaudit,
                                     autonomous=args.autonomous)
@@ -193,7 +193,8 @@ def cmd_record(args) -> int:
             "events go through their dedicated commands (approve, "
             "approve-conditions, cancel, status-set, publish-request, "
             "codex_watch, the autonomy runner)")
-    payload = json.loads(args.payload_json) if args.payload_json else {}
+    payload = strictjson.loads_strict(args.payload_json) \
+        if args.payload_json else {}
     if not isinstance(payload, dict):
         raise SchemaViolation("--payload-json must be a JSON object")
     event = events.append_event(root, cfg, args.type, args.role,

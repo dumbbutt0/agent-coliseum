@@ -198,6 +198,30 @@ Bootstrap on a fresh (fail-closed) root, owner-attended:
 `cli --role human identity-init` (enrollment token + new passphrase)
 then `cli --role human status-set --status active`.
 
+## Strict parsing + versioned hashing (hardening H2)
+
+Every council JSON input routes through `tools/council/strictjson.
+loads_strict` (item 8): duplicate keys, `NaN`/`Infinity`, trailing data,
+and invalid UTF-8 are rejected, and byte/depth/string/collection/node
+limits apply before hashing or validation. The bytes that get hashed are
+the bytes that get validated, unambiguously.
+
+Hashing is domain-separated (item 12): `domain_hash(domain, obj) =
+sha256(domain + NUL + canonical_json)` with distinct domains
+(`council:event:v2`, `council:request:v2`, `council:source-verdict:v2`,
+`council:result-verdict:v2`, `council:evidence-inventory:v1`, ...), so a
+payload can never be reinterpreted across schemas. `PROTOCOL_VERSION` is
+`2.0`; hashing and validation DISPATCH on each object's own version, so
+new 2.0 events chain onto the 1.0 history with no break, and 1.0 events
+remain valid on replay while only 2.0 may be appended. `atomic_write_json`
+uses per-process-unique tmp names (no concurrent-writer race).
+
+Request validation (item 11) enforces strict list-element types, bounded
+lists/strings, a non-bool bounded test count, and — for v2 requests —
+safe relative path fields. Verdict validation additionally enforces an
+`audit_mode` enum and an ISO-8601 UTC `timestamp_utc` (carried from the
+codex-auto-launcher-audit-002 conditions).
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

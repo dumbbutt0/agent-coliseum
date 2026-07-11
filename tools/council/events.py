@@ -120,7 +120,7 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         prev = chain[-1]["event_hash"] if chain else GENESIS_HASH
         event = build_event(event_type, sender, request_id, repository,
                             target_commit, payload, seq, prev)
-        validate_event(event)
+        validate_event(event, for_append=True)
         requests = state_machine.project(chain)
         state_machine.check(event, requests)
         # H1: burn the human one-time token (if this event type requires

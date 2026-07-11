@@ -288,6 +288,78 @@ def test_strict_finding_schema_rejects_malformed_members(bad_findings):
         validate_verdict(verdict)
 
 
+@pytest.mark.parametrize("bad", ["sideways", "", "GO", "narrow ", None, 7])
+def test_verdict_audit_mode_enum(bad):
+    verdict = make_verdict("a" * 40)
+    verdict["audit_mode"] = bad
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    with pytest.raises(SchemaViolation):
+        validate_verdict(verdict)
+
+
+@pytest.mark.parametrize("bad", ["2026-01-01", "not-a-time",
+                                 "2026/01/01T00:00:00Z",
+                                 "2026-01-01T00:00:00", ""])
+def test_verdict_timestamp_format(bad):
+    verdict = make_verdict("a" * 40)
+    verdict["timestamp_utc"] = bad
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    with pytest.raises(SchemaViolation):
+        validate_verdict(verdict)
+
+
+def test_verdict_good_timestamp_and_mode_pass():
+    verdict = make_verdict("a" * 40)
+    verdict["audit_mode"] = "isolated_archive"
+    verdict["timestamp_utc"] = "2026-07-11T03:14:15.926Z"
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    validate_verdict(verdict)
+
+
+# --------------------------------------- request hardening (H2 item 11)
+
+def test_request_bool_test_count_refused(tmp_path):
+    repo, head = make_repo(tmp_path)
+    request = _ready_request(repo, head, expected_test_count=True)
+    with pytest.raises(SchemaViolation):
+        validate_request(request, (repo,))
+
+
+def test_request_non_string_scope_entries_refused(tmp_path):
+    repo, head = make_repo(tmp_path)
+    for bad in ([1, 2], ["ok", 7], [""], [None]):
+        request = _ready_request(repo, head, scope=bad)
+        with pytest.raises(SchemaViolation):
+            validate_request(request, (repo,))
+
+
+def test_request_unbounded_list_refused(tmp_path):
+    repo, head = make_repo(tmp_path)
+    request = _ready_request(repo, head, scope=["x"] * 500)
+    with pytest.raises(SchemaViolation):
+        validate_request(request, (repo,))
+
+
+def test_request_unbounded_string_refused(tmp_path):
+    repo, head = make_repo(tmp_path)
+    request = _ready_request(repo, head, scope=["x" * 5000])
+    with pytest.raises(SchemaViolation):
+        validate_request(request, (repo,))
+
+
+def test_v2_request_unsafe_path_refused(tmp_path):
+    repo, head = make_repo(tmp_path)
+    for bad in ("/etc/passwd", "../escape.json", "a\\b.json"):
+        request = _ready_request(repo, head, protocol_version="2.0",
+                                 experiment_config_file=bad)
+        with pytest.raises(SchemaViolation):
+            validate_request(request, (repo,))
+    # a safe relative path passes
+    ok = _ready_request(repo, head, protocol_version="2.0",
+                        experiment_config_file="reports/x.json")
+    validate_request(ok, (repo,))
+
+
 def test_valid_structured_verdicts_pass_both_vocabularies():
     """Compatibility fixtures: fully structured source and result verdicts
     (including evidence extras, which the open top level admits) validate."""

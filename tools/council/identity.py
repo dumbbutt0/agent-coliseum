@@ -80,11 +80,11 @@ def read_verifier(root: str):
     path = verifier_path(root)
     if not os.path.exists(path):
         return None
-    import json
+    from tools.council.strictjson import loads_strict
     try:
-        with open(path, encoding="utf-8") as fh:
-            verifier = json.load(fh)
-    except (OSError, ValueError) as exc:
+        with open(path, "rb") as fh:
+            verifier = loads_strict(fh.read(), max_bytes=65_536)
+    except (OSError, ValueError, SchemaViolation) as exc:
         raise IdentityError(f"identity verifier unreadable: {exc}")
     _validate_verifier(verifier)
     return verifier

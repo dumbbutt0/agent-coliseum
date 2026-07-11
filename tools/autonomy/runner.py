@@ -185,8 +185,9 @@ def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
         _execute_bounded(argv, deadline_seconds, measure_root,
                          limits["max_storage_mb"], size_before_mb,
                          cwd=_PACKAGE_ROOT)
-        with open(result_file, encoding="utf-8") as fh:
-            result = json.load(fh)
+        from tools.council.strictjson import loads_strict
+        with open(result_file, "rb") as fh:
+            result = loads_strict(fh.read(), max_bytes=1_048_576)
     finally:
         try:
             os.unlink(result_file)
@@ -302,8 +303,9 @@ def run_task(cfg: Config, request_id: str, config_path: str,
             f"request's frozen experiment_config_hash "
             f"{str(frozen_hash)[:19]} — refusing to run an unaudited "
             "configuration"])
-    with open(config_path, encoding="utf-8") as fh:
-        config = json.load(fh)
+    from tools.council.strictjson import loads_strict
+    with open(config_path, "rb") as fh:
+        config = loads_strict(fh.read(), max_bytes=1_048_576)
 
     # ---- the task, from the hash-pinned roadmap
     try:

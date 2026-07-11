@@ -114,8 +114,9 @@ def load_policy(root: str) -> tuple:
             "no autonomy policy installed (council/autonomy_policy.json) — "
             "run `cli init-policy` as the owner; until then every "
             "experiment requires the human gate")
-    with open(path, encoding="utf-8") as fh:
-        policy = json.load(fh)
+    from tools.council.strictjson import loads_strict
+    with open(path, "rb") as fh:
+        policy = loads_strict(fh.read(), max_bytes=262_144)
     for section in ("auto_approval", "bounded_loops", "protected_paths",
                     "society_milestone"):
         if section not in policy:

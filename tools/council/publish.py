@@ -165,12 +165,12 @@ def publish_request(root: str, cfg: Config, request: dict,
 
 def read_request(root: str, request_id: str) -> dict:
     """Find the request JSON in ready/claimed/complete (drafts don't count)."""
-    import json
+    from tools.council.strictjson import loads_strict
     for bucket in ("ready", "claimed", "complete"):
         path = storage.safe_request_path(root, bucket, request_id)
         if os.path.exists(path):
-            with open(path, encoding="utf-8") as fh:
-                return json.load(fh)
+            with open(path, "rb") as fh:
+                return loads_strict(fh.read(), max_bytes=262_144)
     raise SchemaViolation(f"request {request_id!r} not found in "
                           "ready/claimed/complete")
 

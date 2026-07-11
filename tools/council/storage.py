@@ -10,9 +10,16 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import uuid
 
 from tools.council.schemas import (SchemaViolation, canonical_json,
                                    validate_request_id)
+from tools.council.strictjson import loads_strict
+
+# per-site strict-parse limits (H2 item 8)
+_EVENT_MAX_BYTES = 1_048_576
+_CURSOR_MAX_BYTES = 65_536
+_CONTROL_MAX_BYTES = 65_536
 
 EVENTS_FILE = "events.jsonl"
 STATE_FILE = "state.json"
@@ -46,12 +53,21 @@ def ensure_layout(root: str) -> None:
 
 
 def atomic_write_json(path: str, obj) -> None:
-    """Same-directory tmp -> fsync -> rename. Readers never see a partial."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(canonical_json(obj) + "\n")
-        _fsync_quietly(fh)
-    os.rename(tmp, path)
+    """Same-directory tmp -> fsync -> rename. Readers never see a partial.
+    The tmp name is per-process-unique (H2): a fixed `.tmp` raced two
+    concurrent writers to the same path onto the same tmp file."""
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(canonical_json(obj) + "\n")
+            _fsync_quietly(fh)
+        os.rename(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_line(path: str, line: str) -> None:
@@ -78,10 +94,10 @@ def read_events_from(path: str, offset: int = 0):
                 # torn write in progress: yield nothing for it, so the
                 # caller's cursor stays put and re-reads it next poll
                 return
-            text = raw.decode("utf-8").strip()
+            text = raw.strip()
             if not text:
                 continue
-            yield fh.tell(), json.loads(text)
+            yield fh.tell(), loads_strict(text, max_bytes=_EVENT_MAX_BYTES)
 
 
 def events_path(root: str) -> str:
@@ -121,8 +137,8 @@ def read_cursor(root: str, role: str) -> dict:
     if not os.path.exists(path):
         return {"byte_offset": 0, "last_event_hash": None,
                 "last_event_id": None, "updated_utc": None}
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    with open(path, "rb") as fh:
+        return loads_strict(fh.read(), max_bytes=_CURSOR_MAX_BYTES)
 
 
 def write_cursor(root: str, role: str, byte_offset: int,
@@ -180,9 +196,9 @@ def read_control(root: str) -> dict:
     if not os.path.exists(path):
         return dict(FAIL_CLOSED_CONTROL)
     try:
-        with open(path, encoding="utf-8") as fh:
-            control = json.load(fh)
-    except (OSError, ValueError):
+        with open(path, "rb") as fh:
+            control = loads_strict(fh.read(), max_bytes=_CONTROL_MAX_BYTES)
+    except (OSError, ValueError, SchemaViolation):
         return dict(FAIL_CLOSED_CONTROL)
     if not isinstance(control, dict) \
             or control.get("schema_version") != "control.v1" \
