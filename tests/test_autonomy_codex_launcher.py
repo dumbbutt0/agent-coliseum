@@ -60,11 +60,12 @@ def verdict_for(rid, commit, kind):
 
 FAKE_GO = _VERDICT_BODY + """
 rid = codex_watch.list_ready(root)[0]
-_ev, lock = codex_watch.claim(root, cfg, rid)
+codex_watch.claim(root, cfg, rid)
 req = publish.read_request(root, rid)
 codex_watch.submit_verdict(root, cfg,
                            verdict_for(rid, req["target_commit"], "GO"))
-locking.release(lock)
+# NO manual lock release — the real CLI contract has none; the submit
+# transaction itself must release the claim lock
 """
 
 FAKE_RESULT_APPROVED = _VERDICT_BODY + """
@@ -132,10 +133,9 @@ def _drive_to_result_audit(root, cfg, repo, head, rid=RID):
     _publish_requested(root, cfg, repo, head, rid,
                        human_approval_required=True)
     codex_cfg = make_cfg(repo, root, role="codex")
-    _ev, lock = codex_watch.claim(root, codex_cfg, rid)
+    codex_watch.claim(root, codex_cfg, rid)
     from tests.council_util import make_verdict
     codex_watch.submit_verdict(root, codex_cfg, make_verdict(head, rid))
-    locking.release(lock)
     append(root, cfg, "POLICY_VALIDATION_REQUIRED", "claude", rid, repo, head)
     append(root, cfg, "HUMAN_APPROVAL_REQUIRED", "claude", rid, repo, head)
     append(root, cfg, "EXPERIMENT_APPROVED", "human", rid, repo, head)

@@ -78,8 +78,17 @@ def submit_verdict(root: str, cfg, verdict: dict,
     event = events.append_event(
         root, cfg, table[verdict["verdict"]], SENDER, rid,
         request["repository"], request["target_commit"], verdict)
+    # the event append above is the AUTHORITY; everything after it is
+    # idempotent cleanup, and a second submit is refused (the file leaves
+    # claimed/ and the state machine rejects a second verdict)
     storage.atomic_write_json(storage.verdict_path(root, rid), verdict)
     os.rename(claimed_path, storage.safe_request_path(root, "complete", rid))
+    # the claim lock's purpose ends with the durable terminal verdict:
+    # release it BY NAME (the Lock object lives in the long-gone --claim
+    # process; unlink is idempotent) so a later re-audit cycle of this
+    # request id is claimable unattended (launcher audit cycle-3 blocker)
+    locking.release(locking.Lock(path=storage.lock_path(root, rid),
+                                 name=rid, role=SENDER))
 
     blockers = "".join(f"\n  {i}. {b}" for i, b in
                        enumerate(verdict.get("blockers", []), 1))

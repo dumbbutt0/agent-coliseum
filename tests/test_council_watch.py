@@ -36,7 +36,8 @@ def _submit(root, cfg, head, verdict_kind, rid=RID, **request_overrides):
                            **request_overrides)
     verdict = _signed(head, request_id=rid, verdict=verdict_kind)
     codex_watch.submit_verdict(root, cfg, verdict)
-    locking.release(ctx["lock"])
+    # no manual lock release: the submit transaction releases the claim
+    # lock itself (launcher audit cycle-3 blocker)
     return ctx
 
 
@@ -56,7 +57,7 @@ def test_blocked_verdict_prints_findings_and_stops(env, capsys):
                       findings=["probe wrote one cell"],
                       summary="still blocked")
     codex_watch.submit_verdict(root, cfg, verdict)
-    locking.release(ctx["lock"])
+    assert locking.read_lock(root, RID) is None  # submit released the claim
     chain_before = len(events.read_chain(root))
     rc = claude_watch.main(["--once", "--request-id", RID])
     out = capsys.readouterr().out
@@ -155,6 +156,85 @@ def test_validate_rejects_unclaimed_and_wrong_sender(env):
     forged["sender"] = "codex"
     with pytest.raises(CouncilError):  # request never existed/claimed
         claude_watch._validate_verdict_event(root, cfg, forged, RID)
+
+
+# --------------- claim-lock lifecycle through the REAL CLI (launcher cycle 3)
+
+def _publish_fresh(root, cfg, repo, head, rid=RID):
+    from tests.council_util import make_request
+    append(root, cfg, "BUILD_STARTED", "claude", rid, repo, head)
+    append(root, cfg, "BUILD_READY", "claude", rid, repo, head)
+    from tools.council import publish
+    publish.publish_request(root, cfg, make_request(repo, head, rid))
+
+
+def test_cli_claim_submit_releases_lock_and_reaudit_claimable(
+        env, tmp_path, monkeypatch, capsys):
+    """Codex cycle-3 blocker regression, against the ACTUAL CLI in separate
+    invocations: after --submit the claim lock is gone, exactly one verdict
+    exists with all artifacts, a duplicate submit refuses, and a
+    READY_FOR_REAUDIT of the SAME request id is claimable unattended."""
+    import json as _json
+    root, repo, head, cfg = env
+    _publish_fresh(root, cfg, repo, head)
+    assert codex_watch.main(["--claim", RID]) == 0
+    vfile = tmp_path / "verdict.json"
+    vfile.write_text(_json.dumps(
+        make_verdict(head, RID, verdict="BLOCKED", blockers=["b1"])))
+    assert codex_watch.main(["--submit", str(vfile)]) == 0
+    # lock RELEASED by the submit transaction itself
+    assert locking.read_lock(root, RID) is None
+    chain = events.read_chain(root)
+    assert [e["event_type"] for e in chain
+            if e["request_id"] == RID].count("AUDIT_BLOCKED") == 1
+    assert os.path.exists(storage.verdict_path(root, RID))
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID))
+    with open(os.path.join(root, "log.md"), encoding="utf-8") as fh:
+        assert "Verdict (structured): BLOCKED" in fh.read()
+    # a second submit must refuse (the verdict event is the authority)
+    assert codex_watch.main(["--submit", str(vfile)]) == 1
+    # unattended re-audit of the SAME id: archive slot, republish, claim
+    os.rename(storage.safe_request_path(root, "complete", RID),
+              storage.safe_request_path(root, "complete", RID)
+              .replace(".json", ".blocked-archived.json"))
+    append(root, cfg, "FIX_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "BUILD_READY", "claude", RID, repo, head)
+    from tests.council_util import make_request
+    from tools.council import publish
+    publish.publish_request(root, cfg, make_request(repo, head, RID),
+                            reaudit=True)
+    assert codex_watch.main(["--claim", RID]) == 0  # no stale lock in the way
+
+
+def test_cli_go_and_result_submissions_release_lock(env, tmp_path):
+    """The release holds for GO and for result-audit submissions too."""
+    import json as _json
+    root, repo, head, cfg = env
+    _publish_fresh(root, cfg, repo, head)
+    assert codex_watch.main(["--claim", RID]) == 0
+    vfile = tmp_path / "go.json"
+    vfile.write_text(_json.dumps(make_verdict(head, RID, verdict="GO")))
+    assert codex_watch.main(["--submit", str(vfile)]) == 0
+    assert locking.read_lock(root, RID) is None
+    # continue to result_audit and submit APPROVED through the CLI
+    append(root, cfg, "POLICY_VALIDATION_REQUIRED", "claude", RID, repo, head)
+    append(root, cfg, "HUMAN_APPROVAL_REQUIRED", "claude", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_APPROVED", "human", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_COMPLETE", "claude", RID, repo, head)
+    append(root, cfg, "RESULT_VALIDATION_REQUIRED", "claude", RID, repo, head)
+    os.rename(storage.safe_request_path(root, "complete", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    append(root, cfg, "RESULT_AUDIT_REQUESTED", "claude", RID, repo, head)
+    rfile = tmp_path / "result.json"
+    rfile.write_text(_json.dumps(
+        make_verdict(head, RID, verdict="APPROVED")))
+    assert codex_watch.main(["--submit", str(rfile), "--result-audit"]) == 0
+    assert locking.read_lock(root, RID) is None
+    from tools.council import state_machine
+    chain = events.read_chain(root)
+    assert state_machine.project(chain)[RID]["state"] == "result_approved"
+    assert codex_watch.main(["--submit", str(rfile), "--result-audit"]) == 1
 
 
 # ------------------- source-task routing (council-protocol-delta cycle 2)
@@ -451,7 +531,6 @@ def test_watcher_pauses_on_blocked_verdict_with_tampered_request(env,
     verdict = _signed(head, verdict="BLOCKED", blockers=["x"],
                       summary="blocked")
     codex_watch.submit_verdict(root, cfg, verdict)
-    locking.release(ctx["lock"])
     _tamper_request_file(root, RID, rehash=True)
     rc = claude_watch.main(["--once", "--request-id", RID])
     assert rc == 1
