@@ -244,13 +244,27 @@ def authority_status(events) -> dict:
     from tools.council.schemas import (validate_verdict_event_payload,
                                        VERDICT_PAYLOAD_EVENT_TYPES,
                                        CouncilError)
+    from tools.council import identity
+    # A MIGRATION_APPROVED counts as a blessing ONLY when it is a genuine
+    # human-token event (cycle-1 blocker: a forged non-human/tokenless one
+    # must not clear quarantine). identity.replay_identity validates the
+    # WHOLE token succession incl. each event's binding (H1 cycle-5); if it
+    # passes, every human-token MIGRATION_APPROVED was authorized. A
+    # failing replay honors NO blessings — fail closed.
+    try:
+        identity.replay_identity(events)
+        identity_ok = True
+    except CouncilError:
+        identity_ok = False
     blessed = set()
-    for event in events:
-        if event["event_type"] == "MIGRATION_APPROVED":
-            bid = event["payload"].get("blessed_event_id")
-            bhash = event["payload"].get("blessed_event_hash")
-            if bid:
-                blessed.add((bid, bhash))
+    if identity_ok:
+        for event in events:
+            if event["event_type"] == "MIGRATION_APPROVED" \
+                    and event.get("sender") == "human":
+                bid = event["payload"].get("blessed_event_id")
+                bhash = event["payload"].get("blessed_event_hash")
+                if bid:
+                    blessed.add((bid, bhash))
     status: dict = {}
     for event in events:
         rid = event["request_id"]
