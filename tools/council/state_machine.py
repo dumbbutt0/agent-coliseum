@@ -82,7 +82,8 @@ TRANSITIONS = {
 STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
                               "POLICY_INITIALIZED",
                               "HUMAN_IDENTITY_INITIALIZED",
-                              "HUMAN_IDENTITY_ROTATED"})
+                              "HUMAN_IDENTITY_ROTATED",
+                              "MIGRATION_APPROVED"})
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",
@@ -216,6 +217,59 @@ def project(events) -> dict:
         check(event, requests)
         apply(event, requests)
     return requests
+
+
+QUARANTINED = "quarantined"
+
+# states from which further AUTHORITY action proceeds — a request sitting
+# here whose deriving verdict is invalid+unblessed is QUARANTINED (item 5).
+# Settled states (blocked, result_blocked, result_approved, integrated,
+# next_milestone_ready, canceled, milestone_reached, autonomy_paused) keep
+# their history but never re-grant authority, so they are never quarantined.
+_PENDING_AUTHORITY_STATES = frozenset({
+    GO, POLICY_VALIDATION, AUTO_APPROVED, AWAITING_HUMAN, APPROVED,
+    EXPERIMENT_RUNNING, EXPERIMENT_COMPLETE, RESULT_VALIDATION, RESULT_AUDIT,
+})
+
+
+def authority_status(events) -> dict:
+    """H4 quarantine overlay: {request_id: {authority_valid, quarantined,
+    invalid_events}}. Every VERDICT-authority event is re-validated during
+    replay (version-dispatched schema, no chain crosscheck — self-contained);
+    an invalid one that is not blessed by a human-token MIGRATION_APPROVED
+    marks its request authority_invalid. A request is QUARANTINED only when
+    it currently SITS in a pending-authority state derived from an invalid,
+    unblessed verdict — so a settled/terminal request with a bad historical
+    verdict stays inspectable and never silently upgrades to authority."""
+    from tools.council.schemas import (validate_verdict_event_payload,
+                                       VERDICT_PAYLOAD_EVENT_TYPES,
+                                       CouncilError)
+    blessed = set()
+    for event in events:
+        if event["event_type"] == "MIGRATION_APPROVED":
+            bid = event["payload"].get("blessed_event_id")
+            bhash = event["payload"].get("blessed_event_hash")
+            if bid:
+                blessed.add((bid, bhash))
+    status: dict = {}
+    for event in events:
+        rid = event["request_id"]
+        st = status.setdefault(rid, {"authority_valid": True,
+                                     "invalid_events": []})
+        if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
+            try:
+                validate_verdict_event_payload(event)
+            except CouncilError:
+                if (event["event_id"], event["event_hash"]) not in blessed:
+                    st["authority_valid"] = False
+                    st["invalid_events"].append(event["event_id"])
+    requests = project(events)
+    for rid, req in requests.items():
+        st = status.setdefault(rid, {"authority_valid": True,
+                                     "invalid_events": []})
+        st["quarantined"] = (not st["authority_valid"]
+                             and req["state"] in _PENDING_AUTHORITY_STATES)
+    return status
 
 
 def global_flags(requests: dict) -> dict:

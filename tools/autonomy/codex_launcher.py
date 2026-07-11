@@ -419,7 +419,7 @@ def _run(cfg, root: str, args) -> int:
     launches = 0
     while True:
         report = events.verify_chain(root)
-        if not report.ok:
+        if not report.healthy:
             print(f"codex_launcher: event chain invalid — {report.error}; "
                   "refusing to act", file=sys.stderr)
             return 1

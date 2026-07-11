@@ -107,7 +107,7 @@ def _validate_verdict_event(root: str, cfg, event: dict,
     if not claimed:
         raise SchemaViolation("request was never claimed — verdict refused")
     report = events.verify_chain(root)
-    if not report.ok:
+    if not report.healthy:
         raise CouncilError(f"event chain invalid: {report.error}")
     return request, repo, commit
 

@@ -65,7 +65,7 @@ def test_v1_and_v2_events_chain_across_the_boundary(env):
     prev = chain[-1]["event_hash"] if chain else GENESIS_HASH
     seq = len(chain) + 1
     legacy = {"protocol_version": "1.0",
-              "event_id": f"{seq:06d}-legacy00",
+              "event_id": f"{seq:06d}-deadbeef",
               "event_type": "BUILD_STARTED", "request_id": RID,
               "sender": "claude", "timestamp_utc": storage.utc_now(),
               "repository": repo, "target_commit": head, "payload": {},
@@ -108,7 +108,7 @@ def test_unsupported_version_event_fails_verify_chain(env):
     append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
     chain = events.read_chain(root)
     seq = len(chain) + 1
-    ev = {"protocol_version": "3.0", "event_id": f"{seq:06d}-future00",
+    ev = {"protocol_version": "3.0", "event_id": f"{seq:06d}-deadbeef",
           "event_type": "BUILD_READY", "request_id": RID, "sender": "claude",
           "timestamp_utc": storage.utc_now(), "repository": repo,
           "target_commit": head, "payload": {},
@@ -136,7 +136,7 @@ def test_explicit_falsy_version_fails_closed(env, falsy):
     append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
     chain = events.read_chain(root)
     seq = len(chain) + 1
-    ev = {"protocol_version": falsy, "event_id": f"{seq:06d}-falsy000",
+    ev = {"protocol_version": falsy, "event_id": f"{seq:06d}-deadbee0",
           "event_type": "BUILD_READY", "request_id": RID, "sender": "claude",
           "timestamp_utc": storage.utc_now(), "repository": repo,
           "target_commit": head, "payload": {},

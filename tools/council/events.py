@@ -18,6 +18,11 @@ from tools.council.schemas import (CONTROL_BOOTSTRAP_EVENT_TYPES, ChainError,
                                    validate_event)
 
 
+import re as _re
+
+_EVENT_ID_RE = _re.compile(r"^\d{6}-[0-9a-f]{8}$")
+
+
 @dataclass
 class ChainReport:
     ok: bool
@@ -25,45 +30,79 @@ class ChainReport:
     head_hash: str
     error: str | None = None
     error_index: int | None = None
+    suffix_incomplete: bool = False
+    torn_bytes: int = 0
+
+    @property
+    def healthy(self) -> bool:
+        """H4: a chain is healthy for AUTHORITY decisions only when it is
+        fully valid AND has no torn/incomplete suffix. Reads may still use
+        a valid prefix (ok), but every authority consumer requires this."""
+        return self.ok and not self.suffix_incomplete
 
 
 def read_chain(root: str, verify: bool = True) -> list:
-    """All complete events, optionally verifying every hash and link."""
+    """All complete events, optionally verifying every hash, link, seq,
+    and id-uniqueness. A torn trailing line makes verify=True raise (a
+    valid prefix with an incomplete suffix is NOT a safe authority chain)."""
     events = []
+    seen_ids = set()
     prev_hash = GENESIS_HASH
-    for _offset, event in storage.read_events_from(storage.events_path(root)):
+    complete, tail = storage.read_events_with_tail(storage.events_path(root))
+    for event in complete:
         if verify:
-            _verify_one(event, prev_hash, len(events))
+            _verify_one(event, prev_hash, len(events), seen_ids)
         events.append(event)
+        seen_ids.add(event.get("event_id"))
         prev_hash = event["event_hash"]
+    if verify and tail["torn"]:
+        raise ChainError(
+            f"chain has a torn trailing line ({tail['torn_bytes']} bytes) "
+            "after a valid prefix — refusing (repair-tail required)")
     return events
 
 
-def _verify_one(event: dict, prev_hash: str, index: int) -> None:
+def _verify_one(event: dict, prev_hash: str, index: int,
+                seen_ids: set = None) -> None:
+    eid = event.get("event_id")
     if event.get("previous_event_hash") != prev_hash:
         raise ChainError(
-            f"event #{index} ({event.get('event_id')!r}): "
-            f"previous_event_hash {event.get('previous_event_hash')!r} "
-            f"does not chain to {prev_hash!r}")
+            f"event #{index} ({eid!r}): previous_event_hash "
+            f"{event.get('previous_event_hash')!r} does not chain to "
+            f"{prev_hash!r}")
+    if not isinstance(eid, str) or not _EVENT_ID_RE.match(eid):
+        raise ChainError(
+            f"event #{index}: event_id {eid!r} is malformed "
+            "(expected NNNNNN-xxxxxxxx)")
+    if int(eid[:6]) != index + 1:
+        raise ChainError(
+            f"event #{index}: event_id sequence {eid[:6]} does not match "
+            f"chain position {index + 1}")
+    if seen_ids is not None and eid in seen_ids:
+        raise ChainError(f"event #{index}: duplicate event_id {eid!r}")
     if compute_event_hash(event) != event.get("event_hash"):
         raise ChainError(
-            f"event #{index} ({event.get('event_id')!r}): event_hash "
-            "does not match canonical content — chain tampered or torn")
+            f"event #{index} ({eid!r}): event_hash does not match canonical "
+            "content — chain tampered or torn")
 
 
 def verify_chain(root: str) -> ChainReport:
     events = []
+    seen_ids = set()
     prev_hash = GENESIS_HASH
+    complete, tail = storage.read_events_with_tail(storage.events_path(root))
     try:
-        for _offset, event in storage.read_events_from(
-                storage.events_path(root)):
-            _verify_one(event, prev_hash, len(events))
+        for event in complete:
+            _verify_one(event, prev_hash, len(events), seen_ids)
             events.append(event)
+            seen_ids.add(event.get("event_id"))
             prev_hash = event["event_hash"]
     except (ChainError, ValueError, KeyError) as exc:
         return ChainReport(ok=False, length=len(events), head_hash=prev_hash,
                            error=str(exc), error_index=len(events))
-    return ChainReport(ok=True, length=len(events), head_hash=prev_hash)
+    return ChainReport(ok=True, length=len(events), head_hash=prev_hash,
+                       suffix_incomplete=tail["torn"],
+                       torn_bytes=tail["torn_bytes"])
 
 
 def head(root: str) -> tuple:
@@ -115,6 +154,9 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
                 raise CouncilError(
                     f"emergency stop engaged ({reason}) — refusing "
                     f"{event_type}; record AUTONOMY_PAUSED instead")
+        # H4: appending after a torn trailing line would fuse two lines
+        # and corrupt the chain — read_chain(verify=True) now raises on a
+        # torn tail, so this fails closed before any write
         chain = read_chain(root, verify=True)
         seq = len(chain) + 1
         prev = chain[-1]["event_hash"] if chain else GENESIS_HASH

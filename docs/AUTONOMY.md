@@ -246,6 +246,35 @@ the inventory hash, so a result approval binds exactly the bytes the
 runner produced. `cli verify-evidence <rid>` recomputes and compares,
 detecting any post-audit tamper.
 
+## Quarantine projection + hardened chain verification (hardening H4)
+
+Chain verification (item 9) now rejects duplicate event_ids, seq≠position,
+malformed event_ids, and REPORTS a torn trailing line
+(`ChainReport.suffix_incomplete`/`.torn_bytes`; `.healthy` = ok AND not
+torn). Reads may use a valid prefix, but every authority consumer
+(guard, policy, launcher, watcher) requires `.healthy`, and `append_event`
+refuses to append after a torn tail (which would fuse two lines).
+`cli repair-tail` (owner) truncates torn bytes so appends resume.
+
+Projection is quarantine-aware (item 5): `state_machine.authority_status`
+re-validates every verdict-authority event during replay and QUARANTINES
+a request only when it currently SITS in a pending-authority state
+derived from an invalid, unblessed verdict — settled/terminal requests
+with a bad historical verdict are flagged but never quarantined, so the
+chain stays inspectable and no legacy invalid verdict silently grants
+authority. `cli chain-report` shows the picture; `cli bless-event <id>
+--reason ...` (owner token → `MIGRATION_APPROVED`, binding the exact
+event_id+hash) blesses a reviewed legacy event so it counts again.
+
+The H1 cycle-5 residual is closed by a ROOT-OWNED CHAIN-HEAD CHECKPOINT
+(`/etc/coliseum/chain-head.sha256`, owner-provisioned via sudo, holding
+`{length, head_hash}`): `checkpoint.verify_checkpoint` confirms the live
+chain still carries that event_hash at that position, so any in-place
+rewrite of the prefix — undetectable by any agent-recomputable value —
+fails closed in guard preflight. Absent file = no constraint (not yet
+provisioned). `cli checkpoint-status` prints the JSON to sudo-install.
+`policy.milestone_status` now also requires the explicit codex signature.
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

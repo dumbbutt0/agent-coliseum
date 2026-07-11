@@ -79,6 +79,9 @@ EVENT_TYPES = (
     "POLICY_INITIALIZED",
     "HUMAN_IDENTITY_INITIALIZED",
     "HUMAN_IDENTITY_ROTATED",
+    # H4: human-token blessing of a specific legacy/nonconforming event so
+    # quarantine-aware projection may treat it as authority again
+    "MIGRATION_APPROVED",
 )
 
 ROLES = ("claude", "codex", "human")
@@ -118,6 +121,7 @@ SENDER_ALLOWED = {
     "POLICY_INITIALIZED": frozenset({"human"}),
     "HUMAN_IDENTITY_INITIALIZED": frozenset({"human"}),
     "HUMAN_IDENTITY_ROTATED": frozenset({"human"}),
+    "MIGRATION_APPROVED": frozenset({"human"}),
 }
 
 # H1: events whose authority is a HUMAN one-time token (S/KEY chain,
@@ -128,6 +132,7 @@ SENDER_ALLOWED = {
 HUMAN_TOKEN_REQUIRED_EVENT_TYPES = frozenset({
     "EXPERIMENT_APPROVED", "CONDITIONS_SATISFIED", "REQUEST_CANCELED",
     "STATUS_CHANGED", "POLICY_INITIALIZED", "HUMAN_IDENTITY_ROTATED",
+    "MIGRATION_APPROVED",
 })
 
 # H1: bootstrap/control events appendable while the CONTROL record pauses

@@ -48,7 +48,7 @@ def preflight(cfg: Config, repo: str | None = None,
     # 4 (early — everything else reads the chain): chain verifies
     report = events.verify_chain(root)
     requests: dict = {}
-    if not report.ok:
+    if not report.healthy:
         failures.append(f"event_chain: {report.error}")
     else:
         chain = events.read_chain(root, verify=False)
@@ -60,6 +60,23 @@ def preflight(cfg: Config, repo: str | None = None,
         if flags["milestone_reached"]:
             failures.append("flags: society milestone reached — autonomous "
                             "continuation is forbidden")
+        # H4: root-owned chain-head checkpoint (external commitment) and
+        # quarantine — an in-place-rewritten prefix or a quarantined
+        # request fails closed
+        try:
+            from tools.council import checkpoint
+            cp_fail = checkpoint.verify_checkpoint(chain)
+            if cp_fail:
+                failures.append(f"checkpoint: {cp_fail}")
+        except CouncilError as exc:
+            failures.append(f"checkpoint: {exc}")
+        quarantined = [rid for rid, s in
+                       state_machine.authority_status(chain).items()
+                       if s.get("quarantined")]
+        if quarantined:
+            failures.append(
+                f"quarantine: requests {quarantined} sit in a pending-"
+                "authority state derived from an invalid, unblessed verdict")
         # H1: identity replay — the verifier must EQUAL the chain-replayed
         # state; a substituted, missing, or diverged verifier (or any
         # inconsistent burn/rotation history) is a fail-closed condition

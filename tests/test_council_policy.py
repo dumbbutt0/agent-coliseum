@@ -220,14 +220,14 @@ def test_milestone_status_accumulates_codex_signed_criteria(env):
     policy.write_initial_policy(root)
     pol, _hash = policy.load_policy(root)
     criteria = pol["society_milestone"]["criteria"]
-    partial = [{"event_type": "RESULT_APPROVED",
+    partial = [{"event_type": "RESULT_APPROVED", "sender": "codex",
                 "payload": {"milestones_completed": criteria[:4]}}]
     reached, satisfied, missing = policy.milestone_status(partial, pol)
     assert not reached and len(satisfied) == 4
     full = partial + [
-        {"event_type": "RESULT_APPROVED",
+        {"event_type": "RESULT_APPROVED", "sender": "codex",
          "payload": {"milestones_completed": criteria[4:-1]}},
-        {"event_type": "AUDIT_GO",
+        {"event_type": "AUDIT_GO", "sender": "codex",
          "payload": {"milestones_completed": [criteria[-1]]}},
     ]
     reached, satisfied, missing = policy.milestone_status(full, pol)

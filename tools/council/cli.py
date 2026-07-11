@@ -484,6 +484,104 @@ def cmd_clear_lock(args) -> int:
     return 0
 
 
+def cmd_chain_report(args) -> int:
+    """H4: report chain health (torn tail, invalid authority events,
+    quarantined requests) and the checkpoint status."""
+    from tools.council import checkpoint
+    _cfg_, root = _cfg(args)
+    report = events.verify_chain(root)
+    print(f"chain: {report.length} events; ok={report.ok}; "
+          f"healthy={report.healthy}"
+          + (f"; torn_suffix={report.torn_bytes}B"
+             if report.suffix_incomplete else ""))
+    if not report.ok:
+        print(f"  INVALID at #{report.error_index}: {report.error}")
+        return 1
+    chain = events.read_chain(root, verify=False)
+    status = state_machine.authority_status(chain)
+    flagged = {r: s for r, s in status.items()
+               if not s["authority_valid"] or s.get("quarantined")}
+    if flagged:
+        print("authority-invalid / quarantined requests:")
+        for rid, s in sorted(flagged.items()):
+            print(f"  {rid}: quarantined={s.get('quarantined')} "
+                  f"invalid_events={s['invalid_events']}")
+    else:
+        print("all requests authority-valid")
+    cp_fail = checkpoint.verify_checkpoint(chain)
+    if cp_fail:
+        print(f"CHECKPOINT MISMATCH: {cp_fail}", file=sys.stderr)
+        return 1
+    cp = checkpoint.read_checkpoint()
+    print("checkpoint: "
+          + (f"pinned at length {cp['length']}" if cp else "not provisioned"))
+    return 0
+
+
+def cmd_checkpoint_status(args) -> int:
+    """Print the {length, head_hash} the owner would sudo-install at the
+    current head (H4 root-owned chain-head checkpoint)."""
+    from tools.council import checkpoint
+    _cfg_, root = _cfg(args)
+    if not events.verify_chain(root).healthy:
+        print("chain is not healthy — refusing to render a checkpoint",
+              file=sys.stderr)
+        return 1
+    chain = events.read_chain(root)
+    print(json.dumps(checkpoint.render_checkpoint(chain), sort_keys=True))
+    print(f"# owner: echo '<that json>' | sudo tee "
+          f"{checkpoint.CHECKPOINT_FILE}", file=sys.stderr)
+    return 0
+
+
+def cmd_bless_event(args) -> int:
+    """Owner blessing of a specific legacy/nonconforming event so
+    quarantine-aware projection may treat it as authority again (H4)."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("bless-event is an owner action: --role human")
+    target = None
+    for e in events.read_chain(root):
+        if e["event_id"] == args.event_id:
+            target = e
+    if target is None:
+        raise SchemaViolation(f"event {args.event_id} not in the chain")
+    payload_core = {"blessed_event_id": target["event_id"],
+                    "blessed_event_hash": target["event_hash"],
+                    "reason": args.reason}
+    token = _maybe_human_token(root, args, "MIGRATION_APPROVED",
+                               target["request_id"], NULL_COMMIT,
+                               payload_core)
+    event = events.append_event(root, cfg, "MIGRATION_APPROVED", "human",
+                                target["request_id"], cfg.repo_roots[0],
+                                NULL_COMMIT, _with_token(payload_core, token))
+    print(f"blessed {args.event_id} (event {event['event_id']})")
+    return 0
+
+
+def cmd_repair_tail(args) -> int:
+    """Truncate a torn trailing line so appends can resume (H4). The torn
+    bytes are by definition NOT a committed event, so this is recovery,
+    not history rewriting; refuses if the tail parses as a complete event."""
+    cfg, root = _cfg(args)
+    if args.role != "human":
+        raise SchemaViolation("repair-tail is an owner action: --role human")
+    path = storage.events_path(root)
+    _complete, tail = storage.read_events_with_tail(path)
+    if not tail["torn"]:
+        print("no torn trailing line — nothing to repair")
+        return 0
+    # record intent first (works even while the chain is unhealthy —
+    # MIGRATION_APPROVED is not stop-exempt, so we truncate then record)
+    with open(path, "rb") as fh:
+        data = fh.read()
+    with open(path, "wb") as fh:
+        fh.write(data[:tail["offset"]])
+    print(f"truncated {tail['torn_bytes']} torn bytes at offset "
+          f"{tail['offset']}; chain is appendable again")
+    return 0
+
+
 def cmd_verify_evidence(args) -> int:
     """Recompute the evidence inventory for a request's run_dir and compare
     it to the hash pinned in RESULT_AUDIT_REQUESTED — detects any tamper
@@ -541,6 +639,16 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("verify-evidence")
     p.add_argument("request_id")
+
+    sub.add_parser("chain-report")
+    sub.add_parser("checkpoint-status")
+
+    p = sub.add_parser("bless-event")
+    p.add_argument("event_id")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--token-file", dest="token_file", default=None)
+
+    sub.add_parser("repair-tail")
 
     p = sub.add_parser("show")
     p.add_argument("request_id")
@@ -616,7 +724,11 @@ def main(argv=None) -> int:
                 "status-set": cmd_status_set,
                 "cancel": cmd_cancel, "clear-lock": cmd_clear_lock,
                 "milestone-status": cmd_milestone_status,
-                "verify-evidence": cmd_verify_evidence}
+                "verify-evidence": cmd_verify_evidence,
+                "chain-report": cmd_chain_report,
+                "checkpoint-status": cmd_checkpoint_status,
+                "bless-event": cmd_bless_event,
+                "repair-tail": cmd_repair_tail}
     try:
         return handlers[args.command](args)
     except CouncilError as exc:

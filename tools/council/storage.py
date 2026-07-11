@@ -100,6 +100,32 @@ def read_events_from(path: str, offset: int = 0):
             yield fh.tell(), loads_strict(text, max_bytes=_EVENT_MAX_BYTES)
 
 
+def read_events_with_tail(path: str, offset: int = 0):
+    """(complete_events, tail) — like read_events_from but REPORTS a torn
+    trailing line (H4) instead of silently stopping: tail = {torn: bool,
+    torn_bytes: int, offset: int}. Authority consumers must treat a torn
+    tail as unhealthy; readers may still use the complete prefix."""
+    events = []
+    tail = {"torn": False, "torn_bytes": 0, "offset": offset}
+    if not os.path.exists(path):
+        return events, tail
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        while True:
+            raw = fh.readline()
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):
+                tail = {"torn": True, "torn_bytes": len(raw),
+                        "offset": fh.tell() - len(raw)}
+                break
+            text = raw.strip()
+            if not text:
+                continue
+            events.append(loads_strict(text, max_bytes=_EVENT_MAX_BYTES))
+    return events, tail
+
+
 def events_path(root: str) -> str:
     return os.path.join(root, EVENTS_FILE)
 

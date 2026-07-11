@@ -164,7 +164,8 @@ def evaluate(root: str, cfg: Config, request: dict, verdict_event: dict,
 
     # event chain must verify end to end
     report = events_mod.verify_chain(root)
-    cond("event_chain_verifies", report.ok, report.error or "")
+    cond("event_chain_verifies", report.healthy,
+         report.error or ("torn suffix" if report.suffix_incomplete else ""))
 
     # no autonomous continuation after the society milestone
     requests = state_machine.project(chain)
@@ -253,7 +254,11 @@ def milestone_status(chain: list, policy: dict) -> tuple:
     criteria = list(policy["society_milestone"]["criteria"])
     satisfied: set = set()
     for event in chain:
-        if event["event_type"] in ("RESULT_APPROVED", "AUDIT_GO"):
+        # H4 defense in depth: require the codex signature explicitly
+        # (RESULT_APPROVED/AUDIT_GO are codex-only in SENDER_ALLOWED, but
+        # never rely on that transitively for a milestone claim)
+        if event["event_type"] in ("RESULT_APPROVED", "AUDIT_GO") \
+                and event.get("sender") == "codex":
             for item in event.get("payload", {}).get(
                     "milestones_completed", []):
                 if item in criteria:
