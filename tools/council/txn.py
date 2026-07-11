@@ -92,17 +92,26 @@ def _load(root: str, txn_id: str):
 
 
 def _recover_claim(root: str, cfg, j: dict) -> str:
-    """Roll forward if AUDIT_CLAIMED landed; else roll back the move + lock
-    (idempotent). Returns 'forward' | 'back'."""
+    """Roll forward iff THIS cycle's AUDIT_CLAIMED landed; else roll back the
+    move + release exactly our lock (idempotent). Returns 'forward' | 'back'.
+
+    Cycle-awareness (H5 cycle-2 fix): a prior audit cycle for the same
+    request also produced an AUDIT_CLAIMED event, so "any AUDIT_CLAIMED
+    exists" is NOT proof this transaction committed. The journal records the
+    count of AUDIT_CLAIMED events that existed BEFORE this claim began; only
+    a strictly higher count now means our terminal event landed."""
     from tools.council import events
     rid = j["request_id"]
     data = j["data"]
-    claimed = any(e["event_type"] == "AUDIT_CLAIMED"
-                  and e["request_id"] == rid
-                  for e in events.read_chain(root))
-    if claimed:
-        return "forward"   # the event is authoritative; nothing to undo
-    # roll back: request back to ready/ (if it was moved), lock released
+    prior = data.get("prior_claimed_count", 0)
+    current = sum(1 for e in events.read_chain(root)
+                  if e["event_type"] == "AUDIT_CLAIMED"
+                  and e["request_id"] == rid)
+    if current > prior:
+        return "forward"   # our event is authoritative; nothing to undo
+    # roll back: request back to ready/ (if it was moved), our lock released.
+    # Release is compare-and-delete on OUR token, so a concurrent claimant's
+    # lock (a different token) is never touched.
     ready = storage.safe_request_path(root, "ready", rid)
     claimed_path = storage.safe_request_path(root, "claimed", rid)
     if os.path.exists(claimed_path) and not os.path.exists(ready):
@@ -116,6 +125,24 @@ def _recover_claim(root: str, cfg, j: dict) -> str:
 
 
 _HANDLERS = {"claim": _recover_claim}
+
+
+def compensate(root: str, cfg, txn: "Txn") -> str | None:
+    """Recover exactly ONE transaction (the caller's own), then delete its
+    journal. Used by an operation's own failure path so it never disturbs a
+    concurrent transaction's in-flight journal (which global recover() would
+    also scan). Returns the handler outcome, or None if unhandled."""
+    handler = _HANDLERS.get(txn.kind)
+    if handler is None:
+        return None
+    j = {"txn_id": txn.txn_id, "kind": txn.kind,
+         "request_id": txn.request_id, "data": txn.data}
+    try:
+        outcome = handler(root, cfg, j)
+    except CouncilError:
+        outcome = None
+    txn.complete()
+    return outcome
 
 
 def recover(root: str, cfg) -> list:

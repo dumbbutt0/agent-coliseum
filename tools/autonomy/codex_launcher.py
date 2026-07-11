@@ -44,7 +44,7 @@ import time
 from tools.autonomy.drivers import RunnerRefusal
 from tools.autonomy.runner import _execute_bounded, tree_size_mb
 from tools.council import (events, get_config, locking, publish,
-                           state_machine, storage)
+                           state_machine, storage, txn)
 from tools.council.schemas import (VERDICT_REQUIRED_FIELDS, CouncilError,
                                    LockHeld, canonical_json)
 
@@ -433,6 +433,18 @@ def _run(cfg, root: str, args) -> int:
     started = time.monotonic()
     launches = 0
     while True:
+        # Self-heal any interrupted transaction (e.g. a claim whose process
+        # died mid-move) BEFORE deriving work, so recovery never depends on
+        # a later codex_watch invocation. Fail closed on any recovery error.
+        try:
+            healed = txn.recover(root, cfg)
+        except CouncilError as exc:
+            print(f"codex_launcher: transaction recovery failed — {exc}; "
+                  "refusing to act", file=sys.stderr)
+            return 1
+        if healed:
+            print(f"codex_launcher: recovered interrupted transactions: "
+                  f"{healed}")
         report = events.verify_chain(root)
         if not report.healthy:
             print(f"codex_launcher: event chain invalid — {report.error}; "

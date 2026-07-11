@@ -42,18 +42,30 @@ def claim(root: str, cfg, request_id: str) -> dict:
     move back and releases the lock — never a stranded lock or a
     half-moved request without its event. A second claimant dies on the
     lock, never on a half-moved file."""
+    import secrets
+
     from tools.council import txn
     txn.recover(root, cfg)  # finish any interrupted claim first
     ready_path = storage.safe_request_path(root, "ready", request_id)
     claimed_path = storage.safe_request_path(root, "claimed", request_id)
     if not os.path.exists(ready_path):
         raise SchemaViolation(f"request {request_id!r} is not in ready/")
-    lock = locking.acquire(root, request_id, SENDER, request_id,
-                           kind="claim")
+    # Cycle-aware recovery (H5 cycle-2 fix): record how many AUDIT_CLAIMED
+    # events already exist for this request so recovery can tell THIS
+    # cycle's terminal event from a prior cycle's — an interrupted re-audit
+    # must roll BACK even though older AUDIT_CLAIMED events exist. The owner
+    # token is minted and journalled BEFORE the lock is acquired, so a crash
+    # anywhere after acquisition leaves a journal that can release exactly
+    # our lock (never another claimant's).
+    prior_claimed = _count_claimed(events.read_chain(root), request_id)
+    token = secrets.token_hex(16)
     t = txn.Txn.begin(root, "claim", request_id,
                       steps=["locked", "moved", "event"],
-                      data={"owner_token": lock.owner_token})
+                      data={"owner_token": token,
+                            "prior_claimed_count": prior_claimed})
     try:
+        lock = locking.acquire(root, request_id, SENDER, request_id,
+                               kind="claim", owner_token=token)
         t.mark("locked")
         with open(ready_path, "rb") as fh:
             request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
@@ -68,10 +80,16 @@ def claim(root: str, cfg, request_id: str) -> dict:
         t.complete()
         return event, lock
     except CouncilError:
-        # STOP mid-claim (or any refusal): roll back the move + lock so
-        # nothing is stranded, then re-raise
-        txn.recover(root, cfg)
+        # STOP mid-claim (or any refusal): compensate ONLY our own
+        # transaction — never a global recover that could disturb a
+        # concurrent claimant's in-flight journal — then re-raise.
+        txn.compensate(root, cfg, t)
         raise
+
+
+def _count_claimed(chain: list, request_id: str) -> int:
+    return sum(1 for e in chain if e["event_type"] == "AUDIT_CLAIMED"
+               and e["request_id"] == request_id)
 
 
 # The states a request occupies AFTER a terminal verdict for its current

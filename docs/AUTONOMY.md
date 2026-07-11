@@ -281,24 +281,36 @@ Multi-step council operations that would be inconsistent if interrupted
 mid-way now run under a JOURNAL (`council/txn/<txn_id>.json`, `txn.v1`;
 item 6). The journal records the ordered steps, which have completed, and
 the compensation data. `txn.recover(root, cfg)` — run at codex_watch
-startup and the launcher loop top — scans the journal, and for each
-interrupted transaction consults the AUTHORITATIVE event chain: it rolls
-FORWARD when the terminal event landed and BACK when it did not, and it is
-idempotent (a second recovery is a no-op). The claim path is the first
-adopter: `codex_watch.claim` runs `[locked → moved → event]`, and a STOP
-engaged before the `AUDIT_CLAIMED` append compensates — the request moves
-back to `ready/` and the lock is released, leaving no stranded lock and no
-half-moved request.
+startup AND at the launcher loop top (so an interrupted transaction is
+self-healed on the next launcher pass, not only on a codex_watch
+invocation) — scans the journal, and for each interrupted transaction
+consults the AUTHORITATIVE event chain: it rolls FORWARD when THIS cycle's
+terminal event landed and BACK when it did not, and it is idempotent (a
+second recovery is a no-op). Recovery is cycle-aware: the journal records
+how many `AUDIT_CLAIMED` events already existed when the claim began, so a
+prior audit cycle's event is never mistaken for the current one — an
+interrupted re-audit rolls back even though older `AUDIT_CLAIMED` events
+exist. The claim path is the first adopter: `codex_watch.claim` mints its
+owner token and journals it BEFORE acquiring the lock, then runs
+`[locked → moved → event]`; a STOP before the `AUDIT_CLAIMED` append
+compensates only its OWN transaction (never a concurrent claimant's),
+moving the request back to `ready/` and releasing exactly its own lock —
+no stranded lock, no half-moved request.
 
 Locks are now leases (item 7). A `lock.v1` body carries an `owner_token`
-(`secrets.token_hex`), a `lease_expires_utc`, and a `kind`. `release()`
-and `renew()` are COMPARE-AND-DELETE on the token: the holder is read, the
-token verified, and only then is the lock removed (rename-then-unlink, a
-drvfs-safe commit point) or extended. A wrong or absent token is a no-op,
-so a reused PID cannot steal a live lock — authority is the random token,
-not the pid. Expiry only makes a lock ELIGIBLE for the existing logged
-clearance paths (`cli clear-lock`, the launcher stale-gate, which now reads
-`lease_expires_utc` instead of file mtime) — never a silent steal.
+(`secrets.token_hex`), a `lease_expires_utc`, and a `kind`. `release()` is
+COMPARE-AND-DELETE on the token: the holder is read, the token verified,
+and only then is the lock removed (rename-then-unlink, a drvfs-safe commit
+point). `renew()` is an ownership-preserving COMPARE-AND-SWAP: it atomically
+moves the live lock aside, confirms the moved body is still ours, updates
+the lease, and restores it with an `O_EXCL` create — so if the holder was
+released and re-acquired between a stale owner's read and write, the stale
+renew fails closed (`LockHeld`) and never overwrites the replacement's
+token or lease. A wrong or absent token is a no-op, so a reused PID cannot
+steal a live lock — authority is the random token, not the pid. Expiry only
+makes a lock ELIGIBLE for the existing logged clearance paths (`cli
+clear-lock`, the launcher stale-gate, which now reads `lease_expires_utc`
+instead of file mtime) — never a silent steal.
 
 ## Protocol integrity
 

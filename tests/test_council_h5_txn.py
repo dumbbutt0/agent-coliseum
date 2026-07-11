@@ -156,3 +156,86 @@ def test_recover_rolls_forward_committed_claim(env):
     from tools.council import state_machine
     assert state_machine.project(
         events.read_chain(root))[RID]["state"] == "claimed"
+
+
+# --------------------------- H5 cycle-2 audit blockers (Codex, BLOCKED) ----
+
+def test_recover_is_cycle_aware(env):
+    """Blocker 1: a PRIOR cycle's AUDIT_CLAIMED must not be mistaken for the
+    current cycle's terminal event. An interrupted re-audit (a second claim
+    with no current-cycle AUDIT_CLAIMED) rolls BACK even though an older
+    AUDIT_CLAIMED exists for the request."""
+    root, repo, head, cfg = env
+    _publish(root, cfg, repo, head)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    # cycle 1: a full claim -> one AUDIT_CLAIMED in the chain
+    _event, lock = codex_watch.claim(root, codex_cfg, RID)
+    locking.release(lock)
+    # re-audit: the request goes back to ready/ (as a re-publish would)
+    os.rename(storage.safe_request_path(root, "claimed", RID),
+              storage.safe_request_path(root, "ready", RID))
+    # cycle 2: an INTERRUPTED claim — lock + move + journal, but no event.
+    # prior_claimed_count records the one existing AUDIT_CLAIMED.
+    lock2 = locking.acquire(root, RID, "codex", RID, kind="claim")
+    os.rename(storage.safe_request_path(root, "ready", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
+                      {"owner_token": lock2.owner_token,
+                       "prior_claimed_count": 1})
+    t.mark("locked")
+    t.mark("moved")
+    healed = txn.recover(root, codex_cfg)
+    assert (t.txn_id, "back") in healed          # rolled BACK, not forward
+    assert os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert locking.read_lock(root, RID) is None
+    assert txn.recover(root, codex_cfg) == []    # idempotent
+
+
+def test_renew_cannot_overwrite_a_replacement_lock(env):
+    """Blocker 2: renew is an ownership-preserving compare-and-swap. If the
+    holder is released and re-acquired between a stale owner's read and
+    write, the stale renew fails closed (LockHeld) and the replacement's
+    token + lease survive intact."""
+    root, *_ = env
+    real = locking.acquire(root, "lock-r", "codex", RID, lease_seconds=10)
+    locking.release(real)                          # owner releases
+    replacement = locking.acquire(root, "lock-r", "codex", RID,
+                                  lease_seconds=10)  # new owner, new token
+    assert replacement.owner_token != real.owner_token
+    before = locking.read_lock(root, "lock-r")["lease_expires_utc"]
+    with pytest.raises(LockHeld):
+        locking.renew(real, lease_seconds=99999)   # stale renew refused
+    holder = locking.read_lock(root, "lock-r")
+    assert holder["owner_token"] == replacement.owner_token
+    assert holder["lease_expires_utc"] == before   # lease not corrupted
+    locking.release(replacement)
+
+
+def test_launcher_recovers_orphan_claim_before_work(env, monkeypatch):
+    """Blocker 3: codex_launcher._run calls txn.recover at the loop top, so
+    an orphaned interrupted claim is healed BEFORE work is derived — not
+    left waiting for a later codex_watch invocation."""
+    from tools.autonomy import codex_launcher
+    root, repo, head, cfg = env
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    _publish(root, cfg, repo, head)
+    # stage an orphan interrupted claim: lock + move + journal, no event
+    lock = locking.acquire(root, RID, "codex", RID, kind="claim")
+    os.rename(storage.safe_request_path(root, "ready", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
+                      {"owner_token": lock.owner_token,
+                       "prior_claimed_count": 0})
+    t.mark("locked")
+    t.mark("moved")
+    # never launch a real session: the loop should still recover first
+    monkeypatch.setattr(codex_launcher, "process_one",
+                        lambda *a, **k: "waiting")
+    assert codex_launcher.main(["--once"]) == 0
+    # recovered: request back in ready/, lock released, journal gone
+    assert os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert locking.read_lock(root, RID) is None
+    assert os.listdir(os.path.join(root, "txn")) == []
