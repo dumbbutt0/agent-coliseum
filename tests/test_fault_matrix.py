@@ -326,6 +326,42 @@ def test_renew_restores_original_lock_even_if_all_writes_fail(tmp_path,
     assert locking.read_lock(root, "lk-renew") is None
 
 
+def test_release_clears_aside_after_doubly_failed_renew(tmp_path,
+                                                        monkeypatch):
+    """H6 (-002 cycle 1): the deepest failure tail — the renewed-body write
+    fails AND the write-free restore rename fails, so the intact original
+    survives only in .renew.<token>. The lock must STILL be releasable by
+    release(lock): the aside name is derived from the owner token the Lock
+    carries, so release sweeps it (and only ours) too."""
+    root = make_root(tmp_path)
+    lock = locking.acquire(root, "lk-dbl", "codex", "lk-dbl-rid",
+                           kind="claim", lease_seconds=10)
+    aside = f"{lock.path}.renew.{lock.owner_token}"
+    real_write, real_rename = os.write, os.rename
+
+    def stall(fd, data):
+        return 0                                   # every write fails
+
+    def flaky_rename(src, dst):
+        if src == aside and dst == lock.path:
+            raise OSError("simulated restore rename failure")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "write", stall)
+    monkeypatch.setattr(os, "rename", flaky_rename)
+    with pytest.raises(locking.LockHeld):
+        locking.renew(lock, lease_seconds=99999)
+    monkeypatch.setattr(os, "write", real_write)
+    monkeypatch.setattr(os, "rename", real_rename)
+    # the strand: nothing at the normal path, the original only in aside
+    assert locking.read_lock(root, "lk-dbl") is None
+    assert os.path.exists(aside)
+    # ...but release(lock) clears it — the lock is never unreleasable
+    locking.release(lock)
+    assert not os.path.exists(aside)
+    assert locking.read_lock(root, "lk-dbl") is None
+
+
 def test_injector_global_index(tmp_path):
     """fail_global(k) fires at the kth boundary across ALL ops, and the
     trace is a faithful ordered record used to drive the matrix."""

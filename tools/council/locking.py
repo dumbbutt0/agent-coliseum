@@ -223,13 +223,22 @@ def release(lock: Lock) -> None:
     normal path): verify the on-disk token still matches, then rename-then-
     unlink (a single-winner commit point on drvfs). A Lock WITHOUT a token
     (reconstructed by-name for a sanctioned logged clearance) blind-unlinks
-    — that path is already gated + logged by its caller."""
+    — that path is already gated + logged by its caller.
+
+    ASIDE SWEEP (H6): a doubly-failed renew (renewed-body write failed AND
+    the write-free restore rename failed) can leave the intact original only
+    at `<path>.renew.<owner_token>`. That aside name is derived from OUR
+    token, so release always clears it too — an owned lock is releasable by
+    release(lock) no matter which failure tail renew hit. The token in the
+    aside's NAME (not just its body) guarantees we never touch another
+    holder's aside."""
     if lock.owner_token is None:
         try:
             os.unlink(lock.path)
         except FileNotFoundError:
             pass
         return
+    _unlink_quietly(f"{lock.path}.renew.{lock.owner_token}")  # our aside only
     holder = read_lock(lock.root, lock.name) if lock.root else None
     if not isinstance(holder, dict) or \
             holder.get("owner_token") != lock.owner_token:
