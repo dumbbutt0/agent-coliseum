@@ -124,6 +124,7 @@ def write_mock_config(tmp_path, **overrides) -> tuple:
         "expected_final_actions": ["execute", "verify", "refuse"],
     }
     config.update(overrides)
+    os.makedirs(str(tmp_path), exist_ok=True)
     path = str(tmp_path / "experiment.json")
     body = json.dumps(config, indent=2, sort_keys=True) + "\n"
     with open(path, "w", encoding="utf-8") as fh:

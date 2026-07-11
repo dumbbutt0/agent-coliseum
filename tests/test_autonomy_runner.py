@@ -166,22 +166,33 @@ def test_human_approved_path_with_binding_runs(tmp_path):
 
 def test_human_approved_without_binding_refused_before_driver(
         tmp_path, monkeypatch):
-    """The Codex probe, as a regression: a human-approved request with no
-    autonomy block and no top-level binding must refuse BEFORE any config
-    is parsed or driver selected — a post-approval config never runs."""
+    """Cycle-1 blocker 1 as a regression: a human-approved request that
+    NEVER carried a binding (published that way, so the file matches its
+    event pin) must refuse BEFORE any config is parsed or driver selected
+    — a post-approval config never runs."""
     config_path, config_sha = write_mock_config(tmp_path)
     roadmap_path = write_roadmap(tmp_path)
-    root, repo, head, cfg = _drive_to_human_approved(
-        tmp_path, config_path, config_sha, roadmap_path)
-    # strip the binding: republish is impossible, so simulate a request
-    # that never carried one by rewriting the completed request file
-    path = storage.safe_request_path(root, "complete", RID)
-    import json as _json
-    request = _json.load(open(path, encoding="utf-8"))
-    request.pop("experiment_config_hash", None)
-    request.pop("experiment_config_file", None)
-    with open(path, "w", encoding="utf-8") as fh:
-        _json.dump(request, fh)
+    root = make_root(tmp_path)
+    repo, _initial = make_repo(tmp_path)
+    seed_scratch_repo_for_mock(repo)
+    head = head_of(repo)
+    cfg = make_cfg(repo, root)
+    policy.write_initial_policy(root)
+    _doc, rm_hash = rm.load_roadmap(roadmap_path,
+                                    policy.load_policy(root)[0])
+    append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "BUILD_READY", "claude", RID, repo, head)
+    # human gate, roadmap pin, but NO experiment config binding at all
+    request = make_request(repo, head, RID, human_approval_required=True,
+                           roadmap_hash=rm_hash)
+    publish.publish_request(root, cfg, request)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    codex_watch.claim(root, codex_cfg, RID)
+    codex_watch.submit_verdict(root, codex_cfg,
+                               make_verdict(head, RID, verdict="GO"))
+    append(root, cfg, "HUMAN_APPROVAL_REQUIRED", "claude", RID, repo, head)
+    append(root, cfg, "EXPERIMENT_APPROVED", "human", RID, repo, head,
+           {"approved_by": "human"})
 
     created_after = str(tmp_path / "created-after-approval.json")
     shutil.copy(config_path, created_after)
@@ -200,6 +211,96 @@ def test_human_approved_without_binding_refused_before_driver(
     assert last["event_type"] == "AUTONOMY_PAUSED"
     assert "no frozen experiment config binding" in last["payload"]["reason"]
     assert "EXPERIMENT_STARTED" not in _event_types(root)
+
+
+# ------------------------------- cycle-2 blocker: request root of trust
+
+def _tamper_completed_request(root, new_config_path, new_sha,
+                              rehash: bool):
+    """Post-approval edit of the mutable request file: point the binding
+    at a different config. rehash=False leaves request_payload_hash stale;
+    rehash=True recomputes it so the file is self-consistent — both must
+    be refused against the event-pinned hash."""
+    import json as _json
+    from tools.council.schemas import compute_request_payload_hash
+    path = storage.safe_request_path(root, "complete", RID)
+    request = _json.load(open(path, encoding="utf-8"))
+    request["experiment_config_file"] = new_config_path
+    if "autonomy" in request:
+        request["autonomy"]["experiment_config_hash"] = new_sha
+    request["experiment_config_hash"] = new_sha
+    if rehash:
+        request["request_payload_hash"] = \
+            compute_request_payload_hash(request)
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(request, fh)
+
+
+def test_post_approval_request_tamper_stale_hash_refused(tmp_path,
+                                                         monkeypatch):
+    """The cycle-2 Codex probe as a regression: after AUTO_APPROVED, edit
+    experiment_config_file + experiment_config_hash in the completed
+    request file (stale request_payload_hash) — run_task must refuse
+    before EXPERIMENT_STARTED and before any driver."""
+    config_path, config_sha = write_mock_config(tmp_path)
+    roadmap_path = write_roadmap(tmp_path)
+    root, repo, head, cfg = _drive_to_auto_approved(
+        tmp_path, config_sha, roadmap_path, config_path=config_path)
+    evil_path, evil_sha = write_mock_config(tmp_path / "evil",
+                                            scenario_seed=1)
+    _tamper_completed_request(root, evil_path, evil_sha, rehash=False)
+    sentinel = {"called": False}
+    monkeypatch.setattr(runner, "_run_driver_bounded",
+                        lambda *a, **k: sentinel.update(called=True)
+                        or GOOD_OUTCOME)
+    code = runner.run_task(cfg, RID, evil_path, roadmap_path=roadmap_path)
+    assert code == 1
+    assert sentinel["called"] is False
+    assert "EXPERIMENT_STARTED" not in _event_types(root)
+    last = events.read_chain(root)[-1]
+    assert last["event_type"] == "AUTONOMY_PAUSED"
+    assert "pinned" in last["payload"]["reason"] or \
+        "no longer validates" in last["payload"]["reason"]
+
+
+def test_post_approval_request_tamper_rehash_refused(tmp_path, monkeypatch):
+    """Codex's second required probe: a SELF-CONSISTENT recomputed
+    request_payload_hash still differs from the event-pinned hash and must
+    be refused all the same."""
+    config_path, config_sha = write_mock_config(tmp_path)
+    roadmap_path = write_roadmap(tmp_path)
+    root, repo, head, cfg = _drive_to_auto_approved(
+        tmp_path, config_sha, roadmap_path, config_path=config_path)
+    evil_path, evil_sha = write_mock_config(tmp_path / "evil",
+                                            scenario_seed=1)
+    _tamper_completed_request(root, evil_path, evil_sha, rehash=True)
+    sentinel = {"called": False}
+    monkeypatch.setattr(runner, "_run_driver_bounded",
+                        lambda *a, **k: sentinel.update(called=True)
+                        or GOOD_OUTCOME)
+    code = runner.run_task(cfg, RID, evil_path, roadmap_path=roadmap_path)
+    assert code == 1
+    assert sentinel["called"] is False
+    assert "EXPERIMENT_STARTED" not in _event_types(root)
+    last = events.read_chain(root)[-1]
+    assert "pinned" in last["payload"]["reason"]
+
+
+def test_policy_continue_refuses_tampered_request(tmp_path):
+    """The same root of trust guards policy evaluation: policy-continue on
+    a tampered request file pauses instead of evaluating."""
+    config_path, config_sha = write_mock_config(tmp_path)
+    roadmap_path = write_roadmap(tmp_path)
+    root, repo, head, cfg = _drive_to_verdict(
+        tmp_path, config_path, config_sha, roadmap_path, human_gate=False)
+    evil_path, evil_sha = write_mock_config(tmp_path / "evil",
+                                            scenario_seed=1)
+    _tamper_completed_request(root, evil_path, evil_sha, rehash=True)
+    code = autonomy_cli.cmd_policy_continue(
+        cfg, argparse.Namespace(request_id=RID))
+    assert code == 1
+    assert _state(root, RID) == "autonomy_paused"
+    assert "AUTO_APPROVED" not in _event_types(root)
 
 
 def test_config_path_must_be_the_audited_file(tmp_path, monkeypatch):

@@ -39,6 +39,7 @@ from tools.autonomy import default_roadmap_path, guard
 from tools.autonomy import roadmap as roadmap_mod
 from tools.autonomy.drivers import DRIVERS, RunnerRefusal
 from tools.council import Config, events, publish, storage
+from tools.council.schemas import CouncilError, validate_request
 
 SENDER = "claude"
 
@@ -147,6 +148,54 @@ def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
     return result["outcome"]
 
 
+# ----------------------------------------------------- request root of trust
+
+def verified_request(cfg: Config, request_id: str) -> tuple:
+    """(request, failures, authoritative_repo, authoritative_commit).
+
+    Cycle-2 audit blocker: the request JSON in ready/claimed/complete is a
+    MUTABLE lifecycle file — it is trusted only when (a) it validates
+    against the full request schema including its own canonical
+    request_payload_hash, and (b) that hash equals the hash pinned by the
+    authoritative AUDIT_REQUESTED/READY_FOR_REAUDIT event for the same
+    request and commit. Post-audit edits — with a stale OR a freshly
+    recomputed self-consistent hash — fail (b) and never reach a driver.
+    The pause coordinates come from the pinned EVENT, not the file."""
+    root = cfg.council_root
+    request = publish.read_request(root, request_id)
+    failures: list = []
+    chain = events.read_chain(root)  # hash-verified end to end
+    pins = [e for e in chain
+            if e["request_id"] == request_id
+            and e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")]
+    if not pins:
+        failures.append(
+            "no publish event pins this request — the file has no "
+            "authoritative root of trust")
+        return (request, failures, request.get("repository", ""),
+                request.get("target_commit", "0" * 40))
+    pin = pins[-1]
+    repo = pin["repository"]
+    commit = pin["target_commit"]
+    try:
+        validate_request(request, cfg.repo_roots)
+    except CouncilError as exc:
+        failures.append(f"request file no longer validates: {exc}")
+    pinned_hash = pin["payload"].get("request_payload_hash")
+    if request.get("request_payload_hash") != pinned_hash:
+        failures.append(
+            "request file payload hash "
+            f"{str(request.get('request_payload_hash'))[:12]} does not "
+            f"match the hash pinned by event {pin['event_id']} "
+            f"({str(pinned_hash)[:12]}) — the file was modified after the "
+            "audit request was published")
+    if request.get("target_commit") != commit:
+        failures.append(
+            "request file target_commit differs from the pinned event — "
+            "post-audit tampering")
+    return request, failures, repo, commit
+
+
 # -------------------------------------------------------------- the runner
 
 def _limits(request: dict, task: dict, policy: dict) -> dict:
@@ -181,9 +230,10 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     """Returns a process exit code. Every refusal both prints and records
     AUTONOMY_PAUSED (the incident record) before returning nonzero."""
     root = cfg.council_root
-    request = publish.read_request(root, request_id)
-    repo = request["repository"]
-    commit = request["target_commit"]
+    # cycle-2 blocker: trust the request file ONLY after verifying it
+    # against the event-pinned hash; pause coordinates come from the event
+    request, integrity_failures, repo, commit = verified_request(
+        cfg, request_id)
 
     def refuse(failures: list) -> int:
         print("runner: REFUSED —")
@@ -192,6 +242,9 @@ def run_task(cfg: Config, request_id: str, config_path: str,
         guard.pause(cfg, request_id, repo, commit, failures)
         print("runner: AUTONOMY_PAUSED recorded; the owner decides next.")
         return 1
+
+    if integrity_failures:
+        return refuse(integrity_failures)
 
     # ---- preflight: emergency stop, chain, policy, roadmap, exact commit
     rm_path = roadmap_path or default_roadmap_path(root)

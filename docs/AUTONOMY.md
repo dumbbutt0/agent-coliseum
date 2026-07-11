@@ -44,10 +44,16 @@ python3 -m tools.autonomy.cli policy-continue --request-id ID   # crash recovery
 python3 -m tools.autonomy.cli run-task --request-id ID --config FILE
 ```
 
-`run-task` refuses unless: emergency stop clear · chain verifies · policy
-unchanged since pinned · roadmap hash matches the request's pinned
-`roadmap_hash` · HEAD == the request's bound commit · tree clean · request
-state is `auto_approved` (or human `approved`) · the request binds BOTH a
+`run-task` refuses unless: the request FILE verifies against its root of
+trust (cycle-2 audit blocker) — full schema validation including its own
+canonical `request_payload_hash`, AND that hash equals the hash pinned by
+the authoritative `AUDIT_REQUESTED`/`READY_FOR_REAUDIT` event for the same
+commit, so post-audit edits to the mutable lifecycle file (stale hash or
+freshly recomputed) never reach policy evaluation or a driver · emergency
+stop clear · chain verifies · policy unchanged since pinned · roadmap hash
+matches the request's pinned `roadmap_hash` · HEAD == the request's bound
+commit · tree clean · request state is `auto_approved` (or human
+`approved`) · the request binds BOTH a
 frozen `experiment_config_hash` and a canonical `experiment_config_file`
 (UNCONDITIONAL — the human-approved path too; audit blocker 1), `--config`
 IS that file, and its sha256 equals the frozen hash, all verified before

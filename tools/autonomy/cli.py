@@ -84,9 +84,17 @@ def cmd_policy_continue(cfg, args) -> int:
               file=sys.stderr)
         return 1
     verdict_event = verdicts[-1]
-    request = publish.read_request(root, rid)
-    repo = request["repository"]
-    commit = request["target_commit"]
+    # same root of trust as the runner: the mutable request file must match
+    # the event-pinned payload hash before policy evaluation reads it
+    request, integrity_failures, repo, commit = runner.verified_request(
+        cfg, rid)
+    if integrity_failures:
+        print("refused: request file failed integrity verification:",
+              file=sys.stderr)
+        for f in integrity_failures:
+            print(f"  - {f}", file=sys.stderr)
+        guard.pause(cfg, rid, repo, commit, integrity_failures)
+        return 1
 
     if state == "go":
         try:
