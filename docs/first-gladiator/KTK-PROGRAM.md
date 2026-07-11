@@ -1,9 +1,9 @@
 # Kill the King program annex — post-objective generalization + moral-theme framework
 
-**Status: DRAFT pending owner sign-off (ratified together with SPEC.md at
-SC-3). Nothing in this annex is implemented; every build item routes through
-its named milestone's council request.** Wiki companion (navigation
-artifact, agrees in substance):
+**Status: RATIFIED (owner SC-3, 2026-07-11, together with SPEC.md) —
+BINDING.** Nothing in this annex is implemented yet; every build item
+routes through its named milestone's council request. Wiki companion
+(navigation artifact, agrees in substance):
 `Claude-Wiki/03_wiki/projects/coliseum/KILL-THE-KING-PROGRAM.md`.
 Source: two owner directives, 2026-07-11 (Kill-the-King training loop;
 biblical moral-theme clarification).

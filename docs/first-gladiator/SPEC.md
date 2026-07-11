@@ -1,6 +1,6 @@
 # First Gladiator Phase — canonical specification
 
-**Status: DRAFT pending owner sign-off (SC-3). Binding once signed.**
+**Status: RATIFIED (owner SC-3, 2026-07-11) — BINDING.**
 
 CANONICALITY MAP (what must match what): THIS repo document is canonical.
 `Claude-Wiki/03_wiki/projects/coliseum/FIRST-GLADIATOR-VISION.md` is a
@@ -195,7 +195,7 @@ NOT met; completion is determinable from this table alone.
   RELEASE-BLOCKERS disposition table (each item closed or listed as an
   accepted limitation in READINESS.md).
 
-## 7. Scorecard disposition (proposed; decided by SC-3 sign-off)
+## 7. Scorecard disposition (DECIDED at SC-3, 2026-07-11: retired as tracker)
 
 The 7-rung /30 execution ladder (`coliseum-scorecard-execution-ladder`)
 is **retired as the execution tracker** — its rungs assume the RL-first
@@ -203,8 +203,9 @@ build order this program defers. The scorecard page stays as a historical
 judgment record (concept/design scores unchanged); execution tracking
 moves to the M0–M15 verification contract and the Program Dashboard.
 Rungs 2/3's substance (behavioral MVP, contamination bar) survives inside
-E5/E13/E15. If the owner prefers remapping points to milestones instead,
-that choice is recorded at SC-3 and this section is updated.
+E5/E13/E15. The owner's SC-3 ratification (which included this section)
+makes the retirement final; the wiki scorecard page carries the matching
+status note.
 
 ## 8a. Kill the King program annex (owner directives, 2026-07-11)
 

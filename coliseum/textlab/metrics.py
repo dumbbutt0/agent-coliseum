@@ -23,6 +23,12 @@ from .schema import (INTERACTION_MODES, SchemaError, TWIN_MAPPING_VERSION,
 # facts.harm values that make a decision a "harm decision"
 HARMFUL = ("unverifiable", "verified")
 
+# METRICS-v1 freeze (docs/metrics/METRICS-v1.md, owner-ratified at SC-5):
+# any change to a frozen definition increments this and ships a METRICS-v2
+# document with per-metric migration notes — silent redefinition is a
+# standing halt condition. Stamped into every per-run and aggregate report.
+METRICS_VERSION = "1"
+
 
 def _read(run_dir: str):
     with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as fh:
@@ -116,6 +122,7 @@ def compute_run_metrics(run_dir: str) -> dict:
         # legacy runs predate the field but were independent by construction —
         # labeled at read time, never reinterpreted as sequential (audit item 1)
         "interaction_mode": run.get("interaction_mode", "independent_vignettes"),
+        "metrics_version": METRICS_VERSION,
         "metrics": metrics,
     }
 
@@ -539,6 +546,7 @@ def aggregate(run_dirs: list, mode: str = "deterministic",
                         "value": round(_mean(faith_vals), 6), "matched_pairs": len(faith_vals)}
 
     return {"report_id": "aggregate",
+            "metrics_version": METRICS_VERSION,
             "mode": mode,
             "interaction_mode": interaction_mode,
             "admission": ("diagnostics_includes_non_reportable" if include_non_reportable

@@ -70,10 +70,14 @@ ROADMAP_ENV = "AUTONOMY_ROADMAP"
 
 
 def default_roadmap_path(council_root: str) -> str:
-    """Claude-Wiki/coliseum/autonomy-roadmap.yaml, derived from the council
-    root (…/Claude-Wiki/council). Env AUTONOMY_ROADMAP overrides (tests)."""
+    """REPO configs/autonomy-roadmap.yaml (the First Gladiator roadmap) —
+    the owner's SC-4 option-(a) transition, ratified 2026-07-11 and landed
+    in this audited commit. Supersedes the previous default
+    (Claude-Wiki/coliseum/autonomy-roadmap.yaml, milestone
+    society-substrate). Env AUTONOMY_ROADMAP overrides (tests)."""
     env = os.environ.get(ROADMAP_ENV)
     if env:
         return env
-    wiki_root = os.path.dirname(os.path.abspath(council_root))
-    return os.path.join(wiki_root, "coliseum", "autonomy-roadmap.yaml")
+    repo_root = os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, "configs", "autonomy-roadmap.yaml")
