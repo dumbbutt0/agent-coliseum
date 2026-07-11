@@ -433,6 +433,7 @@ def run_task(cfg: Config, request_id: str, config_path: str,
          "run_dir": run_dir_rel,
          "final_actions": outcome.get("final_actions"),
          "evidence_inventory_hash": inventory_hash,
+         "validation_report_hash": val_report_hash,
          "manifest_file": manifest_file,
          "elapsed_minutes": round(elapsed_min, 3),
          "storage_growth_mb": round(growth_mb, 3)})

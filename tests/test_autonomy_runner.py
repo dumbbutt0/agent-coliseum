@@ -140,6 +140,25 @@ def test_full_mock_lifecycle_reaches_result_approved(tmp_path):
         assert os.path.exists(os.path.join(run_dir, name))
     assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
 
+    # H3 dual-event evidence pinning: EXPERIMENT_COMPLETE and
+    # RESULT_AUDIT_REQUESTED carry IDENTICAL evidence hashes, and the
+    # sibling manifest exists + matches the pinned inventory hash
+    rar = next(e for e in chain
+               if e["event_type"] == "RESULT_AUDIT_REQUESTED")
+    for field in ("evidence_inventory_hash", "validation_report_hash"):
+        assert complete["payload"][field] == rar["payload"][field]
+    manifest_path = os.path.join(repo, complete["payload"]["manifest_file"])
+    assert os.path.exists(manifest_path)
+    import json
+    manifest = json.load(open(manifest_path))
+    assert manifest["inventory_hash"] == \
+        complete["payload"]["evidence_inventory_hash"]
+    # recomputing the inventory over the produced bytes matches the pin
+    from tools.autonomy.runner import build_evidence_manifest
+    _m, recomputed = build_evidence_manifest(
+        repo, rar["payload"]["run_dir"], rar["payload"]["run_id"])
+    assert recomputed == complete["payload"]["evidence_inventory_hash"]
+
     # Codex approves the result (full schema-valid verdict — the append
     # boundary refuses anything less); claude advances.
     codex_cfg = make_cfg(repo, root, role="codex")
