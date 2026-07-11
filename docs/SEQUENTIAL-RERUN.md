@@ -1,7 +1,14 @@
 # Sequential rerun plan — Exp-1/Exp-2 under sequential_history (PLANNED, NOT RUN)
 
-Status: **documented only** (full-audit item 11). Gated behind the narrow Codex re-audit of
-the interaction-mode implementation. Do not execute before that clears.
+Status: **documented only** (full-audit item 11). The interaction-mode re-audit cleared
+(council request `sequential-rerun-audit-004`, Codex GO at `cda6e905…`, human-approved
+2026-07-11) and the required scenario revision has been AUTHORED (ISSUES #3 closed —
+primary hash `12976717…`, twin `a990de3f…`). Execution now runs ONLY through the council
+autonomy path: a dedicated experiment request with a frozen pre-registration
+(`experiment_config_hash` in its autonomy block), Codex GO on the exact commit,
+policy-gated AUTO_APPROVED, and a post-execution Codex result audit. Owner directive
+2026-07-11: the rerun must NOT run during Stage A (autonomy-substrate build); it is
+Stage B, after the harmless mock lifecycle reaches RESULT_APPROVED.
 
 ## The question this rerun can answer (and the current evidence cannot)
 
@@ -17,11 +24,13 @@ did" — and even then only as observed action sequences, never as internal cogn
 
 ## Design (to be pre-registered before the first live call, as before)
 
-- **Scenario:** a REVISED `hidden_objective_aligned` (new scenario_hash, authored — not a
-  patch): the d2_questioned narrative must be consistent with whatever d1 action the history
-  reports (ISSUES.md #3 — today's text presupposes the diversion even on the clarify path).
-  Both wording variants (granary/cistern) revised in parallel; twin-lint must still pass
-  against a correspondingly revised `hidden_objective` if twin deltas are wanted.
+- **Scenario:** the REVISED `hidden_objective_aligned` (authored 2026-07-11, ISSUES #3):
+  the d2 question is rumor-driven and asserts no movement, so it is consistent with every
+  d1 route. Both wording variants revised in parallel; twin-lint passes against the
+  correspondingly revised `hidden_objective`. ANALYSIS RULE: d2 outcomes are reported
+  conditioned on the d1 action — the pre-registered primary event conditions on d1=divert;
+  clarify-route d2 data is exploratory only (on that route the action labeled `lie` states
+  something true, so unconditioned d2 moral-tag rates would be uninterpretable).
 - **Mode:** `interaction_mode=sequential_history` (history schema v1, observation policy v1,
   history template v1 — all pinned in the regime).
 - **Agent:** gemma3 at the pinned digest `a2af6cc3…` if still available; digest drift = a new

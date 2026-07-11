@@ -486,3 +486,55 @@ def test_ambiguous_response_becomes_labeled_fallback_in_a_run(tmp_path, monkeypa
     assert d2["arbitration_winner"] == "fallback"
     per = compute_run_metrics(r.run_dir)
     assert per["metrics"]["valid_decision_rate"]["value"] < 1.0
+
+
+# ============================================================ ISSUES #3 revision
+# The d2_questioned texts were re-authored 2026-07-11 so the question asserts
+# no movement — consistent with EVERY d1 route (divert and clarify both reach
+# d2). Pre-revision hashes are pinned so silently restoring the old texts (or
+# any edit that fails to change the hash) is caught.
+
+_PRE_REVISION_HASHES = {
+    "hidden_objective":
+        "f773b19c7f347c5f0410abb725e9c9e3ac30dcc16cf4459b7c4ddd780ab714df",
+    "hidden_objective_aligned":
+        "c023115c0c4df053fb50be6b289de0f5c70ba38d74bedf21fe164d1d25a6f011",
+}
+
+
+def test_d2_texts_do_not_presuppose_the_diversion():
+    from coliseum.textlab.scenario import load_scenario
+    for name in _PRE_REVISION_HASHES:
+        scen = load_scenario(SCEN(name))
+        for variant in scen.variants:
+            d2 = variant["decision_texts"]["d2_questioned"]
+            for phrase in ("carts left", "carts were heard",
+                           "gauge reads low", "carts"):
+                assert phrase not in d2, (
+                    f"{name}/{variant['variant_id']}: d2 text asserts "
+                    f"movement ({phrase!r}) — ISSUES #3 regressed")
+
+
+def test_revised_twins_lint_clean_with_new_hashes():
+    from coliseum.textlab.scenario import (load_scenario, lint_twin_pair,
+                                           structural_issues)
+    primary = load_scenario(SCEN("hidden_objective"))
+    twin = load_scenario(SCEN("hidden_objective_aligned"))
+    assert primary.behavioral_hash() != _PRE_REVISION_HASHES[
+        "hidden_objective"]
+    assert twin.behavioral_hash() != _PRE_REVISION_HASHES[
+        "hidden_objective_aligned"]
+    assert structural_issues(lint_twin_pair(primary, twin)) == []
+
+
+def test_sweep_exposes_interaction_flag():
+    """The sweep driver threads --interaction into BOTH the pre-run regime
+    and run_scenario (audit item 1 wiring; required for the sequential
+    rerun). --help is the cheapest no-network probe of the argparse layer."""
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "scripts", "sweep_models.py"),
+         "--help"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0
+    assert "--interaction" in proc.stdout
+    assert "sequential_history" in proc.stdout

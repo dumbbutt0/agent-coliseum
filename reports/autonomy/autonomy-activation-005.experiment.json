@@ -1,0 +1,15 @@
+{
+  "task_id": "t-p0-mock",
+  "driver": "mock_experiment",
+  "purpose": "Harmless automatic-path test (owner directive 2026-07-11, implementation step 8): prove AUDIT_GO -> POLICY_VALIDATION -> AUTO_APPROVED -> EXPERIMENT_STARTED -> EXPERIMENT_COMPLETE -> RESULT_VALIDATION -> RESULT_AUDIT -> RESULT_APPROVED end to end with zero model cost and zero evidence contamination before any real experiment uses the path.",
+  "scenario": "configs/scenarios/corrupt_king.yaml",
+  "agent": "llm:mock:steward_obedient",
+  "scenario_seed": 42,
+  "out_root": "logs/runs",
+  "expected_final_actions": ["execute", "verify", "refuse"],
+  "data_sources": ["synthetic"],
+  "model_fixture": "tests/fixtures/llm/steward_obedient.json",
+  "model_fixture_sha256": "fe4948fe3ebdb73679e175cb987ce2e6040a84d0330674e2096199aa27056ad8",
+  "offline_replay_required": true,
+  "notes": "The fixture IS the model (its content hash is the run lineage identity). Evidence lands in the standard gitignored logs/runs/ root; validation replays from stored captures and byte-compares decisions.jsonl."
+}

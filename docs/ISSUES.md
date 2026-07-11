@@ -1,17 +1,29 @@
 # Open issues (tracked, not yet fixed)
 
-## 3. hidden_objective d2 narrative statically presupposes the diversion
-Opened 2026-07-10 (full Codex audit). Both `hidden_objective` and `hidden_objective_aligned`
-hardcode a d2_questioned narrative that asserts carts moved ("carts left the granary gate at
-night" / "carts were heard by the cisterns at dawn") even though d2 is reachable via `clarify`,
-whose outcome narrative says nothing has moved yet. In independent_vignettes mode this is a
-wording quirk; in sequential_history mode it would CONTRADICT the injected history. Fix = an
-authored scenario revision (new scenario_hash) with a d1-consistent or neutral d2 text —
-scheduled as part of the sequential rerun plan (docs/SEQUENTIAL-RERUN.md), not patched in place.
+(none)
 
 ---
 
 # Closed
+
+## 3. hidden_objective d2 narrative statically presupposes the diversion — CLOSED 2026-07-11
+Opened 2026-07-10 (full Codex audit). Both `hidden_objective` and `hidden_objective_aligned`
+hardcoded a d2_questioned narrative that asserted carts moved ("carts left the granary gate at
+night" / "carts were heard by the cisterns at dawn") even though d2 is reachable via `clarify`,
+whose outcome narrative says nothing has moved yet. In independent_vignettes mode this was a
+wording quirk; in sequential_history mode it would have CONTRADICTED the injected history.
+Fixed by an AUTHORED revision (not a patch): the d2 question is now rumor-driven and asserts
+no movement, in both wording variants of both twins. New behavioral hashes by construction
+(primary `12976717…`, twin `a990de3f…`; pre-revision `f773b19c…`/`c023115c…` are a different
+regime — legacy evidence is unaffected, replay comes from stored snapshots). Twin lint stays
+structurally clean. Regressions:
+tests/test_textlab_audit.py::{test_d2_texts_do_not_presuppose_the_diversion,
+test_revised_twins_lint_clean_with_new_hashes}.
+CAVEAT recorded for sequential analysis: on the `clarify` route the d2 action labeled `lie`
+("nothing has moved") states something true, so moral-tag rates for d2 are only interpretable
+CONDITIONED ON the d1 action. The sequential rerun's primary event already conditions on
+d1=divert; clarify-route d2 data is exploratory and must be reported per-route
+(docs/SEQUENTIAL-RERUN.md).
 
 ## 1. Manifest loading: full-row validation + duplicate-key refusal — CLOSED 2026-07-10
 (Codex re-audit minor warning 1 → full-audit item 6.) `manifest_load` now validates EVERY

@@ -20,13 +20,15 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from coliseum.textlab.agents import OllamaAgent  # noqa: E402
+from coliseum.textlab.agents import (HISTORY_TEMPLATE_HASH,  # noqa: E402
+                                     HISTORY_TEMPLATE_VERSION, OllamaAgent)
 from coliseum.textlab.graph_export import write_graphs  # noqa: E402
 from coliseum.textlab.metrics import write_aggregate, write_run_metrics  # noqa: E402
 from coliseum.textlab.runner import ARBITRATION_VERSION, run_scenario  # noqa: E402
 from coliseum.textlab.scenario import load_scenario  # noqa: E402
-from coliseum.textlab.schema import (SchemaError, build_behavioral_config,  # noqa: E402
-                                     regime_hashes, validate_sampling)
+from coliseum.textlab.schema import (INTERACTION_MODES, SchemaError,  # noqa: E402
+                                     build_behavioral_config, regime_hashes,
+                                     validate_sampling)
 
 _ATTEMPT_RE = re.compile(r"\.a(\d+)$")
 
@@ -140,6 +142,11 @@ def main():
                    help="sampler seeds (stochastic runs; requires --temperature > 0)")
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--arbitration", default="planner_priority")
+    p.add_argument("--interaction", default="independent_vignettes",
+                   choices=list(INTERACTION_MODES),
+                   help="interaction mode (audit item 1); part of the hashed "
+                        "regime, so sequential sweeps never resume against "
+                        "independent-mode manifest rows")
     p.add_argument("--config-dir", default="configs/scenarios")
     p.add_argument("--out-root", default="logs/runs")
     p.add_argument("--manifest", default="derived/textlab/sweep-manifest.jsonl")
@@ -161,9 +168,10 @@ def main():
     os.makedirs(os.path.dirname(args.manifest), exist_ok=True)
     done = manifest_load(args.manifest, args.out_root)
     total = len(args.models) * len(scenarios) * len(args.seeds) * len(sampler_seeds)
-    print(f"sweep[{mode}]: {len(args.models)} models x {len(scenarios)} scenarios x "
-          f"{len(args.seeds)} scenario-seeds x {len(sampler_seeds)} sampler-seeds "
-          f"= {total} runs ({len(done)} already done)", flush=True)
+    print(f"sweep[{mode}|{args.interaction}]: {len(args.models)} models x "
+          f"{len(scenarios)} scenarios x {len(args.seeds)} scenario-seeds x "
+          f"{len(sampler_seeds)} sampler-seeds = {total} runs "
+          f"({len(done)} already done)", flush=True)
 
     manifest = open(args.manifest, "a", encoding="utf-8")
     completed = 0
@@ -184,7 +192,10 @@ def main():
             # pre-run regime (probe spec == runtime spec: same code, digest, sampling)
             bc = build_behavioral_config(scen.scenario_id, scen.behavioral_hash(),
                                          probe.spec_dict(), args.arbitration,
-                                         ARBITRATION_VERSION, validate_sampling(sampling, sampler_seeds[0]))
+                                         ARBITRATION_VERSION, validate_sampling(sampling, sampler_seeds[0]),
+                                         interaction_mode=args.interaction,
+                                         history_template_version=HISTORY_TEMPLATE_VERSION,
+                                         history_template_hash=HISTORY_TEMPLATE_HASH)
             regime_id, _ = regime_hashes(bc)
             for scenario_seed in args.seeds:
                 for sampler_seed in sampler_seeds:
@@ -193,7 +204,8 @@ def main():
                     try:
                         r = run_scenario(path, f"llm:ollama:{model}", scenario_seed,
                                          out_root=args.out_root, arbitration=args.arbitration,
-                                         sampling=sampling, sampler_seed=sampler_seed)
+                                         sampling=sampling, sampler_seed=sampler_seed,
+                                         interaction_mode=args.interaction)
                         if r.run.comparison_regime_id != regime_id:
                             print(f"  !! regime drift mid-sweep for {model}/{scenario_name} "
                                   f"— digest or config changed; aborting model", flush=True)
@@ -234,7 +246,7 @@ def main():
     print(f"\nderiving metrics + graphs for {len(run_dirs)} sweep runs...", flush=True)
     for d in run_dirs:
         write_run_metrics(d)
-    write_aggregate(run_dirs, mode=mode)
+    write_aggregate(run_dirs, mode=mode, interaction_mode=args.interaction)
     write_graphs(run_dirs)
     non_rep = [r["run_id"] for r in done.values()
                if not (r["stochastic_reportable"] if mode == "stochastic" else r["reportable"])]
