@@ -179,3 +179,139 @@ def lint_twin_pair(primary: Scenario, twin: Scenario) -> list:
 def structural_issues(issues: list) -> list:
     """The lint failures that invalidate whole-run twin deltas (notes excluded)."""
     return [i for i in issues if not i.startswith("note:")]
+
+
+# ----------------------------------------------------- scenario registry (M3)
+
+# The SPEC's eight scenario families (docs/first-gladiator/SPEC.md §3,
+# owner-ratified SC-3). A registry entry outside this set fails lint —
+# the anti-sprawl rule made machine-checkable.
+REGISTRY_FAMILIES = (
+    "authority", "moral_conflict", "uncertainty", "time_pressure",
+    "self_preservation", "social_pressure", "deception",
+    "memory_persistence",
+)
+REGISTRY_STATUSES = ("draft", "pilot", "frozen")
+REGISTRY_VERSION = "1"
+
+
+def load_registry(path: str) -> dict:
+    """Load the scenario registry YAML (no validation beyond shape — use
+    lint_registry for the full checks)."""
+    with open(path, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    if not isinstance(raw, dict) or "scenarios" not in raw:
+        raise SchemaError(f"{os.path.basename(path)}: registry must be a "
+                          "mapping with a 'scenarios' list")
+    if raw.get("registry_version") != REGISTRY_VERSION:
+        raise SchemaError(f"unsupported registry_version "
+                          f"{raw.get('registry_version')!r}")
+    return raw
+
+
+def lint_registry(registry_path: str, config_dir: str) -> list:
+    """Machine-check the registry against the SPEC rules and the actual
+    scenario corpus. Returns issue strings (empty = clean). Checks:
+
+    - every entry's file exists, loads, and its scenario_id matches;
+    - behavioral_hash matches the loaded scenario (the SAME hash runs pin
+      as scenario_hash — a stale registry row can never vouch for changed
+      behavioral content);
+    - family is one of the SPEC's eight (anti-sprawl);
+    - >=2 paraphrase variants, and the registry's variant list matches the
+      YAML exactly;
+    - twin links agree with the YAMLs in BOTH directions (control_of and
+      the primary's controls list);
+    - status is draft|pilot|frozen; scenario_ids unique;
+    - COMPLETENESS: every configs/scenarios/*.yaml is registered — an
+      unregistered scenario cannot exist silently.
+    """
+    issues = []
+    try:
+        raw = load_registry(registry_path)
+    except (SchemaError, OSError, yaml.YAMLError) as exc:
+        return [f"registry unreadable: {exc}"]
+
+    entries = raw["scenarios"]
+    ids = [e.get("scenario_id") for e in entries]
+    for sid in {i for i in ids if ids.count(i) > 1}:
+        issues.append(f"duplicate registry entry for {sid!r}")
+
+    loaded: dict = {}
+    by_id: dict = {}
+    for e in entries:
+        sid = e.get("scenario_id", "?")
+        by_id[sid] = e
+        rel = e.get("file", "")
+        # registry paths are repo-relative; resolve against the repo root
+        # (config_dir = <repo>/configs/scenarios)
+        repo_root = os.path.dirname(os.path.dirname(config_dir))
+        path = rel if os.path.isabs(rel) else os.path.join(repo_root, rel)
+        if not os.path.exists(path):
+            issues.append(f"{sid}: file {rel!r} does not exist")
+            continue
+        try:
+            s = loaded[sid] = load_scenario(path)
+        except SchemaError as exc:
+            issues.append(f"{sid}: file fails scenario validation: {exc}")
+            continue
+        if s.scenario_id != sid:
+            issues.append(f"{sid}: file declares scenario_id "
+                          f"{s.scenario_id!r}")
+            continue
+        if e.get("behavioral_hash") != s.behavioral_hash():
+            issues.append(f"{sid}: behavioral_hash mismatch — registry "
+                          f"{str(e.get('behavioral_hash'))[:16]}… vs loaded "
+                          f"{s.behavioral_hash()[:16]}… (revision-bound "
+                          "identity: register the new revision, never "
+                          "mutate in place)")
+        if e.get("family") not in REGISTRY_FAMILIES:
+            issues.append(f"{sid}: family {e.get('family')!r} not one of "
+                          f"the SPEC's eight {REGISTRY_FAMILIES}")
+        if e.get("status") not in REGISTRY_STATUSES:
+            issues.append(f"{sid}: status {e.get('status')!r} not in "
+                          f"{REGISTRY_STATUSES}")
+        want_variants = [v["variant_id"] for v in s.variants]
+        if list(e.get("variants", [])) != want_variants:
+            issues.append(f"{sid}: registry variants {e.get('variants')} != "
+                          f"scenario variants {want_variants}")
+        if len(want_variants) < 2:
+            issues.append(f"{sid}: fewer than 2 paraphrase variants")
+        reg_control = e.get("control_of") or ""
+        if reg_control != (s.control_of or ""):
+            issues.append(f"{sid}: registry control_of {reg_control!r} != "
+                          f"YAML control_of {s.control_of!r}")
+
+    # twin symmetry: X.control_of == P  <=>  X in P.controls
+    for sid, e in by_id.items():
+        control = e.get("control_of")
+        if control:
+            primary = by_id.get(control)
+            if primary is None:
+                issues.append(f"{sid}: control_of {control!r} is not "
+                              "registered")
+            elif sid not in (primary.get("controls") or []):
+                issues.append(f"{control}: controls list missing {sid!r}")
+        for twin in (e.get("controls") or []):
+            t = by_id.get(twin)
+            if t is None:
+                issues.append(f"{sid}: controls entry {twin!r} is not "
+                              "registered")
+            elif (t.get("control_of") or "") != sid:
+                issues.append(f"{twin}: control_of != {sid!r} but listed in "
+                              f"{sid}'s controls")
+
+    # completeness: no unregistered scenario file
+    import glob as _glob
+    for path in sorted(_glob.glob(os.path.join(config_dir, "*.yaml"))):
+        try:
+            s = load_scenario(path)
+        except SchemaError:
+            issues.append(f"unregistered file {os.path.basename(path)} also "
+                          "fails validation")
+            continue
+        if s.scenario_id not in by_id:
+            issues.append(f"UNREGISTERED scenario {s.scenario_id!r} "
+                          f"({os.path.basename(path)}) — every scenario "
+                          "must be in the registry")
+    return issues

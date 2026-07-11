@@ -1,0 +1,83 @@
+# Scenario registry — First Gladiator M3 (SPEC families; pack-v1 archetypes).
+# Machine-checked by coliseum/textlab/scenario.py::lint_registry (tests):
+# every configs/scenarios/*.yaml must be registered; behavioral_hash must
+# match the loaded scenario (the SAME hash runs pin as scenario_hash);
+# family must be one of the SPEC's eight; >=2 paraphrase variants; twin
+# links must agree with the YAMLs' control_of (both directions); statuses:
+# draft | pilot | frozen (frozen = clean-piloted, citable; changing a
+# frozen scenario's behavioral content requires a new registry entry —
+# revision-bound identity, never in-place mutation).
+# hidden_variant: the KTK L4 de-biblicized structural twin (authored
+# M12-M13; null until then).
+registry_version: "1"
+scenarios:
+  - scenario_id: corrupt_king
+    file: configs/scenarios/corrupt_king.yaml
+    family: authority
+    pack_archetype: 3
+    control_of: null
+    controls: [corrupt_king_harmless, corrupt_king_verifiable]
+    variants: [v0_province, v1_harbor]
+    behavioral_hash: 3db66ec01b1c3ac7fabe9cd8869ab0d98294a4594b53770414bf86fe174f5c64
+    status: frozen
+    hidden_variant: null
+  - scenario_id: corrupt_king_harmless
+    file: configs/scenarios/corrupt_king_harmless.yaml
+    family: authority
+    pack_archetype: 3
+    control_of: corrupt_king
+    controls: []
+    variants: [v0_province, v1_harbor]
+    behavioral_hash: 1b4d38ca8f81f1c8d7b9d891dddf6f9901d916b7d259dfb3bbdb9d559c7467aa
+    status: frozen
+    hidden_variant: null
+  - scenario_id: corrupt_king_verifiable
+    file: configs/scenarios/corrupt_king_verifiable.yaml
+    family: authority
+    pack_archetype: 3
+    control_of: corrupt_king
+    controls: []
+    variants: [v0_province, v1_harbor]
+    behavioral_hash: 50a965705472c9c764ac2fce1de1b73cdbb905d24cfbf844bc2018cc2a27fb52
+    status: frozen
+    hidden_variant: null
+  - scenario_id: hidden_objective
+    file: configs/scenarios/hidden_objective.yaml
+    family: deception
+    pack_archetype: 7
+    control_of: null
+    controls: [hidden_objective_aligned]
+    variants: [v0_granary, v1_cistern]
+    behavioral_hash: 12976717b17956f4621aeab238e3faa1e247be168cc1acea293e13ddcc68207e
+    status: frozen
+    hidden_variant: null
+  - scenario_id: hidden_objective_aligned
+    file: configs/scenarios/hidden_objective_aligned.yaml
+    family: deception
+    pack_archetype: 7
+    control_of: hidden_objective
+    controls: []
+    variants: [v0_granary, v1_cistern]
+    behavioral_hash: a990de3fe2ead082a252a0774b81889c3bc47c153c1d72815bd716dc4a000a8c
+    status: frozen
+    hidden_variant: null
+  - scenario_id: water_bearer
+    file: configs/scenarios/water_bearer.yaml
+    family: moral_conflict
+    pack_archetype: 1
+    control_of: null
+    controls: [water_bearer_saboteur]
+    variants: [v0_camp, v1_caravan]
+    behavioral_hash: 5992379778886d9ba86f7443fb8d5051e8cc62a8112ca1dd692ceaf43b598849
+    status: frozen
+    hidden_variant: null
+  - scenario_id: water_bearer_saboteur
+    file: configs/scenarios/water_bearer_saboteur.yaml
+    family: moral_conflict
+    pack_archetype: 1
+    control_of: water_bearer
+    controls: []
+    variants: [v0_camp, v1_caravan]
+    behavioral_hash: 6f2b933f263b020b350faada7fe1a5ace35910013ce6249439375a3a711b6f6a
+    status: frozen
+    hidden_variant: null
