@@ -299,29 +299,25 @@ def test_acquire_fsync_is_best_effort(tmp_path, monkeypatch):
     assert locking.read_lock(root, "lk-fsync") is None      # and releasable
 
 
-def test_renew_restores_original_lock_on_short_write(tmp_path, monkeypatch):
-    """H6 cycle-4: if the renewed-body write short-stalls, renew must not
-    leave a truncated lock at the path or strand the caller's lock in the
-    move-aside file — it cleans the truncated write and RESTORES the original
-    lock, then fails closed. The lock stays readable and releasable."""
+def test_renew_restores_original_lock_even_if_all_writes_fail(tmp_path,
+                                                             monkeypatch):
+    """H6 cycle-4/5: the restore is a WRITE-FREE rename of the intact aside
+    file, so even if EVERY os.write short-stalls (the renewed-body write AND
+    any restore attempt), the original lock is put back at the normal path —
+    readable and releasable by release(lock), never stranded in
+    .renew.<token>."""
     root = make_root(tmp_path)
     lock = locking.acquire(root, "lk-renew", "codex", "lk-renew-rid",
                            kind="claim", lease_seconds=10)
     real_write = os.write
-    calls = {"n": 0}
 
-    def flaky(fd, data):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return real_write(fd, bytes(data)[:5])   # partial renewed body
-        if calls["n"] == 2:
-            return 0                                  # stall -> _write_all raises
-        return real_write(fd, data)                   # restore writes succeed
+    def always_stall(fd, data):
+        return 0                                       # never makes progress
 
-    monkeypatch.setattr(os, "write", flaky)
+    monkeypatch.setattr(os, "write", always_stall)
     with pytest.raises(locking.LockHeld):
         locking.renew(lock, lease_seconds=99999)
-    monkeypatch.setattr(os, "write", real_write)
+    monkeypatch.setattr(os, "write", real_write)       # restore for teardown
     holder = locking.read_lock(root, "lk-renew")
     assert holder is not None
     assert holder["owner_token"] == lock.owner_token   # original restored

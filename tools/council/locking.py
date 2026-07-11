@@ -172,38 +172,43 @@ def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
     if not isinstance(body, dict) or \
             body.get("owner_token") != lock.owner_token:
         # unreachable while compare-and-delete protects our lock, but if it
-        # ever happens, restore the grabbed body only into a still-vacant
-        # path (never clobber a replacement) and fail closed. A short-write
-        # failure here cleans its own partial and is swallowed — the grabbed
-        # body stays in aside for stale clearance rather than escaping.
-        try:
-            if _write_lock_excl(lock.path, body if isinstance(body, dict)
-                                else {}):
-                _unlink_quietly(aside)
-        except OSError:
-            pass
+        # ever happens, put the grabbed file back (write-free rename, never
+        # clobbering a replacement) and fail closed.
+        _restore_aside(aside, lock.path)
         raise LockHeld("renew refused — ownership changed during renew")
     body["lease_expires_utc"] = _lease_expiry(lease_seconds)
     try:
         placed = _write_lock_excl(lock.path, body)
     except OSError:
         # the renewed body could not be fully written (short-write stall);
-        # _write_lock_excl already removed the truncated lock, so restore our
-        # ORIGINAL lock from aside — never leave the caller's lock stranded
-        # in aside — then fail closed. The restore is only kept if it lands.
-        orig = read_lock_file(aside)
-        if isinstance(orig, dict):
-            try:
-                if _write_lock_excl(lock.path, orig):
-                    _unlink_quietly(aside)
-            except OSError:
-                pass   # leave aside in place — it is the only good copy
+        # _write_lock_excl already removed the truncated lock, so restore the
+        # ORIGINAL lock — the aside file IS the intact original, so a
+        # write-free rename puts it back with no risk of a second short write
+        # (this is what a write-based restore could not guarantee). Then fail
+        # closed.
+        _restore_aside(aside, lock.path)
         raise LockHeld("renew refused — could not persist the renewed lease")
     if not placed:
         # a lock was re-acquired in the vacancy — do not clobber it
         _unlink_quietly(aside)
         raise LockHeld("renew refused — lock re-acquired during renew")
     _unlink_quietly(aside)
+
+
+def _restore_aside(aside: str, path: str) -> None:
+    """Put the intact original lock (already sitting at `aside` after the
+    move-aside) back at `path` with a WRITE-FREE rename — no os.write, so no
+    short-write can strand it. Only restores into a still-vacant path so a
+    lock re-acquired in the renew vacancy is never clobbered; if `path` is
+    occupied the caller's lock was legitimately superseded and the aside copy
+    is discarded."""
+    try:
+        if not os.path.exists(path):
+            os.rename(aside, path)      # atomic, write-free restore
+        else:
+            _unlink_quietly(aside)      # superseded by a racer — discard
+    except OSError:
+        pass
 
 
 def _unlink_quietly(path: str) -> None:
