@@ -199,11 +199,26 @@ def read_control(root: str) -> dict:
     from tools.council.schemas import CouncilError
     try:
         chain = events.read_chain(root)
-        root_pin, _state = identity.replay_identity(chain)
+        root_pin, state = identity.replay_identity(chain)
     except (CouncilError, KeyError, ValueError, OSError):
         return dict(FAIL_CLOSED_CONTROL)
     if root_pin is None:
         return control  # pre-cutover legacy root (documented)
+    # cycle-3 blocker 2: on a pinned root, ACTIVE additionally requires
+    # the verifier file to exist and DESCEND from the replayed state
+    # (equal or wasted-burn ahead; behind or missing fails closed) —
+    # append paths inherit this via the stop check
+    try:
+        verifier = identity.read_verifier(root)
+    except CouncilError:
+        return dict(FAIL_CLOSED_CONTROL)
+    if verifier is None:
+        return dict(FAIL_CLOSED_CONTROL)
+    steps = state["counter"] - verifier["counter"]
+    if steps < 0 or identity.chain_value(
+            bytes.fromhex(verifier["tip_hex"]), steps).hex() \
+            != state["tip_hex"]:
+        return dict(FAIL_CLOSED_CONTROL)
     status_events = [e for e in chain
                      if e["event_type"] == "STATUS_CHANGED"]
     if not status_events:

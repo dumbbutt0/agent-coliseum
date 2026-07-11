@@ -173,11 +173,11 @@ def test_substituted_verifier_fails_lineage(env):
     """An attacker-planted verifier (own chain) does not descend from the
     pinned tip: tokens minted from it are refused."""
     root, repo, head, cfg = env
+    _drive_to_awaiting_human(root, cfg, repo, head)
     os.unlink(identity.verifier_path(root))
     identity.init_identity(root, "attacker-passphrase",
                            chain_length=TEST_CHAIN_LENGTH,
                            iterations=TEST_ITERATIONS)
-    _drive_to_awaiting_human(root, cfg, repo, head)
     forged = identity.compute_token("attacker-passphrase",
                                     identity.read_verifier(root))
     payload_core = {"approved_by": "human"}
@@ -631,6 +631,59 @@ def test_attacker_active_control_stays_fail_closed(env, variant):
     assert storage.emergency_stop_reason(root) is not None
     with pytest.raises(CouncilError):              # appends stay refused
         append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+
+
+# ---- cycle-4 blockers: replay rejects tokenless authority; reader
+# ---- requires a descending verifier for ACTIVE
+
+def test_direct_tokenless_status_event_cannot_activate(env):
+    """Cycle-4 probe 1: a hash-consistent STATUS_CHANGED written directly
+    to events.jsonl WITHOUT a token burn, plus a matching active
+    control.json, must read fail-closed and keep appends refused."""
+    from tools.council.schemas import canonical_json, compute_event_hash
+    root, repo, head, cfg = env
+    # owner pauses through the real path first
+    core = {"status": "paused", "paused_roles": ["all"], "reason": "owner"}
+    event = append(root, cfg, "STATUS_CHANGED", "human", "council-control",
+                   repo, "0" * 40, dict(core))
+    storage.write_control(root, "paused", ["all"], "owner",
+                          event["event_id"])
+    # direct hash-consistent TOKENLESS "activation"
+    chain = events.read_chain(root)
+    forged = {"protocol_version": "1.0",
+              "event_id": f"{len(chain) + 1:06d}-deadbeef",
+              "event_type": "STATUS_CHANGED",
+              "request_id": "council-control", "sender": "human",
+              "timestamp_utc": storage.utc_now(), "repository": repo,
+              "target_commit": "0" * 40,
+              "payload": {"status": "active", "paused_roles": [],
+                          "reason": "forged"},
+              "previous_event_hash": chain[-1]["event_hash"]}
+    forged["event_hash"] = compute_event_hash(forged)
+    storage.append_line(storage.events_path(root), canonical_json(forged))
+    storage.write_control(root, "active", [], "forged",
+                          forged["event_id"])
+    assert storage.read_control(root)["status"] == "paused"  # fail closed
+    assert storage.emergency_stop_reason(root) is not None
+    with pytest.raises(CouncilError):
+        append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+
+
+def test_verifier_deletion_pauses_everything(env):
+    """Cycle-4 probe 2: after a legitimate bootstrap + active control,
+    deleting human-tip.json fails the ACTIVE read closed — ordinary
+    appends inherit the pause, not just guard.preflight."""
+    root, repo, head, cfg = env
+    assert storage.emergency_stop_reason(root) is None  # active + verifier
+    os.unlink(identity.verifier_path(root))
+    assert storage.read_control(root)["status"] == "paused"
+    assert storage.emergency_stop_reason(root) is not None
+    with pytest.raises(CouncilError):
+        append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
+    # restore realigns the verifier from the chain; active resumes
+    assert cli.main(["--role", "human", "identity-restore-from-pin"]) == 0
+    assert storage.emergency_stop_reason(root) is None
+    append(root, cfg, "BUILD_STARTED", "claude", RID, repo, head)
 
 
 def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):

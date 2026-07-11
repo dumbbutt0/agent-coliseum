@@ -28,7 +28,8 @@ import hashlib
 import os
 
 from tools.council import storage
-from tools.council.schemas import SchemaViolation, canonical_json
+from tools.council.schemas import (HUMAN_TOKEN_REQUIRED_EVENT_TYPES,
+                                   SchemaViolation, canonical_json)
 
 TOKEN_DOMAIN = b"council:human-token:v1\x00"
 BINDING_DOMAIN = b"council:human-token-binding:v1\x00"
@@ -389,6 +390,19 @@ def replay_identity(chain: list):
                            event["event_id"])
             state = dict(state, tip_hex=token["preimage_hex"],
                          counter=token["counter"])
+            continue
+        # cycle-3 blocker 1: POST-CUTOVER, a token-required event without
+        # a token is not "unvalidated" — it is INVALID history. A
+        # hash-consistent direct write cannot make authority appear by
+        # omitting the burn.
+        if state is not None \
+                and etype in HUMAN_TOKEN_REQUIRED_EVENT_TYPES \
+                and not (etype == "REQUEST_CANCELED"
+                         and event.get("sender") != "human"):
+            raise IdentityError(
+                f"post-cutover event {event['event_id']} ({etype}) lacks "
+                "the required human token — identity history "
+                "inconsistent; refused")
     return root_pin, state
 
 
