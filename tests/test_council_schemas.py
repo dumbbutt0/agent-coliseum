@@ -240,3 +240,64 @@ def test_verdict_unknown_kind_refused(tmp_path):
 def test_verdict_valid_passes(tmp_path):
     _repo, head = make_repo(tmp_path)
     validate_verdict(_ready_verdict(head))
+
+
+# ------------------- strict structured-verdict schema (audit-002 cycle 1)
+
+from tests.council_util import make_finding  # noqa: E402
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("blockers", "not-a-list"),
+    ("blockers", ["ok", 7]),
+    ("conditions", {"not": "a list"}),
+    ("commands_run", "not-a-list"),
+    ("findings", "not-a-list"),
+    ("summary", 7),
+    ("summary", ""),
+    ("audit_mode", None),
+    ("timestamp_utc", 123),
+    ("tests_observed", -1),
+    ("tests_observed", True),
+    ("working_tree_clean", "yes"),
+])
+def test_strict_verdict_schema_rejects_wrong_types(field, bad):
+    """audit-002 cycle-1 blocker: presence is not a schema — every
+    required field is type-checked even when the payload hash is
+    recomputed self-consistently over the malformed content."""
+    verdict = make_verdict("a" * 40)
+    verdict[field] = bad
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    with pytest.raises(SchemaViolation):
+        validate_verdict(verdict)
+
+
+@pytest.mark.parametrize("bad_findings", [
+    ["free text"],                                  # unstructured
+    [{"severity": "HIGH"}],                         # missing fields
+    [make_finding(severity="NUCLEAR")],             # bad severity
+    [make_finding(reproduced="yes")],               # wrong type
+    [make_finding(blocks_requested_action=1)],      # wrong type
+    [make_finding(claim="")],                       # empty string
+    [make_finding(), "free text"],                  # one bad member
+])
+def test_strict_finding_schema_rejects_malformed_members(bad_findings):
+    verdict = make_verdict("a" * 40, findings=bad_findings)
+    verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
+    with pytest.raises(SchemaViolation):
+        validate_verdict(verdict)
+
+
+def test_valid_structured_verdicts_pass_both_vocabularies():
+    """Compatibility fixtures: fully structured source and result verdicts
+    (including evidence extras, which the open top level admits) validate."""
+    source = make_verdict("a" * 40, findings=[
+        make_finding(), make_finding(severity="HIGH", reproduced=True,
+                                     blocks_requested_action=True)])
+    source["verdict_payload_hash"] = compute_verdict_payload_hash(source)
+    validate_verdict(source)
+    result = make_verdict("a" * 40, verdict="APPROVED",
+                          evidence_hashes={"run.json": "0" * 64},
+                          limits_observed={"elapsed_minutes": 0.1})
+    result["verdict_payload_hash"] = compute_verdict_payload_hash(result)
+    validate_verdict(result, result_audit=True)

@@ -88,6 +88,25 @@ def make_verdict(head: str, request_id: str = "test-req-001",
     return body
 
 
+def make_finding(**overrides) -> dict:
+    """A canonical structured finding (the strict schema requires every
+    finding to be an object with the ten protocol fields)."""
+    finding = {
+        "claim": "the probed property holds",
+        "evidence": "probe transcript",
+        "failure_mode": "none reproduced",
+        "file": "tools/council/schemas.py",
+        "line_range": "1-1",
+        "minimum_fix": "none",
+        "minimum_regression": "retain the probe",
+        "reproduced": False,
+        "severity": "INFO",
+        "blocks_requested_action": False,
+    }
+    finding.update(overrides)
+    return finding
+
+
 def make_autonomy_block(**overrides) -> dict:
     block = {
         "experiment_class": "sandbox_local",

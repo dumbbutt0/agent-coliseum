@@ -5,7 +5,8 @@ import os
 import pytest
 
 from tests.council_util import (append, drive_to_claimed, make_autonomy_block,
-                                make_cfg, make_repo, make_root, make_verdict)
+                                make_cfg, make_finding, make_repo, make_root,
+                                make_verdict)
 from tools.council import claude_watch, codex_watch, events, locking, policy, \
     storage
 from tools.council.schemas import (CouncilError, LockHeld, SchemaViolation,
@@ -54,7 +55,10 @@ def test_blocked_verdict_prints_findings_and_stops(env, capsys):
     ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
     verdict = _signed(head, verdict="BLOCKED",
                       blockers=["twin collision remains"],
-                      findings=["probe wrote one cell"],
+                      findings=[make_finding(
+                          claim="probe wrote one cell",
+                          reproduced=True, severity="HIGH",
+                          blocks_requested_action=True)],
                       summary="still blocked")
     codex_watch.submit_verdict(root, cfg, verdict)
     assert locking.read_lock(root, RID) is None  # submit released the claim
@@ -255,6 +259,60 @@ def test_cli_go_and_result_submissions_release_lock(env, tmp_path):
     chain = events.read_chain(root)
     assert state_machine.project(chain)[RID]["state"] == "result_approved"
     assert codex_watch.main(["--submit", str(rfile), "--result-audit"]) == 1
+
+
+# ---- strict verdict types at every boundary (audit-002 cycle 1 blocker)
+
+def test_wrong_type_verdict_refused_at_every_boundary(env, capsys):
+    """Codex's probe: a correctly bound, self-consistently hashed verdict
+    with wrong-typed structured fields must refuse at ALL four boundaries —
+    append_event, generic cli record, codex_watch submit, and recovery."""
+    import json as _json
+    from tools.council import cli as council_cli
+    from tools.council.schemas import (canonical_json, compute_event_hash,
+                                       compute_verdict_payload_hash)
+    root, repo, head, cfg = env
+    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
+    bad = make_verdict(head, RID)
+    bad["blockers"] = "not-a-list"
+    bad["findings"] = "not-a-list"
+    bad["verdict_payload_hash"] = compute_verdict_payload_hash(bad)
+    # 1. append boundary
+    with pytest.raises(CouncilError):
+        append(root, cfg, "AUDIT_GO", "codex", RID, repo, head, bad)
+    # 2. generic cli record
+    rc = council_cli.main(["--role", "codex", "record", "--type", "AUDIT_GO",
+                           "--request-id", RID, "--repository", repo,
+                           "--commit", head,
+                           "--payload-json", _json.dumps(bad)])
+    assert rc == 1
+    # 3. codex_watch submit (recomputes the hash itself — still refused)
+    with pytest.raises(CouncilError):
+        codex_watch.submit_verdict(root, make_cfg(repo, root, role="codex"),
+                                   bad)
+    types = [e["event_type"] for e in events.read_chain(root)]
+    assert "AUDIT_GO" not in types
+    # 4. recovery over a hand-chained wrong-type historical event: zero
+    # mutations (legacy-style injection; the append boundary refuses new)
+    chain = events.read_chain(root)
+    event = {
+        "protocol_version": "1.0",
+        "event_id": f"{len(chain) + 1:06d}-deadbeef",
+        "event_type": "AUDIT_GO", "request_id": RID, "sender": "codex",
+        "timestamp_utc": storage.utc_now(), "repository": repo,
+        "target_commit": head, "payload": bad,
+        "previous_event_hash": chain[-1]["event_hash"],
+    }
+    event["event_hash"] = compute_event_hash(event)
+    storage.append_line(storage.events_path(root), canonical_json(event))
+    healed = codex_watch.finalize_incomplete(
+        root, make_cfg(repo, root, role="codex"))
+    assert RID not in healed
+    assert "invalid verdict payload" in capsys.readouterr().err
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert locking.read_lock(root, RID) is not None
+    assert not os.path.exists(storage.verdict_path(root, RID))
+    locking.release(ctx["lock"])
 
 
 # ---- recovery authority requires validity (launcher cycle 5 blocker)

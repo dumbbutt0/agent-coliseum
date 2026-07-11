@@ -305,10 +305,49 @@ def validate_request(request: dict, repo_roots) -> None:
 AUDIT_VERDICT_VALUES = ("BLOCKED", "GO", "GO_WITH_CONDITIONS")
 RESULT_VERDICT_VALUES = ("APPROVED", "BLOCKED")
 
+FINDING_REQUIRED_FIELDS = (
+    "claim", "evidence", "failure_mode", "file", "line_range",
+    "minimum_fix", "minimum_regression", "reproduced", "severity",
+    "blocks_requested_action",
+)
+
+FINDING_SEVERITIES = ("HIGH", "MEDIUM", "LOW", "INFO")
+
+
+def _validate_finding(finding) -> None:
+    """Every finding is a structured object with the ten protocol fields,
+    correctly typed. Extra keys are permitted (auditors attach evidence
+    detail); the required shape is not negotiable."""
+    if not isinstance(finding, dict):
+        raise SchemaViolation(
+            "each finding must be a structured object, not "
+            f"{type(finding).__name__}")
+    missing = [f for f in FINDING_REQUIRED_FIELDS if f not in finding]
+    if missing:
+        raise SchemaViolation(f"finding missing required fields: {missing}")
+    if finding["severity"] not in FINDING_SEVERITIES:
+        raise SchemaViolation(
+            f"finding severity {finding['severity']!r} not in "
+            f"{FINDING_SEVERITIES}")
+    for name in ("reproduced", "blocks_requested_action"):
+        if not isinstance(finding[name], bool):
+            raise SchemaViolation(f"finding {name} must be a bool")
+    for name in ("claim", "evidence", "failure_mode", "file", "line_range",
+                 "minimum_fix", "minimum_regression"):
+        if not isinstance(finding[name], str) or not finding[name]:
+            raise SchemaViolation(
+                f"finding {name} must be a non-empty string")
+
 
 def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
-    """Source audits verdict in AUDIT_VERDICT_VALUES; result audits in
-    RESULT_VERDICT_VALUES. Both share the same required fields and hash."""
+    """The STRICT structured-verdict schema (launcher audit-002 cycle-1
+    blocker: presence alone is not a schema). Source audits verdict in
+    AUDIT_VERDICT_VALUES; result audits in RESULT_VERDICT_VALUES; both
+    share the required fields, types, and payload hash. The top level
+    deliberately admits EXTRA fields — result verdicts carry evidence
+    extras (evidence_hashes, limits_observed, run_dir, ...) and every
+    extra is covered by the payload hash — but every required field is
+    fully type-checked and findings must be structured objects."""
     if not isinstance(verdict, dict):
         raise SchemaViolation("verdict must be an object")
     missing = [f for f in VERDICT_REQUIRED_FIELDS if f not in verdict]
@@ -324,8 +363,24 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
             f"(allowed: {allowed})")
     if not isinstance(verdict["working_tree_clean"], bool):
         raise SchemaViolation("working_tree_clean must be a bool")
-    if not isinstance(verdict["tests_observed"], int):
-        raise SchemaViolation("tests_observed must be an int")
+    if not isinstance(verdict["tests_observed"], int) \
+            or isinstance(verdict["tests_observed"], bool) \
+            or verdict["tests_observed"] < 0:
+        raise SchemaViolation(
+            "tests_observed must be a non-negative int")
+    for name in ("summary", "audit_mode", "timestamp_utc"):
+        if not isinstance(verdict[name], str) or not verdict[name]:
+            raise SchemaViolation(f"{name} must be a non-empty string")
+    for name in ("blockers", "conditions", "commands_run"):
+        value = verdict[name]
+        if not isinstance(value, list) or \
+                any(not isinstance(x, str) or not x for x in value):
+            raise SchemaViolation(
+                f"{name} must be a list of non-empty strings")
+    if not isinstance(verdict["findings"], list):
+        raise SchemaViolation("findings must be a list")
+    for finding in verdict["findings"]:
+        _validate_finding(finding)
     want = compute_verdict_payload_hash(verdict)
     if verdict["verdict_payload_hash"] != want:
         raise SchemaViolation("verdict_payload_hash does not match content")
