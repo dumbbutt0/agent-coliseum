@@ -51,10 +51,77 @@ def claim(root: str, cfg, request_id: str) -> dict:
          "lock_holder": locking.read_lock(root, request_id)}), lock
 
 
+# The states a request occupies AFTER a terminal verdict for its current
+# cycle. In none of them may the request file still sit in claimed/ or a
+# claim lock survive — EXCEPT result_audit, where the runner legitimately
+# moves the file back to claimed/ for the result auditor.
+_POST_VERDICT_STATES = frozenset({
+    "blocked", "go", "policy_validation", "auto_approved", "awaiting_human",
+    "approved", "experiment_running", "experiment_complete",
+    "result_validation", "result_approved", "result_blocked", "integrated",
+    "next_milestone_ready",
+})
+
+_TERMINAL_VERDICT_TYPES = ("AUDIT_BLOCKED", "AUDIT_GO",
+                           "AUDIT_GO_WITH_CONDITIONS", "RESULT_APPROVED",
+                           "RESULT_BLOCKED")
+
+
+def finalize_incomplete(root: str, cfg) -> list:
+    """Idempotent artifact recovery (cycle-4 audit blocker): for every
+    request whose chain says a terminal verdict is authoritative but whose
+    artifacts are incomplete — verdict JSON missing/stale, request file
+    still in claimed/, or a surviving claim lock — finish the cleanup FROM
+    THE CHAIN without appending any event. The verdict payload is taken
+    from the last terminal verdict event, so recovery can never invent or
+    duplicate a verdict. Returns the healed request ids. Invoked at
+    submit_verdict entry and at codex_watch startup."""
+    chain = events.read_chain(root)
+    requests = state_machine.project(chain)
+    healed = []
+    for rid, req in sorted(requests.items()):
+        if req["state"] not in _POST_VERDICT_STATES:
+            continue
+        last_verdict = None
+        for event in chain:
+            if event["request_id"] == rid and \
+                    event["event_type"] in _TERMINAL_VERDICT_TYPES:
+                last_verdict = event
+        if last_verdict is None:
+            continue
+        acted = False
+        verdict_path = storage.verdict_path(root, rid)
+        want = last_verdict["payload"]
+        try:
+            with open(verdict_path, encoding="utf-8") as fh:
+                have = json.load(fh)
+        except (OSError, ValueError):
+            have = None
+        if have != want:
+            storage.atomic_write_json(verdict_path, want)
+            acted = True
+        claimed_path = storage.safe_request_path(root, "claimed", rid)
+        complete_path = storage.safe_request_path(root, "complete", rid)
+        if os.path.exists(claimed_path) and not os.path.exists(complete_path):
+            os.rename(claimed_path, complete_path)
+            acted = True
+        if locking.read_lock(root, rid) is not None:
+            locking.release(locking.Lock(path=storage.lock_path(root, rid),
+                                         name=rid, role=SENDER))
+            acted = True
+        if acted:
+            healed.append(rid)
+    return healed
+
+
 def submit_verdict(root: str, cfg, verdict: dict,
                    result_audit: bool = False) -> dict:
     """Append the verdict event (payload = the verdict), write
-    verdicts/<id>.json, move claimed/ -> complete/, mirror to log.md."""
+    verdicts/<id>.json, move claimed/ -> complete/, release the claim
+    lock, mirror to log.md. Any prior incomplete finalization is healed
+    first, so a retry after an artifact failure repairs the artifacts and
+    then refuses the duplicate."""
+    finalize_incomplete(root, cfg)
     verdict = dict(verdict)
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
     validate_verdict(verdict, result_audit=result_audit)
@@ -78,31 +145,63 @@ def submit_verdict(root: str, cfg, verdict: dict,
     event = events.append_event(
         root, cfg, table[verdict["verdict"]], SENDER, rid,
         request["repository"], request["target_commit"], verdict)
-    # the event append above is the AUTHORITY; everything after it is
-    # idempotent cleanup, and a second submit is refused (the file leaves
-    # claimed/ and the state machine rejects a second verdict)
-    storage.atomic_write_json(storage.verdict_path(root, rid), verdict)
-    os.rename(claimed_path, storage.safe_request_path(root, "complete", rid))
-    # the claim lock's purpose ends with the durable terminal verdict:
-    # release it BY NAME (the Lock object lives in the long-gone --claim
-    # process; unlink is idempotent) so a later re-audit cycle of this
-    # request id is claimable unattended (launcher audit cycle-3 blocker)
-    locking.release(locking.Lock(path=storage.lock_path(root, rid),
-                                 name=rid, role=SENDER))
+    # The event append above is the AUTHORITY: the state machine refuses a
+    # second verdict regardless of locks or file locations, so an absent
+    # lock never permits one. Everything below is finalization — the claim
+    # lock is ALWAYS released once the verdict is durable (finally), and
+    # any artifact failure is recorded and recoverable WITHOUT a new
+    # verdict via finalize_incomplete (cycle-4 audit blocker).
+    finalize_error = None
+    try:
+        storage.atomic_write_json(storage.verdict_path(root, rid), verdict)
+        os.rename(claimed_path,
+                  storage.safe_request_path(root, "complete", rid))
+    except OSError as exc:
+        finalize_error = exc
+    finally:
+        locking.release(locking.Lock(path=storage.lock_path(root, rid),
+                                     name=rid, role=SENDER))
+    if finalize_error is not None:
+        try:
+            events.append_event(
+                root, cfg, "WATCHER_ERROR", SENDER, rid,
+                request["repository"], request["target_commit"],
+                {"phase": "verdict_finalization",
+                 "reason": str(finalize_error),
+                 "verdict_event_id": event["event_id"]})
+        except CouncilError:
+            pass
+        raise CouncilError(
+            f"verdict event {event['event_id']} IS authoritative, but "
+            f"artifact finalization failed ({finalize_error}); recovery is "
+            "idempotent — finalize_incomplete runs on the next submit or "
+            "codex_watch start and never appends another verdict")
 
     blockers = "".join(f"\n  {i}. {b}" for i, b in
                        enumerate(verdict.get("blockers", []), 1))
     conditions = "".join(f"\n  - {c}" for c in verdict.get("conditions", []))
-    storage.append_log_md(root, "codex", (
-        f"**Verdict (structured): {verdict['verdict']}** on `{rid}` at "
-        f"`{verdict['audited_commit']}` — mirror of `verdicts/{rid}.json` + "
-        f"event `{event['event_id']}`.\n\n"
-        f"- working_tree_clean: {verdict['working_tree_clean']}; "
-        f"tests_observed: {verdict['tests_observed']}\n"
-        f"- summary: {verdict['summary']}"
-        + (f"\n- blockers:{blockers}" if verdict.get("blockers") else "")
-        + (f"\n- conditions:{conditions}" if verdict.get("conditions")
-           else "")))
+    try:
+        storage.append_log_md(root, "codex", (
+            f"**Verdict (structured): {verdict['verdict']}** on `{rid}` at "
+            f"`{verdict['audited_commit']}` — mirror of `verdicts/{rid}.json`"
+            f" + event `{event['event_id']}`.\n\n"
+            f"- working_tree_clean: {verdict['working_tree_clean']}; "
+            f"tests_observed: {verdict['tests_observed']}\n"
+            f"- summary: {verdict['summary']}"
+            + (f"\n- blockers:{blockers}" if verdict.get("blockers") else "")
+            + (f"\n- conditions:{conditions}" if verdict.get("conditions")
+               else "")))
+    except (CouncilError, OSError) as exc:
+        # the mirror is cosmetic; the verdict and artifacts are complete —
+        # record the miss, never fail the submission over it
+        try:
+            events.append_event(
+                root, cfg, "WATCHER_ERROR", SENDER, rid,
+                request["repository"], request["target_commit"],
+                {"phase": "verdict_log_mirror", "reason": str(exc),
+                 "verdict_event_id": event["event_id"]})
+        except CouncilError:
+            pass
     return event
 
 
@@ -120,6 +219,14 @@ def main(argv=None) -> int:
     cfg = get_config(role=SENDER)
     root = cfg.council_root
     storage.ensure_layout(root)
+
+    try:
+        for rid in finalize_incomplete(root, cfg):
+            print(f"codex_watch: finalized incomplete verdict artifacts "
+                  f"for {rid}")
+    except CouncilError as exc:
+        print(f"codex_watch: startup finalization skipped — {exc}",
+              file=sys.stderr)
 
     try:
         if args.list:

@@ -237,6 +237,146 @@ def test_cli_go_and_result_submissions_release_lock(env, tmp_path):
     assert codex_watch.main(["--submit", str(rfile), "--result-audit"]) == 1
 
 
+# ------- post-event finalization is idempotent (launcher cycle 4 blocker)
+
+def _terminal_events(root, rid=RID, etype=None):
+    return [e for e in events.read_chain(root)
+            if e["request_id"] == rid
+            and e["event_type"] in ((etype,) if etype else
+                                    ("AUDIT_BLOCKED", "AUDIT_GO",
+                                     "AUDIT_GO_WITH_CONDITIONS",
+                                     "RESULT_APPROVED", "RESULT_BLOCKED"))]
+
+
+def test_artifact_failure_after_verdict_is_recoverable(
+        env, tmp_path, monkeypatch, capsys):
+    """Codex cycle-4 probe: verdict-JSON write fails AFTER the terminal
+    event. The event stays the single authority, the lock is released
+    anyway, a WATCHER_ERROR records the miss, and watcher-startup
+    finalization reconstructs the artifacts FROM THE CHAIN — no second
+    verdict, no manual lock deletion, and the same id re-audits cleanly."""
+    import json as _json
+    root, repo, head, cfg = env
+    _publish_fresh(root, cfg, repo, head)
+    assert codex_watch.main(["--claim", RID]) == 0
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="BLOCKED", blockers=["b"])
+    with monkeypatch.context() as m:
+        def boom(path, obj):
+            raise OSError("simulated disk failure")
+        m.setattr(storage, "atomic_write_json", boom)
+        with pytest.raises(CouncilError, match="IS authoritative"):
+            codex_watch.submit_verdict(root, codex_cfg, verdict)
+    chain = events.read_chain(root)
+    terminal = _terminal_events(root, etype="AUDIT_BLOCKED")
+    assert len(terminal) == 1                      # exactly one verdict
+    assert locking.read_lock(root, RID) is None    # released DESPITE failure
+    errors = [e for e in chain if e["event_type"] == "WATCHER_ERROR"]
+    assert errors[-1]["payload"]["phase"] == "verdict_finalization"
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert not os.path.exists(storage.verdict_path(root, RID))
+    # recovery on watcher restart — idempotent, chain-derived
+    assert codex_watch.main(["--once"]) == 0
+    assert "finalized incomplete verdict artifacts" in \
+        capsys.readouterr().out
+    with open(storage.verdict_path(root, RID), encoding="utf-8") as fh:
+        assert _json.load(fh) == terminal[0]["payload"]
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert len(_terminal_events(root)) == 1
+    # the absent lock never permits a second verdict
+    with pytest.raises(CouncilError):
+        codex_watch.submit_verdict(root, codex_cfg, verdict)
+    assert len(_terminal_events(root)) == 1
+    # unattended re-audit of the same id still works after recovery
+    os.rename(storage.safe_request_path(root, "complete", RID),
+              storage.safe_request_path(root, "complete", RID)
+              .replace(".json", ".blocked-archived.json"))
+    append(root, cfg, "FIX_STARTED", "claude", RID, repo, head)
+    append(root, cfg, "BUILD_READY", "claude", RID, repo, head)
+    from tests.council_util import make_request
+    from tools.council import publish
+    publish.publish_request(root, cfg, make_request(repo, head, RID),
+                            reaudit=True)
+    assert codex_watch.main(["--claim", RID]) == 0
+
+
+def test_rename_failure_after_go_verdict_is_recoverable(env, monkeypatch):
+    """The claimed->complete rename fails after a GO: same guarantees, and
+    direct finalize_incomplete() heals without any event."""
+    root, repo, head, cfg = env
+    _publish_fresh(root, cfg, repo, head)
+    assert codex_watch.main(["--claim", RID]) == 0
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="GO")
+    real_rename = os.rename
+    with monkeypatch.context() as m:
+        def boom(src, dst):
+            if os.sep + "claimed" + os.sep in str(src):
+                raise OSError("simulated rename failure")
+            return real_rename(src, dst)
+        m.setattr(os, "rename", boom)
+        with pytest.raises(CouncilError, match="IS authoritative"):
+            codex_watch.submit_verdict(root, codex_cfg, verdict)
+    assert locking.read_lock(root, RID) is None
+    assert os.path.exists(storage.verdict_path(root, RID))  # write succeeded
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    chain_len = len(events.read_chain(root))
+    healed = codex_watch.finalize_incomplete(root, codex_cfg)
+    assert RID in healed
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert len(events.read_chain(root)) == chain_len  # heals append NOTHING
+    assert len(_terminal_events(root)) == 1
+
+
+def test_result_verdict_artifact_failure_is_recoverable(env, monkeypatch):
+    root, repo, head, cfg = env
+    _drive_to_result_audit(root, cfg, repo, head)
+    os.rename(storage.safe_request_path(root, "complete", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="APPROVED")
+    with monkeypatch.context() as m:
+        def boom(path, obj):
+            raise OSError("simulated disk failure")
+        m.setattr(storage, "atomic_write_json", boom)
+        with pytest.raises(CouncilError, match="IS authoritative"):
+            codex_watch.submit_verdict(root, codex_cfg, verdict,
+                                       result_audit=True)
+    assert len(_terminal_events(root, etype="RESULT_APPROVED")) == 1
+    healed = codex_watch.finalize_incomplete(root, codex_cfg)
+    assert RID in healed
+    import json as _json
+    with open(storage.verdict_path(root, RID), encoding="utf-8") as fh:
+        assert _json.load(fh)["verdict"] == "APPROVED"  # chain-derived
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID))
+    from tools.council import state_machine
+    assert state_machine.project(
+        events.read_chain(root))[RID]["state"] == "result_approved"
+
+
+def test_log_mirror_failure_never_fails_the_submission(env, monkeypatch):
+    root, repo, head, cfg = env
+    _publish_fresh(root, cfg, repo, head)
+    assert codex_watch.main(["--claim", RID]) == 0
+    codex_cfg = make_cfg(repo, root, role="codex")
+    verdict = make_verdict(head, RID, verdict="GO")
+    with monkeypatch.context() as m:
+        def boom(root_, author, body):
+            raise OSError("mirror unavailable")
+        m.setattr(storage, "append_log_md", boom)
+        event = codex_watch.submit_verdict(root, codex_cfg, verdict)
+    assert event["event_type"] == "AUDIT_GO"
+    assert len(_terminal_events(root)) == 1
+    assert locking.read_lock(root, RID) is None
+    assert os.path.exists(storage.verdict_path(root, RID))
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID))
+    last = events.read_chain(root)[-1]
+    assert last["event_type"] == "WATCHER_ERROR"
+    assert last["payload"]["phase"] == "verdict_log_mirror"
+
+
 # ------------------- source-task routing (council-protocol-delta cycle 2)
 
 def test_source_go_stays_at_go_then_integrates_commit_bound(env, capsys):
