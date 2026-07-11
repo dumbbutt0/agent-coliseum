@@ -185,6 +185,12 @@ def append(root: str, cfg: Config, event_type: str, sender: str,
         from tools.council.schemas import compute_verdict_payload_hash
         payload = make_verdict(commit, request_id,
                                verdict=_EVENT_TO_VERDICT[event_type])
+        # new (2.0) verdict events must be domain-separated (H2): stamp
+        # the matching v2 schema_version the way submit_verdict does
+        payload["schema_version"] = (
+            "result-verdict.v2"
+            if event_type in ("RESULT_APPROVED", "RESULT_BLOCKED")
+            else "source-verdict.v2")
         payload["verdict_payload_hash"] = \
             compute_verdict_payload_hash(payload)
     from tools.council.schemas import HUMAN_TOKEN_REQUIRED_EVENT_TYPES

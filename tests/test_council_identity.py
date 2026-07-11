@@ -742,8 +742,11 @@ def test_pre_cutover_root_stays_tokenless(tmp_path, monkeypatch):
 
 
 def _legacy_go(head):
+    """'Legacy' = pre-IDENTITY-cutover (no token); the event is still a
+    normal 2.0 verdict event, so it carries the v2 verdict schema_version."""
     from tests.council_util import make_verdict
     from tools.council.schemas import compute_verdict_payload_hash
     verdict = make_verdict(head, RID, verdict="GO")
+    verdict["schema_version"] = "source-verdict.v2"
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
     return verdict

@@ -25,9 +25,13 @@ def env(tmp_path, monkeypatch):
     return root, repo, head, cfg
 
 
-def _signed(head, **overrides):
+def _signed(head, result_audit=False, **overrides):
     verdict = make_verdict(head, request_id=overrides.pop("request_id", RID),
                            **overrides)
+    # new (2.0) verdict events are domain-separated (H2): stamp the
+    # matching v2 schema_version the way submit_verdict does
+    verdict["schema_version"] = ("result-verdict.v2" if result_audit
+                                 else "source-verdict.v2")
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
     return verdict
 
@@ -662,7 +666,7 @@ def test_watcher_wakes_on_result_approved_and_records_milestone(env, capsys):
     root, repo, head, cfg = env
     _drive_to_result_audit(root, cfg, repo, head)
     append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
-           _signed(head, verdict="APPROVED"))
+           _signed(head, result_audit=True, verdict="APPROVED"))
     rc = claude_watch.main(["--once", "--request-id", RID])
     out = capsys.readouterr().out
     assert rc == 0
@@ -679,7 +683,7 @@ def test_watcher_result_approved_is_idempotent(env, capsys):
     _drive_to_result_audit(root, cfg, repo, head)
     saved = storage.read_cursor(root, "claude")
     append(root, cfg, "RESULT_APPROVED", "codex", RID, repo, head,
-           _signed(head, verdict="APPROVED"))
+           _signed(head, result_audit=True, verdict="APPROVED"))
     assert claude_watch.main(["--once", "--request-id", RID]) == 0
     length = len(events.read_chain(root))
     # simulate a crash that lost the cursor advance: replay from before
@@ -696,7 +700,7 @@ def test_watcher_result_blocked_prints_and_stops(env, capsys):
     root, repo, head, cfg = env
     _drive_to_result_audit(root, cfg, repo, head)
     append(root, cfg, "RESULT_BLOCKED", "codex", RID, repo, head,
-           _signed(head, verdict="BLOCKED",
+           _signed(head, result_audit=True, verdict="BLOCKED",
                    blockers=["evidence dir incomplete"],
                    summary="result blocked"))
     length = len(events.read_chain(root))

@@ -139,6 +139,11 @@ def submit_verdict(root: str, cfg, verdict: dict,
     then refuses the duplicate."""
     finalize_incomplete(root, cfg)
     verdict = dict(verdict)
+    # H2 completion: stamp the matching v2 schema_version so every new
+    # verdict is domain-separated (the auditor need not supply it); the
+    # hash is then computed under the source/result verdict domain
+    verdict["schema_version"] = ("result-verdict.v2" if result_audit
+                                 else "source-verdict.v2")
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
     validate_verdict(verdict, result_audit=result_audit)
     rid = verdict["request_id"]

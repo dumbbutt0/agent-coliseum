@@ -681,6 +681,19 @@ def validate_verdict_event_payload(event: dict) -> None:
     result_kind = etype in RESULT_VERDICT_EVENT_TYPES
     verdict = event["payload"]
     validate_verdict(verdict, result_audit=result_kind)
+    # H2 completion: a 2.0 verdict event MUST carry the matching v2
+    # schema_version so its payload is domain-separated (1.0 verdict
+    # events replay under the legacy bare hash). validate_verdict already
+    # rejects a mismatched schema_version; here we require its PRESENCE
+    # for new (2.0) verdict events.
+    if _obj_version(event) == "2.0":
+        expected_sv = ("result-verdict.v2" if result_kind
+                       else "source-verdict.v2")
+        if verdict.get("schema_version") != expected_sv:
+            raise SchemaViolation(
+                f"a 2.0 {etype} event requires a domain-separated verdict "
+                f"(schema_version {expected_sv!r}); absent/legacy bare hash "
+                "is refused for new verdicts")
     if verdict["request_id"] != event["request_id"]:
         raise SchemaViolation(
             "nested verdict request_id differs from the event's request_id")
