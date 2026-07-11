@@ -19,6 +19,20 @@ def test_real_registry_is_clean():
     assert lint_experiments_registry(REGISTRY, ROOT) == []
 
 
+def test_pre_migration_backups_preserved():
+    """Evidence-preservation guard (M4 cycle-2 blocker): every manifest
+    migration keeps its .pre-migration original committed. sweep-v2's is
+    the ORIGINAL Day-5 backup; exp1/exp2's are from the M4 migration. The
+    pilot sweep never migrated (its migration aborts on evidence
+    contradictions), so it has no backup by design."""
+    for name in ("sweep-v2-manifest", "exp1-gemma3-reversal-manifest",
+                 "exp2-v1cistern-manifest"):
+        backup = os.path.join(ROOT, "derived", "textlab",
+                              f"{name}.jsonl.pre-migration")
+        assert os.path.exists(backup), f"missing evidence backup: {backup}"
+        assert os.path.getsize(backup) > 0
+
+
 def test_backfill_shape():
     raw = load_experiments_registry(REGISTRY)
     by_id = {e["experiment_id"]: e for e in raw["experiments"]}
