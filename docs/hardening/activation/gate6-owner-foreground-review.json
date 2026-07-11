@@ -1,0 +1,14 @@
+{
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate6-owner-foreground-review",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "owner runs ONE foreground --once pass on the live council and reviews it before any enablement",
+  "ok": false,
+  "owner_attended": true,
+  "owner_commands": [
+    "cd ~/agent-coliseum",
+    "python3 -m tools.autonomy.codex_launcher --once",
+    "# review the printed decision + any launched session, then",
+    "python3 -m tools.council.cli chain-report"
+  ]
+}

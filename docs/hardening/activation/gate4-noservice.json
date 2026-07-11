@@ -1,0 +1,12 @@
+{
+  "checks": {
+    "crontab": "no coliseum entries",
+    "systemctl_unit_files": "(none)",
+    "systemctl_units": "(none)"
+  },
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate4-noservice",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "no coliseum service or cron entry exists before activation",
+  "ok": true
+}

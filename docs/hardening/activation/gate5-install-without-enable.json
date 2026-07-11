@@ -1,0 +1,19 @@
+{
+  "checks": {
+    "enabled": false,
+    "installed_at_etc": false,
+    "unit_in_repo": true,
+    "unit_sha256": "0e6a90260e4eb3457fdb9b08fdea6501c414f1a185beea562a22b6b200f5c313"
+  },
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate5-install-without-enable",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "install is owner-attended (sudo); the gate verifies the unit exists in-repo and is NOT enabled anywhere",
+  "ok": true,
+  "owner_attended": true,
+  "owner_commands": [
+    "sudo cp /home/dummy/agent-coliseum/tools/systemd/coliseum-codex-launcher.service /etc/systemd/system/coliseum-codex-launcher.service",
+    "sudo systemctl daemon-reload",
+    "systemctl is-enabled coliseum-codex-launcher.service  # must print 'disabled'"
+  ]
+}

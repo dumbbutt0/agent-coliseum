@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "append_refused_on_torn": true,
+    "clone_events": 254,
+    "clone_healthy_before": true,
+    "kill_forward": true,
+    "kill_forward_claimed": true,
+    "kill_recover_idempotent": true,
+    "kill_rollback": true,
+    "kill_rollback_lock_gone": true,
+    "kill_rollback_ready": true,
+    "stop_back_in_ready": true,
+    "stop_claim_refused": true,
+    "stop_no_journal": true,
+    "stop_no_stranded_lock": true,
+    "torn_reported": true,
+    "torn_unhealthy": true
+  },
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate3-drills",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "torn-tail drill ran on a scratch COPY of the live chain (live untouched); repair-tail on live remains owner-attended (human token)",
+  "ok": true
+}

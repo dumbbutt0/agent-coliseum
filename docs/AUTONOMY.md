@@ -333,6 +333,26 @@ completeness tests assert every primitive and every operation is actually
 exercised, so the matrix can never silently shrink. This is the harness
 that surfaced the `publish_request` orphan-rollback gap fixed in H5.
 
+## Activation sequence (hardening H7)
+
+Activation is a GATED SEQUENCE, not a switch (`scripts/council_staging.py`;
+artifacts under `docs/hardening/activation/`). Automated gates: (1) the
+full suite at the isolated commit; (2) a fake-Codex end-to-end on a FRESH
+staging council through the real `codex_launcher`/`codex_watch`/`runner` —
+a source round to GO plus an auto-approved mock experiment producing a REAL
+evidence manifest and a result-audit round to APPROVED, with no human token
+anywhere; (3) drills — torn-tail detection and append refusal on a scratch
+COPY of the live chain, STOP-mid-claim rollback, and
+kill-between-journal-steps recovery in both directions; (4) a documented
+no-service check. Owner-attended gates: (5) install-WITHOUT-enable (the
+systemd unit is copied by the owner but must remain disabled); (6) one
+owner-reviewed foreground `codex_launcher --once` pass on the live council;
+(7) the owner enables ONLY the codex launcher. The staging harness never
+writes to the live council — its staging identities are anchored under the
+scratch dir and the live root-owned enrollment anchor refuses them. Builder,
+experiment, and society automation remain disabled; each later capability
+needs its own dedicated audit.
+
 ## Protocol integrity
 
 The council protocol and the autonomy policy cannot approve modifications

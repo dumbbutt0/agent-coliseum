@@ -1,0 +1,12 @@
+{
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate7-owner-enable",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "owner enables ONLY the codex launcher; builder/experiment/society automation stay disabled and need their own audits",
+  "ok": false,
+  "owner_attended": true,
+  "owner_commands": [
+    "sudo systemctl enable --now coliseum-codex-launcher.service",
+    "systemctl status coliseum-codex-launcher.service"
+  ]
+}

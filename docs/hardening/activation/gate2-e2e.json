@@ -1,0 +1,21 @@
+{
+  "checks": {
+    "after_policy_state": "auto_approved",
+    "after_run_state": "result_audit",
+    "chain_healthy": true,
+    "evidence_inventory_hash": "eb892a21539a405fe30e0f20c5110cc683411b6dfd9d00ddf417355d3bbc28b5",
+    "manifest_file": "/tmp/claude-1000/-mnt-c-users-dumbb-docs-thebrain/b9adcea8-1dba-4c0c-b3d2-4ab469177c70/scratchpad/staging-official/e2e/repo/logs/runs/corrupt_king.v0_province.llm%3Amock%3Asteward_obedient.s42.176372f1c40e54f3.a1.manifest.json",
+    "policy_continue_rc": 0,
+    "result_go_rc": 0,
+    "result_launcher_rc": 0,
+    "result_state": "result_approved",
+    "run_task_rc": 0,
+    "source_launcher_rc": 0,
+    "source_state": "go"
+  },
+  "commit": "9b4921f8c0854b40a4dfa5f40f39e105a6fedd8a",
+  "gate": "gate2-e2e",
+  "generated_utc": "2026-07-11T20:54:30Z",
+  "note": "full fake-Codex e2e on a fresh staging council through the real launcher/watch/runner; result round used the auto-approved policy path (no human token) and a real runner-built evidence manifest",
+  "ok": true
+}
