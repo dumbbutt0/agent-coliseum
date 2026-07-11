@@ -206,6 +206,25 @@ Rungs 2/3's substance (behavioral MVP, contamination bar) survives inside
 E5/E13/E15. If the owner prefers remapping points to milestones instead,
 that choice is recorded at SC-3 and this section is updated.
 
+## 8a. Kill the King program annex (owner directives, 2026-07-11)
+
+The post-objective generalization program and the biblical moral-theme
+framework are specified in `docs/first-gladiator/KTK-PROGRAM.md` — ratified
+TOGETHER with this SPEC at SC-3 and binding thereafter. Summary of what it
+adds without renumbering the roadmap: the 10-phase moral arc lands in the
+M12 longitudinal-arc design; registry fields (invocation role, failure
+taxonomy, generalization level L1–L4) land at M3/M4; the failure/recovery
+taxonomy generalizes M10's freeze pattern; OFFLINE synthetic-derivation and
+prefix-only monitor-prediction pilots land at M13; adapter experiments
+remain exactly the M14/SC-8 gate with a mandatory regression battery;
+deeper weight-level work (its phase J) and monitor training at scale are
+post-First-Gladiator; Hunger Games remains SC-9. Hard boundaries: no
+`biblical_morality` scalar; no recognition-reward; L4 hidden variants
+(de-biblicized structural twins) required for the strongest claims;
+interpretive plurality via registered rubric branches; the
+measure-never-reward invariant and the deterministic Judge preserved
+verbatim (annex §G).
+
 ## 8. Open questions carried into the program
 
 Sample sizes/power (M6 evidence) · sequential-history effect (M6) ·

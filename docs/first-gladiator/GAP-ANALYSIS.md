@@ -26,6 +26,10 @@ RR = research risk, ER = engineering risk.
 | 14 | Controlled training pipeline | none; weight_training forbidden → design + (if approved) LoRA intervention with held-out eval (ER HIGH) | **M14** | SC-8 |
 | 15 | Training policy decision | unmade → explicit scoped exception OR formal SPEC amendment | **M14** | SC-8 |
 | 16 | Hunger Games readiness review | no process → M15 review answering the 10 entry questions with evidence | **M15** | SC-9 |
+| 17 | Monitor role (prefix-only failure prediction) | nothing → prediction-record schema + leakage boundaries + M13 registered pilot; training at scale post-phase (RR leakage / ER medium) | **M4 fields, M13 pilot** | — |
+| 18 | Synthetic training-record derivation | nothing → paired-record schema with full lineage + approval gates, offline M13 pilot; corrections never auto-promoted (RR contamination / ER medium) | **M13** | gate per record class |
+| 19 | Generalization ladder + L4 hidden variants | L1/L2 machinery only → registry level field + de-biblicized structural twins held out from training-adjacent use (RR story-recognition confound / ER medium) | **M4 field; M12–M13 authoring** | — |
+| 20 | Moral-dimension metrics + 10-phase arc | 6 metrics, single walks → 14 dimensions via extended moral_tags/facts as METRICS-v2; arc phases 2/7/8/10 designed into M12 (RR prose-judgment creep / ER medium) | **M12 + METRICS-v2** | SC-5 successor note |
 
 Additional tracked debt (not exit-blocking): ~~wiki sessions 4–9
 ingestion~~ (CLOSED 2026-07-11, M1); `docs/RELEASE-BLOCKERS.md` 7 items →
