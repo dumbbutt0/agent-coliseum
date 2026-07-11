@@ -10,7 +10,7 @@ AGREE IN SUBSTANCE and point here, nothing more. The only byte-exact pair
 in the package is `configs/autonomy-roadmap.yaml` ↔ its wiki copy
 `.../autonomy-roadmap-first-gladiator.yaml`. Sibling canonical docs:
 `ROADMAP.md` (M0–M15 + verification contract; must agree
-milestone-for-milestone with the YAML), `GAP-ANALYSIS.md` (16 gaps).
+milestone-for-milestone with the YAML), `GAP-ANALYSIS.md` (20 gaps).
 
 ## 1. Phase definitions
 
