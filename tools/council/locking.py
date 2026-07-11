@@ -36,6 +36,21 @@ def _lease_expiry(seconds: float) -> str:
                 "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write EVERY byte of a lock body. os.write may perform a SHORT write
+    (fewer bytes than requested, without raising), which would leave a
+    truncated, unreadable, tokenless lock; loop until the whole body lands
+    and raise if no progress can be made so the caller cleans up the
+    partial."""
+    view = memoryview(data)
+    written = 0
+    while written < len(data):
+        n = os.write(fd, view[written:])
+        if n <= 0:
+            raise OSError("short write persisting lock body")
+        written += n
+
+
 def acquire(root: str, name: str, role: str, request_id: str,
             lease_seconds: float = DEFAULT_LEASE_SECONDS,
             kind: str = "generic", owner_token: str | None = None) -> Lock:
@@ -79,10 +94,11 @@ def _create_lock(root: str, name: str, path: str, body: str) -> None:
         holder = read_lock(root, name)
         raise LockHeld(f"lock {name!r} already held: {holder}")
     try:
-        os.write(fd, (body + "\n").encode("utf-8"))
+        _write_all(fd, (body + "\n").encode("utf-8"))
     except BaseException:
-        # the body is not fully written: remove the partial lock before
-        # re-raising so compare-and-delete never faces a tokenless lock
+        # the body is not fully written (raise OR a short write): remove the
+        # partial lock before re-raising so compare-and-delete never faces a
+        # tokenless lock
         try:
             os.close(fd)
         except OSError:
@@ -108,7 +124,7 @@ def _write_lock_excl(path: str, body: dict) -> bool:
     except FileExistsError:
         return False
     try:
-        os.write(fd, (canonical_json(body) + "\n").encode("utf-8"))
+        _write_all(fd, (canonical_json(body) + "\n").encode("utf-8"))
         try:
             os.fsync(fd)
         except OSError:

@@ -253,6 +253,28 @@ def test_acquire_cleans_up_partial_lock_on_write_failure(tmp_path, monkeypatch):
     assert locking.read_lock(root, "lk-partial") is None   # no stranded lock
 
 
+def test_acquire_cleans_up_on_short_write(tmp_path, monkeypatch):
+    """os.write may return fewer bytes than requested WITHOUT raising. A
+    short write that then stalls must not strand a truncated, tokenless lock:
+    acquire writes the whole body or unlinks the partial (H6 cycle-3)."""
+    root = make_root(tmp_path)
+    real_write = os.write
+    calls = {"n": 0}
+
+    def short(fd, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, bytes(data)[:5])   # partial: 5 bytes land
+        return 0                                       # then no progress
+
+    monkeypatch.setattr(os, "write", short)
+    with pytest.raises(OSError):
+        locking.acquire(root, "lk-short", "codex", "lk-short-rid",
+                        kind="claim")
+    monkeypatch.setattr(os, "write", real_write)
+    assert locking.read_lock(root, "lk-short") is None     # truncated -> gone
+
+
 def test_acquire_fsync_is_best_effort(tmp_path, monkeypatch):
     """Narrowed contract (H6 cycle-2): the body write is what makes a lock
     complete; the fsync is BEST-EFFORT (the council root is drvfs, where
