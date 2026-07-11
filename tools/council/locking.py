@@ -125,12 +125,20 @@ def _write_lock_excl(path: str, body: dict) -> bool:
         return False
     try:
         _write_all(fd, (canonical_json(body) + "\n").encode("utf-8"))
+    except BaseException:
+        # a partial/short write must not leave a truncated, unreadable lock
+        # here either (H6 cycle-4): remove it before re-raising
         try:
-            os.fsync(fd)
+            os.close(fd)
         except OSError:
             pass
-    finally:
-        os.close(fd)
+        _unlink_quietly(path)
+        raise
+    try:
+        os.fsync(fd)          # best-effort durability (drvfs-tolerant)
+    except OSError:
+        pass
+    os.close(fd)
     return True
 
 
@@ -165,12 +173,33 @@ def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
             body.get("owner_token") != lock.owner_token:
         # unreachable while compare-and-delete protects our lock, but if it
         # ever happens, restore the grabbed body only into a still-vacant
-        # path (never clobber a replacement) and fail closed
-        if _write_lock_excl(lock.path, body if isinstance(body, dict) else {}):
-            _unlink_quietly(aside)
+        # path (never clobber a replacement) and fail closed. A short-write
+        # failure here cleans its own partial and is swallowed — the grabbed
+        # body stays in aside for stale clearance rather than escaping.
+        try:
+            if _write_lock_excl(lock.path, body if isinstance(body, dict)
+                                else {}):
+                _unlink_quietly(aside)
+        except OSError:
+            pass
         raise LockHeld("renew refused — ownership changed during renew")
     body["lease_expires_utc"] = _lease_expiry(lease_seconds)
-    if not _write_lock_excl(lock.path, body):
+    try:
+        placed = _write_lock_excl(lock.path, body)
+    except OSError:
+        # the renewed body could not be fully written (short-write stall);
+        # _write_lock_excl already removed the truncated lock, so restore our
+        # ORIGINAL lock from aside — never leave the caller's lock stranded
+        # in aside — then fail closed. The restore is only kept if it lands.
+        orig = read_lock_file(aside)
+        if isinstance(orig, dict):
+            try:
+                if _write_lock_excl(lock.path, orig):
+                    _unlink_quietly(aside)
+            except OSError:
+                pass   # leave aside in place — it is the only good copy
+        raise LockHeld("renew refused — could not persist the renewed lease")
+    if not placed:
         # a lock was re-acquired in the vacancy — do not clobber it
         _unlink_quietly(aside)
         raise LockHeld("renew refused — lock re-acquired during renew")

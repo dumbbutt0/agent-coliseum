@@ -299,6 +299,37 @@ def test_acquire_fsync_is_best_effort(tmp_path, monkeypatch):
     assert locking.read_lock(root, "lk-fsync") is None      # and releasable
 
 
+def test_renew_restores_original_lock_on_short_write(tmp_path, monkeypatch):
+    """H6 cycle-4: if the renewed-body write short-stalls, renew must not
+    leave a truncated lock at the path or strand the caller's lock in the
+    move-aside file — it cleans the truncated write and RESTORES the original
+    lock, then fails closed. The lock stays readable and releasable."""
+    root = make_root(tmp_path)
+    lock = locking.acquire(root, "lk-renew", "codex", "lk-renew-rid",
+                           kind="claim", lease_seconds=10)
+    real_write = os.write
+    calls = {"n": 0}
+
+    def flaky(fd, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, bytes(data)[:5])   # partial renewed body
+        if calls["n"] == 2:
+            return 0                                  # stall -> _write_all raises
+        return real_write(fd, data)                   # restore writes succeed
+
+    monkeypatch.setattr(os, "write", flaky)
+    with pytest.raises(locking.LockHeld):
+        locking.renew(lock, lease_seconds=99999)
+    monkeypatch.setattr(os, "write", real_write)
+    holder = locking.read_lock(root, "lk-renew")
+    assert holder is not None
+    assert holder["owner_token"] == lock.owner_token   # original restored
+    assert not os.path.exists(f"{lock.path}.renew.{lock.owner_token}")
+    locking.release(lock)                              # still releasable
+    assert locking.read_lock(root, "lk-renew") is None
+
+
 def test_injector_global_index(tmp_path):
     """fail_global(k) fires at the kth boundary across ALL ops, and the
     trace is a faithful ordered record used to drive the matrix."""
