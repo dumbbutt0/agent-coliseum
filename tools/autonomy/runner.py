@@ -126,11 +126,18 @@ def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
     env = dict(os.environ) if env is None else dict(env)
     env["PYTHONPATH"] = cwd + os.pathsep + env.get("PYTHONPATH", "")
     posix = os.name == "posix"
-    proc = subprocess.Popen(
-        argv, cwd=cwd,
-        stdout=subprocess.PIPE if stdout is None else stdout,
-        stderr=subprocess.PIPE if stderr is None else stderr, env=env,
-        start_new_session=posix)
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=cwd,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE if stderr is None else stderr, env=env,
+            start_new_session=posix)
+    except OSError as exc:
+        # a missing/non-executable binary or unusable cwd is a BOUNDED
+        # session failure, never an uncaught crash (launcher cycle-2
+        # blocker): callers get the same refusal type as any other kill
+        raise RunnerRefusal(
+            f"failed to launch child {argv[0]!r}: {exc}") from exc
     started = time.monotonic()
     try:
         while True:

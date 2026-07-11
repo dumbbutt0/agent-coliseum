@@ -329,19 +329,24 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
         return "waiting"
 
     pre_length = len(chain)
-    logs = _log_paths(cfg.repo_roots[0], rid, kind)
     print(f"codex_launcher: launching {kind} session for {rid} at "
-          f"{commit[:12]} (timeout {audit_timeout:.0f}s, logs {logs[0]})")
-    size_before = tree_size_mb(repo)
+          f"{commit[:12]} (timeout {audit_timeout:.0f}s)")
+    logs = ("", "")
     refusal = None
     try:
+        # EVERY pre-execution failure — log-dir setup, spawn of the fixed
+        # binary, the bounds themselves — is a recorded session failure
+        # that feeds the three-strike pause, never an uncaught crash
+        # (cycle-2 blocker)
+        logs = _log_paths(cfg.repo_roots[0], rid, kind)
+        size_before = tree_size_mb(repo)
         with open(logs[0], "w", encoding="utf-8") as out, \
                 open(logs[1], "w", encoding="utf-8") as err:
             _execute_bounded(codex_argv(prompt, repo, root), audit_timeout,
                              repo, STORAGE_CAP_MB, size_before, cwd=repo,
                              stdout=out, stderr=err,
                              env=codex_env(root, repo))
-    except RunnerRefusal as exc:
+    except (RunnerRefusal, OSError) as exc:
         refusal = f"session did not complete: {exc}"
 
     chain_after = events.read_chain(root)

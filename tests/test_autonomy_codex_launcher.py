@@ -398,6 +398,44 @@ def test_tampered_request_pauses_without_launch(env, tmp_path, monkeypatch):
     assert events.read_chain(root)[-1]["event_type"] == "AUTONOMY_PAUSED"
 
 
+# ---------------- child-creation failures are bounded (cycle-3 blocker)
+
+def test_missing_codex_binary_is_bounded_failure(env, tmp_path, monkeypatch):
+    """Codex's probe: a nonexistent fixed binary must not crash the
+    launcher — each pass records exactly one failure, the request stays
+    retryable, and the third consecutive failure pauses autonomy."""
+    root, repo, head, cfg = env
+    monkeypatch.setattr(codex_launcher, "CODEX_BIN",
+                        str(tmp_path / "nowhere" / "codex"))
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0  # no uncaught exception
+    assert len(_failure_events(root)) == 1
+    assert _state(root) == "requested"  # retryable, untouched
+    types = _types(root)
+    assert "AUDIT_CLAIMED" not in types and "AUDIT_GO" not in types
+    assert codex_launcher.main(["--once"]) == 0
+    assert codex_launcher.main(["--once"]) == 1  # three strikes
+    chain = events.read_chain(root)
+    assert chain[-1]["event_type"] == "AUTONOMY_PAUSED"
+    assert "consecutive codex_launcher failures" in \
+        chain[-1]["payload"]["reason"]
+
+
+def test_non_executable_codex_binary_is_bounded_failure(env, tmp_path,
+                                                        monkeypatch):
+    root, repo, head, cfg = env
+    binary = tmp_path / "bin" / "codex-noexec"
+    binary.parent.mkdir(exist_ok=True)
+    binary.write_text("#!/usr/bin/env python3\n")  # exists, NOT executable
+    monkeypatch.setattr(codex_launcher, "CODEX_BIN", str(binary))
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    failures = _failure_events(root)
+    assert len(failures) == 1
+    assert "failed to launch child" in failures[0]["payload"]["reason"]
+    assert _state(root) == "requested"
+
+
 # ------------------------------------------------- argv/env fixity (security)
 
 def test_request_content_cannot_alter_argv(env):
