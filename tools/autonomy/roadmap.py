@@ -319,13 +319,16 @@ def active_task(doc: dict):
 
 
 def eligible_tasks(doc: dict) -> list:
-    """Tasks that may start next: status ready, every dependency complete,
-    and not requiring the human. requires_human tasks are listed by resume
-    but never started autonomously."""
+    """Tasks that may start next AUTONOMOUSLY: status ready, every
+    dependency complete, and requires_human false (audit finding 3 —
+    human-gated tasks are surfaced by resume as awaiting the human, never
+    recommended for autonomous work)."""
     done = {t["task_id"] for t in doc["tasks"] if t["status"] == "complete"}
     out = []
     for task in doc["tasks"]:
         if task["status"] != "ready":
+            continue
+        if task["requires_human"]:
             continue
         if any(dep not in done for dep in task["dependencies"]):
             continue

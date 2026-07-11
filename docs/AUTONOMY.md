@@ -47,11 +47,23 @@ python3 -m tools.autonomy.cli run-task --request-id ID --config FILE
 `run-task` refuses unless: emergency stop clear · chain verifies · policy
 unchanged since pinned · roadmap hash matches the request's pinned
 `roadmap_hash` · HEAD == the request's bound commit · tree clean · request
-state is `auto_approved` (or human `approved`) · sha256(config file) ==
-the request's frozen `experiment_config_hash` · the task is in the roadmap,
-not human-gated, and its class has an implemented driver. Wall-clock and
-storage growth are measured against the STRICTER of the roadmap task and
-the request's autonomy block; exceeding either pauses autonomy.
+state is `auto_approved` (or human `approved`) · the request binds BOTH a
+frozen `experiment_config_hash` and a canonical `experiment_config_file`
+(UNCONDITIONAL — the human-approved path too; audit blocker 1), `--config`
+IS that file, and its sha256 equals the frozen hash, all verified before
+the config is parsed or a driver selected · the task is in the roadmap,
+not human-gated, and its class has an implemented driver · the frozen
+config's declared `scenario_count` and `retries_per_unit` are within the
+effective limits BEFORE launch (audit blocker 2).
+
+ALL FIVE limits are enforced (audit blocker 2): the effective limit set is
+the strictest of the roadmap task, the request's autonomy block, and the
+immutable policy caps — wall, storage, compute, retries/unit, scenarios.
+The driver runs in a KILLABLE CHILD process
+(`tools/autonomy/child_runner.py`): the parent hard-kills it when the
+min(wall, compute) deadline passes or when live-monitored storage growth
+exceeds the cap (overrun bounded by the 0.25 s poll interval), then pauses
+autonomy with the exact reason.
 
 ## Result audits (file mechanics + a known council defect)
 

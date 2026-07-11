@@ -118,6 +118,8 @@ def write_mock_config(tmp_path, **overrides) -> tuple:
         "scenario": "configs/scenarios/corrupt_king.yaml",
         "agent": "llm:mock:steward_obedient",
         "scenario_seed": 42,
+        "scenario_count": 1,
+        "retries_per_unit": 0,
         "out_root": "logs/runs",
         "expected_final_actions": ["execute", "verify", "refuse"],
     }

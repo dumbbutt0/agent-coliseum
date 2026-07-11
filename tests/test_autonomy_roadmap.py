@@ -123,6 +123,17 @@ def test_eligibility_requires_completed_dependencies(tmp_path):
     assert rm.active_task(doc) is None
 
 
+def test_human_gated_task_never_eligible(tmp_path):
+    """Audit finding 3: a ready, dependency-free, requires_human task must
+    NOT appear in the autonomous eligibility list."""
+    gated = task_fields(task_id="t-human", requires_human=True)
+    free = task_fields(task_id="t-free")
+    doc, _ = _load(tmp_path, [gated, free])
+    assert [t["task_id"] for t in rm.eligible_tasks(doc)] == ["t-free"]
+    doc, _ = _load(tmp_path, [gated])
+    assert rm.eligible_tasks(doc) == []
+
+
 def test_the_real_roadmap_text_shape_round_trips():
     # the renderer in autonomy_util must emit exactly what the parser reads
     text = roadmap_text([task_fields(task_id="t-a", next_tasks=["t-a"])])

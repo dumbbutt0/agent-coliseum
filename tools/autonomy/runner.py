@@ -3,40 +3,55 @@
 Consumes a request in state `auto_approved` (policy path) or `approved`
 (human path) and drives, via the council event API only:
 
-    EXPERIMENT_STARTED -> <driver runs under wall-clock + storage limits>
+    EXPERIMENT_STARTED -> <killable child runs the driver under limits>
     -> EXPERIMENT_COMPLETE -> RESULT_VALIDATION_REQUIRED
     -> RESULT_AUDIT_REQUESTED (+ request file moved back to claimed/ so
        codex_watch --submit --result-audit can find it) -> stop.
 
-The runner NEVER: issues verdicts, approves anything, edits source, retries
-past limits, or continues after a failed validation — failures record
-AUTONOMY_PAUSED with the exact reasons and stop. Codex must RESULT_APPROVE
-the evidence before the task counts as complete.
+Audit blocker 1 (2026-07-11): the frozen-config binding is UNCONDITIONAL.
+Every invocation — human-approved included — must carry BOTH a frozen
+experiment_config_hash and a canonical experiment_config_file in the
+request; the --config path must BE that file and its sha256 must equal the
+frozen hash, verified before the config is parsed or a driver is selected.
 
-The experiment configuration is FROZEN: the runner recomputes the sha256 of
-the config file and refuses to start unless it equals the request's
-autonomy.experiment_config_hash. Bit-for-bit, or it does not run.
+Audit blocker 2 (2026-07-11): all five declared limits are enforced. The
+driver runs in a killable child process (tools/autonomy/child_runner.py)
+under a hard min(wall, compute) deadline with live storage monitoring —
+the parent kills the child on deadline or storage overrun. Scenario and
+retry cardinality are validated BEFORE launch.
+
+The runner NEVER: issues verdicts, approves anything, edits source,
+retries past limits, or continues after a failed validation — failures
+record AUTONOMY_PAUSED with the exact reasons and stop. Codex must
+RESULT_APPROVE the evidence before the task counts as complete.
 """
 from __future__ import annotations
 
-import filecmp
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 
 from tools.autonomy import default_roadmap_path, guard
 from tools.autonomy import roadmap as roadmap_mod
-from tools.council import Config, events, publish, state_machine, storage
+from tools.autonomy.drivers import DRIVERS, RunnerRefusal
+from tools.council import Config, events, publish, storage
 
 SENDER = "claude"
 
 RUNNABLE_STATES = ("auto_approved", "approved")
 
+# the parent checks the child this often; a storage overrun is therefore
+# bounded by (poll interval x write rate) past the cap, then killed
+_POLL_SECONDS = 0.25
 
-class RunnerRefusal(Exception):
-    """A precondition failed — recorded, never worked around."""
+# the tools/ + coliseum/ packages live here — the child imports from this
+# root while operating on the (possibly different) request repository
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
 
 
 # ------------------------------------------------------------- measurement
@@ -60,61 +75,105 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-# ----------------------------------------------------------------- drivers
+# ------------------------------------------------------- bounded execution
 
-def _drive_mock(repo: str, config: dict, deadline: float) -> dict:
-    """mock_experiment: fixture-backed LLM run + offline byte-identical
-    replay. Deterministic, zero network, synthetic by construction."""
-    from coliseum.textlab.runner import run_scenario
+def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
+                     storage_cap_mb: float, size_before_mb: float,
+                     cwd: str) -> None:
+    """Run argv as a killable child: hard-kill on the wall/compute deadline
+    or when monitored storage growth exceeds the cap (audit blocker 2).
+    Raises RunnerRefusal with the exact reason on any kill or nonzero exit."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = cwd + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
+    started = time.monotonic()
+    try:
+        while True:
+            rc = proc.poll()
+            if rc is not None:
+                break
+            if time.monotonic() - started > deadline_seconds:
+                proc.kill()
+                proc.wait()
+                raise RunnerRefusal(
+                    f"wall/compute deadline {deadline_seconds:.0f}s "
+                    "exceeded — child killed")
+            if os.path.isdir(storage_root):
+                growth = tree_size_mb(storage_root) - size_before_mb
+                if growth > storage_cap_mb:
+                    proc.kill()
+                    proc.wait()
+                    raise RunnerRefusal(
+                        f"storage growth {growth:.1f} MB exceeded the cap "
+                        f"{storage_cap_mb} MB — child killed")
+            time.sleep(_POLL_SECONDS)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    if rc != 0:
+        stderr = proc.stderr.read().decode("utf-8", "replace")[-500:]
+        raise RunnerRefusal(f"child exited {rc}: {stderr.strip()}")
 
-    scenario_path = os.path.join(repo, config["scenario"])
-    out_root = os.path.join(repo, config["out_root"])
-    result = run_scenario(scenario_path, config["agent"],
-                          config["scenario_seed"], out_root=out_root)
-    if time.monotonic() > deadline:
-        raise RunnerRefusal("wall-clock limit exceeded during the run")
 
-    # offline replay gate (same comparison as `cli replay`): re-run from the
-    # stored captures into a temp dir, byte-compare decisions.jsonl
-    with tempfile.TemporaryDirectory() as tmp:
-        replay = run_scenario(scenario_path, result.run.agent_id,
-                              result.run.seed, out_root=tmp,
-                              replay_from=result.run_dir)
-        replay_ok = (replay.run_id == result.run_id and filecmp.cmp(
-            os.path.join(result.run_dir, "decisions.jsonl"),
-            os.path.join(replay.run_dir, "decisions.jsonl"), shallow=False))
-
-    expected = config.get("expected_final_actions")
-    path_ok = expected is None or list(result.final_actions) == list(expected)
-    return {
-        "run_id": result.run_id,
-        "run_dir": os.path.relpath(result.run_dir, repo),
-        "final_actions": list(result.final_actions),
-        "validations": [
-            {"name": "offline_replay_byte_identical", "ok": replay_ok},
-            {"name": "expected_final_actions", "ok": path_ok,
-             "expected": expected, "got": list(result.final_actions)},
-        ],
-    }
-
-
-DRIVERS = {
-    "mock_experiment": _drive_mock,
-}
+def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
+                        limits: dict, measure_root: str,
+                        size_before_mb: float) -> dict:
+    """Spawn the child runner under the full limit set; return its outcome."""
+    deadline_seconds = 60 * min(limits["max_wall_minutes"],
+                                limits["max_compute_minutes"])
+    fd, result_file = tempfile.mkstemp(suffix=".json",
+                                       prefix="autonomy-outcome-")
+    os.close(fd)
+    try:
+        argv = [sys.executable, "-m", "tools.autonomy.child_runner",
+                "--repo", repo, "--config", config_path,
+                "--driver", driver_name,
+                "--deadline-seconds", str(deadline_seconds),
+                "--result-file", result_file]
+        _execute_bounded(argv, deadline_seconds, measure_root,
+                         limits["max_storage_mb"], size_before_mb,
+                         cwd=_PACKAGE_ROOT)
+        with open(result_file, encoding="utf-8") as fh:
+            result = json.load(fh)
+    finally:
+        try:
+            os.unlink(result_file)
+        except OSError:
+            pass
+    if not result.get("ok"):
+        raise RunnerRefusal(f"driver failed: {result.get('error')}")
+    return result["outcome"]
 
 
 # -------------------------------------------------------------- the runner
 
-def _limits(request: dict, task: dict) -> dict:
-    """Effective limits: the stricter of the request's autonomy block and
-    the roadmap task (a roadmap limit may be stricter than policy, never
-    larger — validated at roadmap load)."""
+def _limits(request: dict, task: dict, policy: dict) -> dict:
+    """ALL FIVE effective limits (audit blocker 2): the strictest of the
+    roadmap task (wall/storage), the request's autonomy block (all five,
+    when present), and the immutable policy caps (always)."""
+    caps = policy["auto_approval"]["limits"]
+    loops = policy["bounded_loops"]
     block = (request.get("autonomy") or {}).get("limits", {})
-    wall = min(task["maximum_runtime_minutes"],
-               block.get("max_wall_minutes", float("inf")))
-    store = min(task["maximum_storage_growth_mb"],
-                block.get("max_storage_mb", float("inf")))
-    return {"max_wall_minutes": wall, "max_storage_mb": store}
+
+    def eff(*values):
+        return min(v for v in values if v is not None)
+
+    return {
+        "max_wall_minutes": eff(task["maximum_runtime_minutes"],
+                                block.get("max_wall_minutes"),
+                                caps["max_wall_minutes"]),
+        "max_storage_mb": eff(task["maximum_storage_growth_mb"],
+                              block.get("max_storage_mb"),
+                              caps["max_storage_mb"]),
+        "max_compute_minutes": eff(block.get("max_compute_minutes"),
+                                   caps["max_compute_minutes"]),
+        "max_retries_per_unit": eff(block.get("max_retries_per_unit"),
+                                    loops["max_retries_per_unit"]),
+        "max_scenarios": eff(block.get("max_scenarios"),
+                             caps["max_scenarios"]),
+    }
 
 
 def run_task(cfg: Config, request_id: str, config_path: str,
@@ -148,20 +207,34 @@ def run_task(cfg: Config, request_id: str, config_path: str,
         return refuse([f"request {request_id!r} is in state {state!r} — "
                        f"runnable states are {RUNNABLE_STATES}"])
 
-    # ---- frozen experiment configuration, bit-for-bit
+    # ---- frozen experiment configuration, bit-for-bit, EVERY path
+    # (audit blocker 1): binding is verified before the config is parsed
+    # or a driver selected, human-approved requests included.
     autonomy = request.get("autonomy")
+    frozen_hash = (autonomy or {}).get("experiment_config_hash") \
+        or request.get("experiment_config_hash")
+    frozen_file = request.get("experiment_config_file")
+    if not frozen_hash or not frozen_file:
+        return refuse([
+            "request carries no frozen experiment config binding — every "
+            "run (human-approved included) must bind BOTH "
+            "experiment_config_hash and experiment_config_file; refusing "
+            "before reading any configuration"])
+    audited_path = os.path.realpath(os.path.join(repo, frozen_file))
+    if os.path.realpath(config_path) != audited_path:
+        return refuse([
+            f"--config {config_path!r} is not the audited config file "
+            f"{frozen_file!r} — the binding is canonical, not by content"])
     try:
         config_hash = _sha256_file(config_path)
     except OSError as exc:
         return refuse([f"experiment config unreadable: {exc}"])
-    if autonomy is not None and \
-            config_hash != str(autonomy["experiment_config_hash"]).replace(
-                "sha256:", ""):
+    if config_hash != str(frozen_hash).replace("sha256:", ""):
         return refuse([
             f"experiment config hash {config_hash[:12]} does not match the "
-            "request's frozen experiment_config_hash "
-            f"{str(autonomy['experiment_config_hash'])[:19]} — refusing to "
-            "run an unaudited configuration"])
+            f"request's frozen experiment_config_hash "
+            f"{str(frozen_hash)[:19]} — refusing to run an unaudited "
+            "configuration"])
     with open(config_path, encoding="utf-8") as fh:
         config = json.load(fh)
 
@@ -180,11 +253,26 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     if config.get("driver") != driver_name:
         return refuse([f"config driver {config.get('driver')!r} != task "
                        f"experiment_class {driver_name!r}"])
-    driver = DRIVERS.get(driver_name)
-    if driver is None:
+    if driver_name not in DRIVERS:
         return refuse([f"no driver implemented for {driver_name!r} — "
                        "implementing one is a separately audited change"])
-    limits = _limits(request, task)
+    limits = _limits(request, task, report.policy)
+
+    # ---- pre-launch cardinality (audit blocker 2): declared scenario and
+    # retry counts are part of the frozen config and checked BEFORE launch
+    cardinality_failures = []
+    for field, cap in (("scenario_count", "max_scenarios"),
+                       ("retries_per_unit", "max_retries_per_unit")):
+        declared = config.get(field)
+        if not isinstance(declared, int) or declared < 0:
+            cardinality_failures.append(
+                f"frozen config must declare {field} as a non-negative int")
+        elif declared > limits[cap]:
+            cardinality_failures.append(
+                f"declared {field} {declared} exceeds the effective limit "
+                f"{cap}={limits[cap]}")
+    if cardinality_failures:
+        return refuse(cardinality_failures)
 
     # ---- lifecycle: start
     events.append_event(
@@ -192,7 +280,7 @@ def run_task(cfg: Config, request_id: str, config_path: str,
         {"task_id": task["task_id"],
          "experiment_class": driver_name,
          "experiment_config_hash": config_hash,
-         "experiment_config_file": os.path.relpath(config_path, repo),
+         "experiment_config_file": frozen_file,
          "roadmap_hash": report.roadmap_hash,
          "policy_hash": report.policy_hash,
          "limits": limits})
@@ -201,10 +289,12 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     size_before = tree_size_mb(measure_root) if os.path.isdir(
         measure_root) else 0.0
     started = time.monotonic()
-    deadline = started + limits["max_wall_minutes"] * 60
 
     try:
-        outcome = driver(repo, config, deadline)
+        outcome = _run_driver_bounded(repo, config_path, driver_name,
+                                      limits, measure_root, size_before)
+    except RunnerRefusal as exc:
+        return refuse([str(exc)])
     except Exception as exc:
         return refuse([f"driver failed: {exc.__class__.__name__}: {exc}"])
 
@@ -265,7 +355,7 @@ def run_task(cfg: Config, request_id: str, config_path: str,
         f"`{outcome.get('run_dir')}` (relative to the repo)\n"
         f"- elapsed: {elapsed_min:.2f} min; storage growth: "
         f"{growth_mb:.2f} MB (limits {limits['max_wall_minutes']} min / "
-        f"{limits['max_storage_mb']} MB)\n"
+        f"{limits['max_storage_mb']} MB, killable-child enforced)\n"
         f"- validations: " + ", ".join(
             f"{v['name']}={'ok' if v.get('ok') else 'FAILED'}"
             for v in validations) + "\n\n"

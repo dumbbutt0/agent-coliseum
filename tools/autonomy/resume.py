@@ -148,6 +148,12 @@ def compute_resume(cfg: Config, roadmap_path: str | None = None) -> dict:
                           "next_action": f"start roadmap task {nxt!r}: "
                                          "record BUILD_STARTED under a fresh "
                                          "request id"}
+    elif out.get("roadmap", {}).get("human_gated_ready"):
+        gated = out["roadmap"]["human_gated_ready"]
+        out["current"] = {"request_id": None, "next_actor": "human",
+                          "next_action": "only human-gated task(s) are "
+                                         f"ready: {gated} — awaiting the "
+                                         "owner; nothing runs autonomously"}
     else:
         out["current"] = {"request_id": None, "next_actor": "human",
                           "next_action": "no live request and no eligible "

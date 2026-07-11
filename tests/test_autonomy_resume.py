@@ -109,3 +109,19 @@ def test_resume_render_names_the_next_actor(tmp_path):
     root, repo, head, cfg, rm_path = _base(tmp_path)
     text = resume.render(resume.compute_resume(cfg, rm_path))
     assert "NEXT: [claude]" in text
+
+
+def test_resume_never_recommends_a_human_gated_task(tmp_path):
+    """Audit finding 3: with only a human-gated task ready, resume must
+    hand the next action to the HUMAN, not recommend autonomous work."""
+    root = make_root(tmp_path)
+    repo, head = make_repo(tmp_path)
+    cfg = make_cfg(repo, root)
+    policy.write_initial_policy(root)
+    rm_path = write_roadmap(tmp_path,
+                            [task_fields(requires_human=True)])
+    out = resume.compute_resume(cfg, rm_path)
+    assert out["roadmap"]["eligible_tasks"] == []
+    assert out["roadmap"]["human_gated_ready"] == ["t-mock"]
+    assert out["current"]["next_actor"] == "human"
+    assert "t-mock" in out["current"]["next_action"]
