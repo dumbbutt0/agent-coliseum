@@ -1,0 +1,30 @@
+# Coliseum bounded autonomy: Codex audit auto-launcher.
+#
+# SHIPPED DISABLED. Install + enable ONLY after the dedicated council audit
+# of this capability returns GO and the owner has run the activation
+# ceremony (foreground --once idle check, then the STOP drill):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp tools/systemd/coliseum-codex-launcher.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now coliseum-codex-launcher
+#   loginctl enable-linger $USER        # survive logout/WSL restart
+#
+# Emergency stop: `touch <council>/STOP` (the launcher exits 0 and
+# Restart=on-failure will NOT resurrect it), or set the log.md STATUS line.
+
+[Unit]
+Description=Coliseum bounded-autonomy: Codex audit auto-launcher
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dummy/agent-coliseum
+Environment=PATH=/home/dummy/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -m tools.autonomy.cli codex-launcher --poll-seconds 15
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target

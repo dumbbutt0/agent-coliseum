@@ -19,3 +19,5 @@ runs/
 .DS_Store
 Thumbs.db
 merged.png
+# Launcher session logs (local diagnostics; WATCHER_ERROR payloads point here)
+logs/autonomy/

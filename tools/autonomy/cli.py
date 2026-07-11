@@ -139,6 +139,21 @@ def cmd_run_task(cfg, args) -> int:
                            roadmap_path=args.roadmap)
 
 
+def cmd_codex_launcher(cfg, args) -> int:
+    """Delegates to the launcher's own entrypoint, which builds a
+    codex-role config and holds the single-instance lock itself."""
+    from tools.autonomy import codex_launcher
+    argv = ["--poll-seconds", str(args.poll_seconds),
+            "--audit-timeout-seconds", str(args.audit_timeout_seconds)]
+    if args.once:
+        argv.append("--once")
+    if args.timeout_seconds is not None:
+        argv += ["--timeout-seconds", str(args.timeout_seconds)]
+    if args.max_launches is not None:
+        argv += ["--max-launches", str(args.max_launches)]
+    return codex_launcher.main(argv)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="autonomy")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -168,6 +183,14 @@ def main(argv=None) -> int:
                         "the request's experiment_config_hash)")
     s.add_argument("--roadmap", default=None)
     s.set_defaults(fn=cmd_run_task)
+
+    s = sub.add_parser("codex-launcher")
+    s.add_argument("--once", action="store_true")
+    s.add_argument("--poll-seconds", type=float, default=15.0)
+    s.add_argument("--timeout-seconds", type=float, default=None)
+    s.add_argument("--audit-timeout-seconds", type=float, default=3600.0)
+    s.add_argument("--max-launches", type=int, default=None)
+    s.set_defaults(fn=cmd_codex_launcher)
 
     args = parser.parse_args(argv)
     cfg = get_config(role=SENDER)

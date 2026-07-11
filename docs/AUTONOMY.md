@@ -117,17 +117,35 @@ purchases_or_spending, automatic_limit_increase, post_milestone_expansion)
 is validated at roadmap load — a task naming one never validates, and work
 discovered to require one pauses autonomy with the exact reason.
 
-## Cross-session continuity (v1 = resume, NOT durable autonomy)
+## Cross-session continuity (resume + the Codex audit auto-launcher)
 
-Owner correction 2 (2026-07-11): this version does NOT provide durable
-cross-session autonomy. After a crash or in a fresh Claude session, run
+After a crash or in a fresh Claude session, run
 `python3 -m tools.autonomy.cli resume` — it reconstructs, read-only and
 deterministically, every request's state and the exact next action from the
-event chain and the roadmap. A process that automatically LAUNCHES new
-writable Claude sessions is a recorded FUTURE capability: it must be
-committed separately and receive a dedicated Codex protocol audit before
-activation. Until then, a human (or an already-running session) starts each
-Claude work session; everything else in the loop is event-driven.
+event chain and the roadmap.
+
+The CODEX side is automated (separately audited capability, commit 2 of
+the launcher plan): `python3 -m tools.autonomy.cli codex-launcher` polls
+the chain and, for a request resting at `requested` (source audit) or
+`result_audit` (result audit), launches ONE bounded non-interactive
+`codex exec` session with a fixed argv, a sanitized environment, a hard
+timeout, and a prompt built exclusively from the root-of-trust-verified
+request (integrity failure pauses autonomy without launching). The Codex
+session claims and submits through `tools.council.codex_watch` itself, so
+codex-role events stay signed by Codex. The launcher then verifies
+advancement from the chain alone; a non-advancing session records
+WATCHER_ERROR and three consecutive failures per published cycle pause
+autonomy. STATUS/STOP, the paused flag, and the milestone stop it cleanly.
+Service unit (shipped disabled): `tools/systemd/coliseum-codex-launcher.
+service` — install only after this capability's own audit returns GO.
+Stateless: crash recovery is a restart; nothing depends on process memory.
+
+A process that automatically LAUNCHES new writable CLAUDE builder sessions
+remains a recorded FUTURE capability: it must be committed separately and
+receive a dedicated Codex protocol audit before activation (commit 3 of
+the launcher plan). Until then, a human (or an already-running session)
+starts each Claude work session; everything else in the loop is
+event-driven.
 
 ## Protocol integrity
 

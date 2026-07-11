@@ -52,6 +52,31 @@ def test_refused_publish_leaves_no_orphan_in_ready(env):
     assert not os.path.exists(storage.safe_request_path(root, "ready", other))
 
 
+def test_published_source_request_stores_task_kind_explicitly(env):
+    """council-protocol-delta-001 cycle-4 deferred regression: a source
+    request published through the real path stores task_kind: source in the
+    canonical file, covered by the pinned payload hash."""
+    root, repo, head, cfg = env
+    event = publish.publish_request(
+        root, cfg, make_request(repo, head, RID, task_kind="source"))
+    stored = json.load(open(storage.safe_request_path(root, "ready", RID),
+                            encoding="utf-8"))
+    assert stored["task_kind"] == "source"
+    from tools.council.schemas import compute_request_payload_hash
+    assert compute_request_payload_hash(stored) \
+        == event["payload"]["request_payload_hash"]
+
+
+def test_legacy_publish_without_task_kind_defaults_to_experiment(env):
+    """Backward compatibility is intentional: absence of task_kind means
+    experiment routing (all pre-delta requests keep their behavior)."""
+    root, repo, head, cfg = env
+    publish.publish_request(root, cfg, make_request(repo, head, RID))
+    stored = json.load(open(storage.safe_request_path(root, "ready", RID),
+                            encoding="utf-8"))
+    assert "task_kind" not in stored
+
+
 def test_reaudit_flag_emits_ready_for_reaudit(env):
     root, repo, head, cfg = env
     event = publish.publish_request(root, cfg,

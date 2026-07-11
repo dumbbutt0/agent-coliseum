@@ -79,14 +79,22 @@ def _sha256_file(path: str) -> str:
 
 def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
                      storage_cap_mb: float, size_before_mb: float,
-                     cwd: str) -> None:
+                     cwd: str, stdout=None, stderr=None, env=None) -> None:
     """Run argv as a killable child: hard-kill on the wall/compute deadline
     or when monitored storage growth exceeds the cap (audit blocker 2).
-    Raises RunnerRefusal with the exact reason on any kill or nonzero exit."""
-    env = dict(os.environ)
+    Raises RunnerRefusal with the exact reason on any kill or nonzero exit.
+
+    stdout/stderr: open file handles for long-lived children whose output
+    would otherwise fill the PIPE buffers (default keeps the PIPE capture).
+    env: a SANITIZED environment for launcher children (default inherits
+    the parent environment, unchanged behavior); PYTHONPATH always gains
+    cwd so tools/ imports resolve."""
+    env = dict(os.environ) if env is None else dict(env)
     env["PYTHONPATH"] = cwd + os.pathsep + env.get("PYTHONPATH", "")
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=env)
+    proc = subprocess.Popen(
+        argv, cwd=cwd,
+        stdout=subprocess.PIPE if stdout is None else stdout,
+        stderr=subprocess.PIPE if stderr is None else stderr, env=env)
     started = time.monotonic()
     try:
         while True:
@@ -113,8 +121,10 @@ def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
             proc.kill()
             proc.wait()
     if rc != 0:
-        stderr = proc.stderr.read().decode("utf-8", "replace")[-500:]
-        raise RunnerRefusal(f"child exited {rc}: {stderr.strip()}")
+        if stderr is None:
+            tail = proc.stderr.read().decode("utf-8", "replace")[-500:]
+            raise RunnerRefusal(f"child exited {rc}: {tail.strip()}")
+        raise RunnerRefusal(f"child exited {rc} (stderr in the log file)")
 
 
 def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
