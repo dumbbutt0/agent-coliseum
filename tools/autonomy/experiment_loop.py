@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 import yaml
 
@@ -68,37 +69,75 @@ def _registry(repo: str) -> dict:
         return yaml.safe_load(fh)
 
 
+def _terminal_states() -> set:
+    """States from which a loop request cannot progress further. An experiment
+    with only terminal attempts is NOT in flight."""
+    return state_machine.TERMINAL_STATES | {"integrated", "result_approved",
+                                            "next_milestone_ready"}
+
+
+def _attempt_rids(proj: dict, eid: str) -> dict:
+    """Every loop request id for this experiment: the base id plus any
+    numeric-suffixed re-attempts (autoloop-<eid>, autoloop-<eid>-002, ...).
+    The numeric-only suffix keeps 'm6-x' from matching 'm6-x-extra'."""
+    base = _PREFIX + eid
+    pat = re.compile("^" + re.escape(base) + r"(-\d{3,})?$")
+    return {rid: r for rid, r in proj.items() if pat.match(rid)}
+
+
+def _experiment_in_flight(proj: dict, eid: str, terminal: set) -> bool:
+    """True iff any of this experiment's loop attempts is still non-terminal —
+    it must be finished before a fresh attempt starts."""
+    for _rid, r in _attempt_rids(proj, eid).items():
+        state = r.get("state")
+        if state is not None and state not in terminal:
+            return True
+    return False
+
+
+def next_request_id(proj: dict, eid: str) -> str:
+    """The request id for this experiment's NEXT attempt. The base id for a
+    first attempt; the lowest free numeric suffix if prior attempts exist
+    (they are terminal — _experiment_in_flight already gated on that). The
+    append-only chain makes a canceled attempt's id immutable, so a re-attempt
+    MUST use a fresh id rather than reopen the terminal one."""
+    base = _PREFIX + eid
+    existing = _attempt_rids(proj, eid)
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}-{n:03d}" in existing:
+        n += 1
+    return f"{base}-{n:03d}"
+
+
 def select_next_experiment(root: str, repo: str):
     """The next PRE-REGISTERED experiment that has a committed run config, is
-    not already complete, and has no in-flight loop request. Returns
-    (experiment_id, config_path) or None. Deterministic (registry order)."""
+    not registry-complete, and has no IN-FLIGHT loop attempt. Returns
+    (experiment_id, config_path) or None. Deterministic (registry order).
+
+    A prior terminal-but-unsuccessful attempt (e.g. a `canceled` request) does
+    NOT orphan the experiment — it stays eligible for a fresh attempt under a
+    disambiguated request id (chosen by next_request_id in publish_next).
+    Eligibility is unchanged: registered + frozen config + nothing in flight;
+    this only stops a cancel from becoming a permanent dead-end."""
     reg = _registry(repo)
-    by_id = {e["experiment_id"]: e for e in reg["experiments"]}
     configs = _load_configs(repo)
-    chain = events.read_chain(root)
-    proj = state_machine.project(chain)
-    terminal = state_machine.TERMINAL_STATES | {"integrated",
-                                                "result_approved",
-                                                "next_milestone_ready"}
+    proj = state_machine.project(events.read_chain(root))
+    terminal = _terminal_states()
+    # 1. finish any in-flight experiment before proposing another
     for e in reg["experiments"]:
         eid = e["experiment_id"]
         if e.get("status") != "pre-registered" or eid not in configs:
             continue
-        rid = _PREFIX + eid
-        state = proj.get(rid, {}).get("state")
-        if state is not None and state not in terminal:
-            return None   # an experiment is already in flight; finish it first
+        if _experiment_in_flight(proj, eid, terminal):
+            return None
+    # 2. the first registered, not-complete, not-in-flight experiment is next
     for e in reg["experiments"]:
         eid = e["experiment_id"]
         if e.get("status") != "pre-registered" or eid not in configs:
             continue
-        rid = _PREFIX + eid
-        if proj.get(rid, {}).get("state") in (None,) \
-                or proj.get(rid, {}).get("state") in terminal:
-            if by_id[eid].get("status") == "complete":
-                continue
-            if proj.get(rid) is None:      # never attempted
-                return eid, configs[eid][0]
+        return eid, configs[eid][0]
     return None
 
 
@@ -124,11 +163,12 @@ def build_autonomy_block(config: dict, config_path: str, roadmap_task: dict) -> 
 
 def build_run_request(repo: str, head: str, roadmap_hash: str, eid: str,
                       config_path: str, config: dict,
-                      roadmap_task: dict) -> dict:
+                      roadmap_task: dict, request_id: str | None = None) -> dict:
     """The auto-approve (human_approval_required: false) run request for a
     registered experiment. The immutable policy re-checks EVERY field before
-    AUTO_APPROVED; this is a proposal, not an approval."""
-    rid = _PREFIX + eid
+    AUTO_APPROVED; this is a proposal, not an approval. `request_id` defaults to
+    the base id; a re-attempt passes a disambiguated one (next_request_id)."""
+    rid = request_id or (_PREFIX + eid)
     rel_config = os.path.relpath(config_path, repo)
     return {
         "request_id": rid, "task_kind": "experiment", "repository": repo,
@@ -193,9 +233,10 @@ def publish_next(root, cfg, repo: str, head: str, roadmap, roadmap_hash: str):
     eid, config_path = picked
     config = _read_json(config_path)
     task = roadmap_mod.task_by_id(roadmap, config["task_id"])
+    proj = state_machine.project(events.read_chain(root))
+    rid = next_request_id(proj, eid)
     request = build_run_request(repo, head, roadmap_hash, eid, config_path,
-                                config, task)
-    rid = request["request_id"]
+                                config, task, request_id=rid)
     events.append_event(root, cfg, "BUILD_STARTED", SENDER, rid, repo, head,
                         {"purpose": f"autonomous loop: {eid}"})
     events.append_event(root, cfg, "BUILD_READY", SENDER, rid, repo, head,
