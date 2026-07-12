@@ -180,6 +180,37 @@ def test_human_approved_path_with_binding_runs(tmp_path):
     assert _state(root, RID) == "result_audit"
 
 
+def test_ollama_local_without_registered_design_is_refused(tmp_path):
+    """M7b eligibility: a LIVE ollama_local experiment MUST bind a registered
+    design (design_hash) — an unregistered live experiment cannot run (so it can
+    never auto-run). The refusal fires before any model call."""
+    import json
+    from tests.autonomy_util import task_fields, write_roadmap
+    # an ollama_local roadmap task (not human-gated) + a config with NO design_hash
+    ol_task = task_fields(task_id="t-ol", experiment_class="ollama_local",
+                          status="active")
+    roadmap_path = write_roadmap(tmp_path, [ol_task])
+    config = {"task_id": "t-ol", "driver": "ollama_local",
+              "scenario_count": 1, "retries_per_unit": 0,
+              "out_root": "logs/runs", "models": ["llama3.1:latest"],
+              "scenarios": ["corrupt_king"], "seeds": [1],
+              "sampler_seeds": None, "temperature": 0.0,
+              "manifest": "logs/runs/x/m.jsonl"}
+    cfg_path = str(tmp_path / "ol.json")
+    body = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    open(cfg_path, "w").write(body)
+    import hashlib
+    cfg_sha = hashlib.sha256(body.encode()).hexdigest()
+    root, repo, head, cfg = _drive_to_human_approved(
+        tmp_path, cfg_path, cfg_sha, roadmap_path)
+    code = runner.run_task(cfg, RID, cfg_path, roadmap_path=roadmap_path)
+    assert code == 1
+    last = events.read_chain(root)[-1]
+    assert last["event_type"] == "AUTONOMY_PAUSED"
+    assert "must bind a registered design" in last["payload"]["reason"]
+    assert "EXPERIMENT_STARTED" not in _event_types(root)
+
+
 # --------------------------------------- blocker 1: unconditional binding
 
 def test_human_approved_without_binding_refused_before_driver(

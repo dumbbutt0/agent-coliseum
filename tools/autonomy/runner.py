@@ -383,6 +383,14 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     # scenarios, seeds, sampler seeds, temperature, pinned digests, held-out,
     # run-count) before a single model is called. Configs with no design_hash
     # (e.g. the mock pipeline probe) carry no pre-registration to bind.
+    # M7b eligibility: a LIVE experiment (ollama_local) MUST bind a registered
+    # pre-registration — an unregistered live experiment can never run, so it
+    # can never AUTO-run either (the provenance gate is not optional for it).
+    if driver_name == "ollama_local" and not config.get("design_hash"):
+        return refuse([
+            "ollama_local experiments must bind a registered design "
+            "(design_hash) that lint_experiment_config validates — an "
+            "unregistered live experiment cannot run"])
     if config.get("design_hash"):
         from coliseum.textlab.registry import lint_experiment_config
         registry_path = os.path.join(
