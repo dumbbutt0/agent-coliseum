@@ -34,6 +34,14 @@ EXPERIMENT_STATUSES = ("exploratory", "pilot-demoted", "legacy-demoted",
 VALIDATION_TIERS = ("full", "legacy")
 GENERALIZATION_LEVELS = ("L1", "L2", "L3", "L4")
 
+# Research claim lifecycle (SPEC §5, owner-ratified SC-3): the ladder every
+# empirical claim climbs. `demoted`/`refuted` are first-class (the sweep-v2
+# and full-audit withdrawals are the precedent); `accepted` REQUIRES an
+# independent finding audit; paper drafts may cite `accepted` only.
+CLAIMS_REGISTRY_VERSION = "1"
+CLAIM_STATES = ("speculation", "observation", "replicated", "generalized",
+                "accepted", "refuted", "demoted")
+
 
 def entry_hash(entry: dict) -> str:
     """sha256 over the canonical entry with entry_hash itself excluded."""
@@ -151,4 +159,83 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
                               f"{str(e.get('entry_hash'))[:16]}… != "
                               f"recomputed {want[:16]}… (a frozen entry "
                               "changes only via an audited re-hash)")
+    return issues
+
+# ------------------------------------------------------------- claims (M5)
+
+def load_claims_registry(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    if not isinstance(raw, dict) or "claims" not in raw:
+        raise SchemaError(f"{os.path.basename(path)}: registry must be a "
+                          "mapping with a 'claims' list")
+    if raw.get("registry_version") != CLAIMS_REGISTRY_VERSION:
+        raise SchemaError(f"unsupported claims registry_version "
+                          f"{raw.get('registry_version')!r}")
+    return raw
+
+
+def lint_claims_registry(claims_path: str, experiments_path: str,
+                         repo_root: str) -> list:
+    """Machine-check the claim ladder (SPEC §5). Returns issue strings.
+
+    - state in CLAIM_STATES; claim_ids unique;
+    - every evidence experiment_id resolves in the experiment registry, and
+      a claim may cite a DEMOTED dataset only while at
+      speculation/observation/demoted/refuted (demoted evidence can never
+      carry a claim up the ladder);
+    - `replicated`+ requires >=2 distinct evidence experiments (or an
+      explicit preregistered_replication_of link);
+    - `accepted` requires a finding_audit reference (the independent Codex
+      audit of the CLAIM);
+    - `demoted`/`refuted` require a reason and the former state;
+    - statement text present and non-empty for every claim.
+    """
+    issues = []
+    try:
+        raw = load_claims_registry(claims_path)
+        exp_raw = load_experiments_registry(experiments_path)
+    except (SchemaError, OSError, yaml.YAMLError) as exc:
+        return [f"registry unreadable: {exc}"]
+    exp_by_id = {e["experiment_id"]: e for e in exp_raw["experiments"]}
+    citable_exp = {eid for eid, e in exp_by_id.items()
+                   if e.get("status") in ("pre-registered", "complete")}
+
+    ids = [c.get("claim_id") for c in raw["claims"]]
+    for cid in {i for i in ids if ids.count(i) > 1}:
+        issues.append(f"duplicate claim entry {cid!r}")
+
+    for c in raw["claims"]:
+        cid = c.get("claim_id", "?")
+        state = c.get("state")
+        if state not in CLAIM_STATES:
+            issues.append(f"{cid}: state {state!r} not in {CLAIM_STATES}")
+            continue
+        if not (c.get("statement") or "").strip():
+            issues.append(f"{cid}: empty statement")
+        evidence = c.get("evidence") or []
+        for eid in evidence:
+            if eid not in exp_by_id:
+                issues.append(f"{cid}: evidence experiment {eid!r} is not "
+                              "registered")
+            elif eid not in citable_exp and state in (
+                    "replicated", "generalized", "accepted"):
+                issues.append(f"{cid}: state {state!r} cites non-citable "
+                              f"(demoted) evidence {eid!r} — demoted "
+                              "evidence can never carry a claim up the "
+                              "ladder")
+        if state in ("replicated", "generalized", "accepted"):
+            if len(set(evidence) & citable_exp) < 2 and not \
+                    c.get("preregistered_replication_of"):
+                issues.append(f"{cid}: {state!r} requires >=2 citable "
+                              "evidence experiments or an explicit "
+                              "preregistered_replication_of link")
+        if state == "accepted" and not c.get("finding_audit"):
+            issues.append(f"{cid}: 'accepted' requires a finding_audit "
+                          "reference (the independent audit of the claim)")
+        if state in ("demoted", "refuted"):
+            if not c.get("reason"):
+                issues.append(f"{cid}: {state!r} requires a reason")
+            if not c.get("former_state"):
+                issues.append(f"{cid}: {state!r} requires former_state")
     return issues
