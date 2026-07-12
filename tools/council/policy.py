@@ -80,6 +80,126 @@ DEFAULT_POLICY = {
 }
 
 
+# ---------------------------------------------------------------- versioning
+# The policy is immutable EXCEPT through an owner-token-gated POLICY_AMENDED
+# event. Every reachable policy state is a CODE-DEFINED version here, so an
+# agent can neither edit the file (breaks the effective-pin hash) nor inject an
+# arbitrary policy (only these audited versions exist). Version 1 is the
+# original pinned policy — it carries NO policy_version field, so absent == 1
+# and the live pinned hash is preserved. Version 2 (M7/SC-7) adds ollama_local
+# + its registered local data source and nothing else.
+def _amended_v2() -> dict:
+    v2 = json.loads(json.dumps(DEFAULT_POLICY))
+    v2["policy_version"] = 2
+    v2["amends"] = 1
+    v2["auto_approval"]["allowed_experiment_classes"] = \
+        ["sandbox_local", "ollama_local"]
+    v2["auto_approval"]["allowed_data_sources"] = ["synthetic", "local_model"]
+    return v2
+
+
+POLICY_VERSIONS = {1: DEFAULT_POLICY, 2: _amended_v2()}
+
+
+_VOLATILE = ("created_utc", "amended_utc")
+
+
+def _content(policy: dict) -> dict:
+    """Policy minus volatile timestamps — the audited semantic content."""
+    return {k: v for k, v in policy.items() if k not in _VOLATILE}
+
+
+def content_hash(policy: dict) -> str:
+    return payload_hash(_content(policy))
+
+
+def policy_version_of(policy: dict) -> int:
+    """Absent policy_version == 1 (the original pinned policy predates the
+    field); otherwise the declared integer version."""
+    v = policy.get("policy_version", 1)
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        raise SchemaViolation(f"invalid policy_version {v!r}")
+    return v
+
+
+def is_code_defined_version(policy: dict) -> bool:
+    """The live policy's SEMANTIC content must equal a code-defined (audited)
+    version — so an owner amendment can only move between reviewed policies,
+    never install an arbitrary one."""
+    v = policy_version_of(policy)
+    return v in POLICY_VERSIONS and \
+        content_hash(policy) == content_hash(POLICY_VERSIONS[v])
+
+
+def effective_policy_pin(chain: list):
+    """(hash, version) the policy file must currently match, by walking the
+    OWNER-AUTHORIZED amendment chain: the first POLICY_INITIALIZED pins v1, then
+    each POLICY_AMENDED advances the pin IFF it binds prev_policy_hash == the
+    current pin AND new version == current version + 1 (monotonic). Hashes are
+    the FULL file hashes (bare payload_hash, incl. timestamps) so this composes
+    with the existing pin. POLICY_AMENDED is human-token-only (verified at
+    append), so an agent cannot advance the pin — it cannot expand its own
+    authority. A malformed/non-monotonic amendment STOPS the walk (fail closed:
+    the pin never advances past an invalid link). (None, None) before any pin."""
+    # base pin: the first event carrying a policy_hash (v1) — preserves the
+    # pre-M7 behaviour; version 1 has no policy_version field
+    pin = pinned_policy_hash(chain)
+    version = 1 if pin is not None else None
+    for e in chain:
+        if e.get("event_type") != "POLICY_AMENDED":
+            continue
+        p = e.get("payload", {}) or {}
+        if pin is None or p.get("prev_policy_hash") != pin:
+            break
+        nv = p.get("policy_version")
+        if not isinstance(nv, int) or isinstance(nv, bool) \
+                or nv != version + 1 or not p.get("policy_hash"):
+            break
+        pin, version = p.get("policy_hash"), nv
+    return pin, version
+
+
+def amend_policy(root: str, target_version: int) -> tuple:
+    """Write the code-defined POLICY_VERSIONS[target_version] over the current
+    file — the ONLY sanctioned overwrite path, used exclusively by the CLI
+    `amend-policy` command alongside recording an owner-token POLICY_AMENDED.
+    Verifies the current file's CONTENT is exactly the previous code-defined
+    version before writing (fail closed). Returns (prev_hash, new_hash, diff)
+    where the hashes are the FULL file hashes (what the event pins)."""
+    if target_version not in POLICY_VERSIONS or target_version < 2:
+        raise SchemaViolation(f"no amendable policy version {target_version}")
+    prev, new = POLICY_VERSIONS[target_version - 1], POLICY_VERSIONS[target_version]
+    path = storage.policy_path(root)
+    current, prev_hash = load_policy(root)
+    if not (policy_version_of(current) == target_version - 1
+            and content_hash(current) == content_hash(prev)):
+        raise SchemaViolation(
+            f"current policy is not code-defined version {target_version - 1} "
+            "— refusing to amend from an unknown base")
+    written = dict(new, created_utc=current.get("created_utc"),
+                   amended_utc=storage.utc_now())
+    try:  # the file was made read-only at init; restore write to overwrite
+        os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+    except OSError:
+        pass
+    storage.atomic_write_json(path, written)
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except OSError:
+        pass
+    _new, new_hash = load_policy(root)
+    return prev_hash, new_hash, _policy_diff(_content(prev), _content(new))
+
+
+def _policy_diff(old: dict, new: dict) -> dict:
+    """Minimal semantic diff of the two auto_approval-bearing policies."""
+    diff = {}
+    for k in sorted(set(old) | set(new)):
+        if old.get(k) != new.get(k):
+            diff[k] = {"old": old.get(k), "new": new.get(k)}
+    return diff
+
+
 @dataclass
 class PolicyDecision:
     auto_approve: bool
@@ -154,9 +274,20 @@ def evaluate(root: str, cfg: Config, request: dict, verdict_event: dict,
     except SchemaViolation as exc:
         cond("policy_installed", False, str(exc))
     if policy is not None:
-        pinned = pinned_policy_hash(chain)
-        cond("policy_unchanged", pinned is None or pinned == policy_hash,
+        # the file must match the effective pin — the latest OWNER-authorized
+        # policy state after walking the POLICY_INITIALIZED + POLICY_AMENDED
+        # chain (agents can't record either) — AND be a code-defined version
+        eff_hash, eff_version = effective_policy_pin(chain)
+        cond("policy_unchanged", eff_hash is None or eff_hash == policy_hash,
              "autonomy policy file changed since it was pinned in the chain")
+        try:
+            known = is_code_defined_version(policy)
+        except SchemaViolation:
+            known = False
+        cond("policy_is_code_defined_version",
+             known and (eff_version is None
+                        or policy_version_of(policy) == eff_version),
+             "running policy is not the owner-authorized code-defined version")
 
     # emergency stop precedes everything
     stop = storage.emergency_stop_reason(root)

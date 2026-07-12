@@ -77,6 +77,7 @@ EVENT_TYPES = (
     # they never touch request state)
     "STATUS_CHANGED",
     "POLICY_INITIALIZED",
+    "POLICY_AMENDED",
     "HUMAN_IDENTITY_INITIALIZED",
     "HUMAN_IDENTITY_ROTATED",
     # H4: human-token blessing of a specific legacy/nonconforming event so
@@ -119,6 +120,7 @@ SENDER_ALLOWED = {
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
     "STATUS_CHANGED": frozenset({"human"}),
     "POLICY_INITIALIZED": frozenset({"human"}),
+    "POLICY_AMENDED": frozenset({"human"}),
     "HUMAN_IDENTITY_INITIALIZED": frozenset({"human"}),
     "HUMAN_IDENTITY_ROTATED": frozenset({"human"}),
     "MIGRATION_APPROVED": frozenset({"human"}),
@@ -131,8 +133,8 @@ SENDER_ALLOWED = {
 # is self-pinning (it CREATES the chain) and needs no token.
 HUMAN_TOKEN_REQUIRED_EVENT_TYPES = frozenset({
     "EXPERIMENT_APPROVED", "CONDITIONS_SATISFIED", "REQUEST_CANCELED",
-    "STATUS_CHANGED", "POLICY_INITIALIZED", "HUMAN_IDENTITY_ROTATED",
-    "MIGRATION_APPROVED",
+    "STATUS_CHANGED", "POLICY_INITIALIZED", "POLICY_AMENDED",
+    "HUMAN_IDENTITY_ROTATED", "MIGRATION_APPROVED",
 })
 
 # H1: bootstrap/control events appendable while the CONTROL record pauses
@@ -708,6 +710,13 @@ AUTONOMY_BLOCK_REQUIRED_FIELDS = (
     "model_digests", "limits", "offline_replay_supported",
 )
 
+# STRUCTURALLY known autonomy classes/data sources. The immutable policy
+# decides which are auto-APPROVABLE (v1: sandbox_local+synthetic only; the
+# owner's M7/SC-7 v2 amendment adds ollama_local + local_model). Adding a class
+# or source here is a code change; ALLOWING it is an owner policy amendment.
+KNOWN_AUTONOMY_CLASSES = frozenset({"sandbox_local", "ollama_local"})
+KNOWN_AUTONOMY_DATA_SOURCES = frozenset({"synthetic", "local_model"})
+
 AUTONOMY_LIMIT_FIELDS = (
     "max_compute_minutes", "max_wall_minutes", "max_storage_mb",
     "max_retries_per_unit", "max_scenarios",
@@ -726,16 +735,23 @@ def validate_autonomy_block(autonomy) -> None:
     missing = [f for f in AUTONOMY_BLOCK_REQUIRED_FIELDS if f not in autonomy]
     if missing:
         raise SchemaViolation(f"autonomy block missing fields: {missing}")
-    if autonomy["experiment_class"] != "sandbox_local":
+    # STRUCTURAL validity only — the class/source must be KNOWN; whether it is
+    # ALLOWED (sandbox_local under v1, +ollama_local after the owner's v2
+    # amendment) is enforced by policy.evaluate against the immutable policy.
+    if autonomy["experiment_class"] not in KNOWN_AUTONOMY_CLASSES:
         raise SchemaViolation(
-            "autonomy is only defined for experiment_class 'sandbox_local'")
+            f"unknown autonomy experiment_class "
+            f"{autonomy['experiment_class']!r} (known: "
+            f"{sorted(KNOWN_AUTONOMY_CLASSES)})")
     if not _SHA256_RE.match(str(autonomy["experiment_config_hash"])):
         raise SchemaViolation(
             "experiment_config_hash must be a frozen sha256 hex digest")
     sources = autonomy["data_sources"]
     if not isinstance(sources, list) or not sources or \
-            any(s != "synthetic" for s in sources):
-        raise SchemaViolation("autonomy data_sources must be ['synthetic']")
+            any(s not in KNOWN_AUTONOMY_DATA_SOURCES for s in sources):
+        raise SchemaViolation(
+            "autonomy data_sources must be a non-empty subset of "
+            f"{sorted(KNOWN_AUTONOMY_DATA_SOURCES)}")
     digests = autonomy["model_digests"]
     if not isinstance(digests, dict) or not digests or \
             any(not _SHA256_RE.match(str(d)) for d in digests.values()):

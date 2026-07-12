@@ -80,7 +80,7 @@ TRANSITIONS = {
 # events that never change request state (control/identity events use
 # synthetic request ids and carry no request authority)
 STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
-                              "POLICY_INITIALIZED",
+                              "POLICY_INITIALIZED", "POLICY_AMENDED",
                               "HUMAN_IDENTITY_INITIALIZED",
                               "HUMAN_IDENTITY_ROTATED",
                               "MIGRATION_APPROVED"})

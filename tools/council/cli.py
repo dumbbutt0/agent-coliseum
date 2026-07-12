@@ -106,6 +106,34 @@ def cmd_init_policy(args) -> int:
     return 0
 
 
+def cmd_amend_policy(args) -> int:
+    """Owner-only, token-gated policy amendment (M7/SC-7). Writes the code-
+    defined POLICY_VERSIONS[target] over the current file and records a
+    POLICY_AMENDED event binding {prev hash, new hash, exact version, semantic
+    diff, audited implementation commit, owner token}. Agents cannot mint the
+    token, so they cannot amend — the amendment mechanism does not let an
+    autonomous agent expand its own authority."""
+    if args.role != "human":
+        raise SchemaViolation("amend-policy is an owner action: --role human")
+    cfg, root = _cfg(args)
+    impl_commit = validate_commit(args.impl_commit)
+    prev_hash, new_hash, diff = policy.amend_policy(root, args.target_version)
+    payload_core = {"policy_hash": new_hash, "prev_policy_hash": prev_hash,
+                    "policy_version": args.target_version,
+                    "policy_diff": diff, "impl_commit": impl_commit,
+                    "policy_file": storage.POLICY_FILE}
+    token = _maybe_human_token(root, args, "POLICY_AMENDED",
+                               CONTROL_RID, impl_commit, payload_core)
+    event = events.append_event(root, cfg, "POLICY_AMENDED", "human",
+                                CONTROL_RID, cfg.repo_roots[0], impl_commit,
+                                _with_token(payload_core, token))
+    print(f"policy amended to version {args.target_version}\n"
+          f"prev_hash: {prev_hash}\nnew_hash:  {new_hash}\n"
+          f"diff: {diff}\npinned by event {event['event_id']} "
+          f"(impl_commit {impl_commit[:12]})")
+    return 0
+
+
 def cmd_status(args) -> int:
     _cfg_, root = _cfg(args)
     chain = events.read_chain(root)
@@ -632,6 +660,11 @@ def main(argv=None) -> int:
 
     sub.add_parser("init")
     sub.add_parser("init-policy")
+    p = sub.add_parser("amend-policy")
+    p.add_argument("--target-version", type=int, required=True)
+    p.add_argument("--impl-commit", required=True,
+                   help="the audited commit that introduced this policy version")
+    p.add_argument("--token-file", default=None)
     sub.add_parser("status")
     sub.add_parser("verify-chain")
     sub.add_parser("rebuild-state")
@@ -711,6 +744,7 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     handlers = {"init": cmd_init, "init-policy": cmd_init_policy,
+                "amend-policy": cmd_amend_policy,
                 "status": cmd_status, "show": cmd_show,
                 "verify-chain": cmd_verify_chain,
                 "rebuild-state": cmd_rebuild_state,
