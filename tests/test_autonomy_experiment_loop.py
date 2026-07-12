@@ -96,14 +96,28 @@ def test_canceled_attempt_does_not_orphan_experiment(tmp_path, monkeypatch):
     assert loop._attempt_rids(other, eid) == {}
 
 
-def _stub_chain_proj(monkeypatch, chain, proj, halt=False):
-    """Point experiment_loop at a synthetic chain + projection + halt state so
-    retry-safety paths can be exercised hermetically against the real registry."""
+def _stub_chain_proj(monkeypatch, chain, proj, halt=False,
+                     authority_valid=True, prior_cfg_hash=None):
+    """Point experiment_loop at a synthetic chain + projection + halt state, and
+    stub the council authority layer + predecessor request lookup so retry-safety
+    paths run hermetically against the real registry."""
     import tools.autonomy.experiment_loop as L
     monkeypatch.setattr(L.events, "read_chain", lambda *a, **k: chain)
     monkeypatch.setattr(L.state_machine, "project", lambda c: proj)
     monkeypatch.setattr(L, "_active_halt", lambda root, p: halt)
+    monkeypatch.setattr(
+        L.state_machine, "authority_status",
+        lambda c: {rid: {"authority_valid": authority_valid,
+                         "quarantined": False} for rid in proj})
+    monkeypatch.setattr(L.publish, "read_request",
+                        lambda root, rid: {"experiment_config_hash":
+                                           prior_cfg_hash})
     return L
+
+
+def _real_cfg_hash(eid):
+    import tools.autonomy.experiment_loop as L
+    return L._sha256_file(L._load_configs(REAL_REPO)[eid][0])
 
 
 def _cancel(rid, sender="claude", eid_events=None):
@@ -111,8 +125,16 @@ def _cancel(rid, sender="claude", eid_events=None):
             "event_id": f"evt-{rid}", "sender": sender, "payload": {}}
 
 
+def _go(rid):
+    """A codex-emitted AUDIT_GO — the non-self-assertable authority the loop
+    (role claude) cannot forge: validate_sender refuses a claude AUDIT_GO."""
+    return {"request_id": rid, "event_type": "AUDIT_GO",
+            "event_id": f"go-{rid}", "sender": "codex", "payload": {}}
+
+
 def _approved(rid):
-    """The policy-gated AUTO_APPROVED authority event (unforgeable per M7a)."""
+    """A claude-emitted AUTO_APPROVED — directly appendable, so NOT sufficient
+    authority for a retry on its own."""
     return {"request_id": rid, "event_type": "AUTO_APPROVED",
             "event_id": f"appr-{rid}", "sender": "claude", "payload": {}}
 
@@ -131,14 +153,17 @@ def test_classify_reason_awareness():
     assert L.classify_prior_attempt(
         [{"request_id": rid, "event_type": "AUDIT_BLOCKED",
           "event_id": "e1", "sender": "codex"}], rid) == "audit_blocked"
-    # owner cancellation of an approved attempt -> owner_directed
+    # owner cancellation of a GO'd attempt -> owner_directed
     assert L.classify_prior_attempt(
-        [_approved(rid), _cancel(rid, "human")], rid) == "owner_directed"
-    # policy-approved then a loop cancel, pre-execution -> the ONLY retryable path
+        [_go(rid), _cancel(rid, "human")], rid) == "owner_directed"
+    # a codex GO then a loop cancel, pre-execution -> the ONLY retryable path
     assert L.classify_prior_attempt(
-        [_approved(rid), _cancel(rid, "claude")], rid) \
-        == "pre_execution_retryable"
-    # a Claude cancel WITHOUT policy approval -> NOT retryable (the Codex hole)
+        [_go(rid), _cancel(rid, "claude")], rid) == "pre_execution_retryable"
+    # a bare claude AUTO_APPROVED (no codex GO) + cancel -> NOT retryable: the
+    # loop cannot self-assert authority (the exact Codex-found hole)
+    assert L.classify_prior_attempt(
+        [_approved(rid), _cancel(rid, "claude")], rid) == "other"
+    # a Claude cancel with no verdict at all -> NOT retryable
     assert L.classify_prior_attempt([_cancel(rid, "claude")], rid) == "other"
     # nothing we understand -> other (fail-closed)
     assert L.classify_prior_attempt(
@@ -177,10 +202,12 @@ def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
     eid, _ = __import__("tools.autonomy.experiment_loop", fromlist=["x"]) \
         .select_next_experiment(root, REAL_REPO)
     base = "autoloop-" + eid
-    # a policy-approved attempt aborted pre-execution (the B1 lifecycle)
-    chain = [_approved(base), _cancel(base, "claude")]
+    # a codex-GO'd attempt aborted pre-execution (the B1 lifecycle), authority
+    # valid, config unchanged
+    chain = [_go(base), _cancel(base, "claude")]
     proj = {base: {"state": "canceled"}}
-    L = _stub_chain_proj(monkeypatch, chain, proj)
+    L = _stub_chain_proj(monkeypatch, chain, proj,
+                         prior_cfg_hash=_real_cfg_hash(eid))
     rid, lineage = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid == f"{base}-002"
     assert lineage["reason_class"] == "pre_execution_retryable"
@@ -188,6 +215,8 @@ def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
     assert lineage["prior_request_id"] == base
     assert lineage["retry_ceiling"] == L.MAX_ATTEMPTS_PER_EXPERIMENT
     assert lineage["design_hash"] == lineage["prior_design_hash"]
+    assert lineage["experiment_config_hash"] == \
+        lineage["prior_experiment_config_hash"]
     assert lineage["prior_terminal_event_id"] == f"evt-{base}"
 
 
@@ -198,37 +227,41 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     eid, _ = L0.select_next_experiment(root, REAL_REPO)
     base = "autoloop-" + eid
 
+    real = _real_cfg_hash(eid)
+
     # (a) owner cancellation is never auto-retried
-    L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "human")],
-                         {base: {"state": "canceled"}})
+    L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "human")],
+                         {base: {"state": "canceled"}}, prior_cfg_hash=real)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "owner_directed"
 
     # (b) an executed attempt (produced a result) is never auto-retried
-    ch = [_approved(base), {"request_id": base, "event_type": "RESULT_BLOCKED",
-                            "event_id": "r1", "sender": "codex"}]
-    L = _stub_chain_proj(monkeypatch, ch, {base: {"state": "result_blocked"}})
+    ch = [_go(base), {"request_id": base, "event_type": "RESULT_BLOCKED",
+                      "event_id": "r1", "sender": "codex"}]
+    L = _stub_chain_proj(monkeypatch, ch, {base: {"state": "result_blocked"}},
+                         prior_cfg_hash=real)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "result_stage"
 
-    # (c) budget exhaustion: base + -002 + -003 all approved+cancels -> 4th denied
+    # (c) budget exhaustion: base + -002 + -003 all GO'd+cancels -> 4th denied
     ids = [base, f"{base}-002", f"{base}-003"]
-    ch = [ev for r in ids for ev in (_approved(r), _cancel(r, "claude"))]
+    ch = [ev for r in ids for ev in (_go(r), _cancel(r, "claude"))]
     proj = {r: {"state": "canceled"} for r in ids}
-    L = _stub_chain_proj(monkeypatch, ch, proj)
+    L = _stub_chain_proj(monkeypatch, ch, proj, prior_cfg_hash=real)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "retry_budget_exhausted"
     assert refusal["attempt_ordinal"] == 4
 
     # (d) an active standing halt blocks even a pre-execution cancel
-    L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "claude")],
-                         {base: {"state": "canceled"}}, halt=True)
+    L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
+                         {base: {"state": "canceled"}}, halt=True,
+                         prior_cfg_hash=real)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "standing_halt"
 
-    # (e) a bare Claude cancel WITHOUT policy approval is NOT retryable
-    L = _stub_chain_proj(monkeypatch, [_cancel(base, "claude")],
-                         {base: {"state": "canceled"}})
+    # (e) a bare Claude cancel with no codex GO is NOT retryable (self-assertion)
+    L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "claude")],
+                         {base: {"state": "canceled"}}, prior_cfg_hash=real)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "other"
 
@@ -236,6 +269,21 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     L = _stub_chain_proj(monkeypatch, [], {}, halt=True)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "standing_halt"
+
+    # (g) a GO'd pre-execution cancel whose verdict authority is INVALID/
+    #     quarantined (H4) is refused
+    L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
+                         {base: {"state": "canceled"}},
+                         authority_valid=False, prior_cfg_hash=real)
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "authority_invalid"
+
+    # (h) a changed experiment config (predecessor hash differs) is refused
+    L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
+                         {base: {"state": "canceled"}},
+                         prior_cfg_hash="deadbeef" * 8)
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "config_changed"
 
 
 def test_select_skips_non_retryable_experiment(tmp_path, monkeypatch):

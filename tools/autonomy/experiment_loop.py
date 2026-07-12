@@ -167,11 +167,16 @@ def classify_prior_attempt(chain: list, rid: str) -> str:
         return "owner_directed"               # owner cancellation, ever
     if "REQUEST_CANCELED" not in types:
         return "other"
-    # positive, unforgeable authority evidence: the loop's policy-gated
-    # auto-approval was reached, then aborted pre-execution.
-    if "AUTO_APPROVED" in types:
+    # positive authority must be NON-self-assertable. AUTO_APPROVED is
+    # claude-emitted (directly appendable without policy.evaluate — Codex), so
+    # it proves nothing. A codex AUDIT_GO is SENDER_ALLOWED={codex}: the loop
+    # runs as `claude` and validate_sender REFUSES a claude AUDIT_GO, so the
+    # loop cannot manufacture its own retry authority. plan_reattempt further
+    # requires that GO to be authority-VALID (H4) and not quarantined.
+    if any(e["event_type"] == "AUDIT_GO" and e.get("sender") == "codex"
+           for e in evs):
         return "pre_execution_retryable"
-    return "other"                            # a cancel without policy approval
+    return "other"                            # no independent GO authority
 
 
 def _active_halt(root: str, proj: dict) -> bool:
@@ -234,12 +239,31 @@ def plan_reattempt(root: str, repo: str, eid: str):
         return None, base_refusal
     if next_ord > ceiling:                    # budget exhausted -> escalate
         return None, {**base_refusal, "reason_class": "retry_budget_exhausted"}
+    # Defer to the council's own authority layer (H4): the prior attempt's GO
+    # verdict must be authority-VALID and not quarantined. This is not a signal
+    # the loop can self-assert.
+    auth = state_machine.authority_status(chain).get(prior_rid, {})
+    if not auth.get("authority_valid") or auth.get("quarantined"):
+        return None, {**base_refusal, "reason_class": "authority_invalid"}
+    # Unchanged experiment CONFIG (not just design): the predecessor's recorded
+    # experiment_config_hash must equal the current frozen config's hash. Fail
+    # closed if it cannot be read or differs — a changed config is a new
+    # experiment, never a retry.
+    try:
+        prior_cfg_hash = publish.read_request(
+            root, prior_rid).get("experiment_config_hash")
+    except Exception:
+        prior_cfg_hash = None
+    if not prior_cfg_hash or prior_cfg_hash != cfg_hash:
+        return None, {**base_refusal, "reason_class": "config_changed",
+                      "prior_experiment_config_hash": prior_cfg_hash,
+                      "experiment_config_hash": cfg_hash}
     return next_request_id(proj, eid), {
         "prior_request_id": prior_rid, "prior_terminal_event_id": prior_terminal,
         "reason_class": reason, "attempt_ordinal": next_ord,
         "experiment_id": eid, "design_hash": design_hash,
         "prior_design_hash": design_hash, "experiment_config_hash": cfg_hash,
-        "retry_ceiling": ceiling}
+        "prior_experiment_config_hash": prior_cfg_hash, "retry_ceiling": ceiling}
 
 
 def select_next_experiment(root: str, repo: str):
