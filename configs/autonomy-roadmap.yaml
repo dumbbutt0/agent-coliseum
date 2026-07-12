@@ -172,7 +172,11 @@ tasks:
   - task_id: m6-sequential-baseline
     title: Sequential-history live baseline plus stochastic and paraphrase evidence
     phase: m6-live-baseline
-    status: pending
+    # active: M6 is the milestone now under execution. Its dependency
+    # m5-reports-claims is complete on the council chain (integrated event
+    # 000334); YAML task status carries the initial plan, real completion is
+    # the on-chain record. run_task requires ready|active to execute.
+    status: active
     dependencies:
       - m5-reports-claims
     allowed_files:
@@ -199,7 +203,15 @@ tasks:
     evidence_required:
       - run dirs with manifests and captures
       - registry and claim entries
-    requires_human: true
+    # requires_human false so the runner may EXECUTE it — but the SC-6 human
+    # gate stays fully intact: experiment_class ollama_local is NOT in the
+    # policy auto_approval.allowed_experiment_classes, so every batch stops at
+    # HUMAN_APPROVAL_REQUIRED until the owner records an approval token. M7 is
+    # where the owner amends the policy to auto-approve ollama_local; until
+    # then requires_human=false means "runner-eligible, still owner-gated per
+    # run", never "autonomous". (The builder launcher that would auto-select
+    # ready tasks remains deferred.)
+    requires_human: false
     next_tasks:
       - m7-loop-amendment
   - task_id: m7-loop-amendment

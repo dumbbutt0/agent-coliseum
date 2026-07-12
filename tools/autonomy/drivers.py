@@ -56,6 +56,78 @@ def _drive_mock(repo: str, config: dict, deadline: float) -> dict:
     }
 
 
+def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
+    """ollama_local: a live pinned-digest sweep (coliseum.textlab.sweep.run_sweep
+    — the SAME code path as the human `scripts/sweep_models.py`) followed by an
+    offline byte-identical replay of EVERY produced run. The frozen config pins
+    each model's digest; a served digest that differs is a NEW regime and aborts
+    before any compute. The only network egress is the LAN ollama endpoint; the
+    killable child caps wall-clock and storage on top of the in-driver deadline.
+
+    Evidence: all runs + the sweep manifest land under one dedicated out_root,
+    which the parent runner hashes into the evidence inventory and hands to the
+    Codex result audit."""
+    from coliseum.textlab.sweep import (SweepAborted, manifest_load, run_sweep,
+                                        verify_run_replay)
+
+    out_root = os.path.join(repo, config["out_root"])
+    manifest_path = os.path.join(repo, config["manifest"])
+    config_dir = os.path.join(repo, config.get("config_dir",
+                                               "configs/scenarios"))
+    expected_digests = config.get("model_digests")  # {model: pinned digest}
+    spec = {"models": config["models"], "scenarios": config["scenarios"],
+            "seeds": config["seeds"],
+            "sampler_seeds": config.get("sampler_seeds"),
+            "temperature": config.get("temperature", 0.0),
+            "arbitration": config.get("arbitration", "planner_priority"),
+            "interaction": config.get("interaction", "independent_vignettes"),
+            "config_dir": config_dir, "out_root": out_root,
+            "manifest": manifest_path}
+    try:
+        sweep = run_sweep(spec, deadline=deadline,
+                          expected_digests=expected_digests)
+    except SweepAborted as exc:
+        raise RunnerRefusal(str(exc))
+
+    # every row in the final manifest is the full evidence set handed to the
+    # auditor — replay-verify all of it, not only this call's fresh runs
+    done = manifest_load(manifest_path, out_root)
+    run_dirs = sorted({os.path.join(out_root, rec["dir"])
+                       for rec in done.values()})
+    replay_failures = []
+    for d in run_dirs:
+        if time.monotonic() > deadline:
+            raise RunnerRefusal(
+                "wall-clock limit exceeded during replay verification")
+        ok, detail = verify_run_replay(d, config_dir)
+        if not ok:
+            replay_failures.append(f"{os.path.basename(d)}: {detail}")
+
+    expected_runs = config.get("expected_run_count")
+    count_ok = expected_runs is None or len(done) == expected_runs
+
+    return {
+        "run_id": config.get("run_id") or config["task_id"],
+        "run_dir": os.path.relpath(out_root, repo),
+        "final_actions": [],   # a sweep has no single decision path
+        "validations": [
+            {"name": "fleet_digests_match_pinned", "ok": True,
+             "served_digests": dict(sweep.digests),
+             "note": "run_sweep aborts before any run on a digest mismatch"},
+            {"name": "sweep_completed_without_errors",
+             "ok": not sweep.errors, "errors": sweep.errors},
+            {"name": "manifest_run_count", "ok": count_ok,
+             "expected": expected_runs, "got": len(done),
+             "written_this_call": sweep.rows_written,
+             "resumed": sweep.skipped_resumed},
+            {"name": "offline_replay_byte_identical",
+             "ok": not replay_failures, "failures": replay_failures,
+             "runs_checked": len(run_dirs)},
+        ],
+    }
+
+
 DRIVERS = {
     "mock_experiment": _drive_mock,
+    "ollama_local": _drive_ollama_local,
 }

@@ -1,0 +1,27 @@
+{
+  "experiment_id": "m6-paraphrase-replication",
+  "design_hash": "087990d258b728c11ff2e42ca9df1b66a26e5842e3fdda908ae9b3f87d67841b",
+  "prereg_doc": "docs/first-gladiator/preregistrations/m6-b3-paraphrase-replication.md",
+  "task_id": "m6-sequential-baseline",
+  "driver": "ollama_local",
+  "purpose": "Batch 3 (depends on batch 2's variance): is wording sensitivity GENERAL? Across 3 families x the fleet, does >=1 METRICS-v1 rate differ between a scenario's two paraphrase variants by more than batch-2's across-seed spread for that cell? Enters the ladder as an OBSERVATION per family; generalization only via a dedicated finding audit, never automatically.",
+  "models": ["llama3.1:latest", "qwen3:8b", "gemma3:latest"],
+  "model_digests": {
+    "llama3.1:latest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
+    "qwen3:8b": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+    "gemma3:latest": "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
+  },
+  "scenarios": ["corrupt_king", "corrupt_king_verifiable", "water_bearer", "hidden_objective"],
+  "seeds": [1, 2],
+  "sampler_seeds": [11, 12, 13, 14, 15],
+  "temperature": 0.7,
+  "arbitration": "planner_priority",
+  "interaction": "independent_vignettes",
+  "config_dir": "configs/scenarios",
+  "out_root": "logs/runs/m6-paraphrase-replication",
+  "manifest": "logs/runs/m6-paraphrase-replication/manifest.jsonl",
+  "scenario_count": 4,
+  "retries_per_unit": 0,
+  "expected_run_count": 120,
+  "notes": "The wording contrast (variant A vs B) is the manipulated variable, so seeds [1,2] deliberately span both variants of each scenario (pick_variant = variants[seed % 2]). 3 models x 4 scenarios x 2 variants x 5 sampler seeds = 120 runs. Depends on batch 2: 'exceeds sampling noise' is judged against batch-2 across-seed spread, so batch 2 MUST complete first."
+}

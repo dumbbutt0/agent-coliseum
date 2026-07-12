@@ -224,6 +224,127 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
                               "changes only via an audited re-hash)")
     return issues
 
+
+# ---------------------------------------------- experiment run configs (M6)
+
+EXPERIMENT_CONFIG_REQUIRED = (
+    "experiment_id", "design_hash", "task_id", "driver", "models",
+    "model_digests", "scenarios", "seeds", "sampler_seeds", "temperature",
+    "interaction", "out_root", "manifest", "scenario_count",
+    "retries_per_unit", "expected_run_count")
+
+
+def lint_experiment_config(config_path: str, registry_path: str,
+                           repo_root: str) -> list:
+    """Bind a committed ollama_local run config to its FROZEN pre-registration
+    (the provenance gate the result audit runs). Returns issue strings; empty
+    means the config faithfully realizes exactly one pre-registered design and
+    nothing about the frozen hypothesis was weakened. This is the check that a
+    live run cannot execute a design the owner never froze."""
+    issues = []
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"config unreadable: {exc}"]
+    where = os.path.basename(config_path)
+    missing = [f for f in EXPERIMENT_CONFIG_REQUIRED if f not in cfg]
+    if missing:
+        issues.append(f"{where}: missing required fields {missing}")
+        return issues
+
+    if cfg["driver"] != "ollama_local":
+        issues.append(f"{where}: driver {cfg['driver']!r} — only "
+                      "'ollama_local' configs are linted here")
+
+    try:
+        raw = load_experiments_registry(registry_path)
+    except (SchemaError, OSError, yaml.YAMLError) as exc:
+        return issues + [f"{where}: registry unreadable: {exc}"]
+    entry = next((e for e in raw["experiments"]
+                  if e.get("experiment_id") == cfg["experiment_id"]), None)
+    if entry is None:
+        return issues + [f"{where}: experiment_id {cfg['experiment_id']!r} "
+                         "is not in the experiments registry"]
+    if entry.get("status") != "pre-registered":
+        issues.append(f"{where}: {cfg['experiment_id']!r} status is "
+                      f"{entry.get('status')!r}, expected 'pre-registered' "
+                      "(a run config binds a frozen design, not a demoted or "
+                      "already-complete one)")
+    design = entry.get("planned_design", {}) or {}
+    dh = design_hash(design)
+    if entry.get("design_hash") != dh:
+        issues.append(f"{where}: registry entry design_hash disagrees with "
+                      "its planned_design (registry tampered)")
+    if cfg["design_hash"] != dh:
+        issues.append(f"{where}: config design_hash {cfg['design_hash'][:16]}… "
+                      f"!= frozen design_hash {dh[:16]}… — the config does not "
+                      "bind the pre-registered design")
+
+    # held-out contamination: a run config may never touch reserved eval content
+    held = set((raw.get("held_out", {}) or {}).get("scenarios") or [])
+    for s in cfg["scenarios"]:
+        if s in held:
+            issues.append(f"{where}: scenario {s!r} is HELD-OUT — a run config "
+                          "may not touch reserved evaluation content")
+
+    # the manipulated design must be realized EXACTLY, never weakened
+    if cfg["interaction"] != design.get("interaction_mode"):
+        issues.append(f"{where}: interaction {cfg['interaction']!r} != frozen "
+                      f"interaction_mode {design.get('interaction_mode')!r}")
+    if set(cfg["scenarios"]) != set(design.get("scenarios") or []):
+        issues.append(f"{where}: scenarios {sorted(cfg['scenarios'])} != frozen "
+                      f"{sorted(design.get('scenarios') or [])}")
+    if cfg["sampler_seeds"] != (design.get("sampler_seeds") or []):
+        issues.append(f"{where}: sampler_seeds {cfg['sampler_seeds']} != frozen "
+                      f"{design.get('sampler_seeds')}")
+    if cfg["temperature"] != design.get("temperature"):
+        issues.append(f"{where}: temperature {cfg['temperature']} != frozen "
+                      f"{design.get('temperature')}")
+    # b1 froze explicit scenario_seeds; b2/b3 leave variant-covering seeds to
+    # the operational config, so we only pin them when the design did
+    if "scenario_seeds" in design and cfg["seeds"] != design["scenario_seeds"]:
+        issues.append(f"{where}: seeds {cfg['seeds']} != frozen scenario_seeds "
+                      f"{design['scenario_seeds']}")
+    if not cfg["seeds"]:
+        issues.append(f"{where}: seeds is empty — no variant would be selected")
+
+    # models: every frozen 'tag@digest-prefix' must map to exactly one config
+    # model whose pinned digest carries that prefix; no unfrozen extras
+    planned = design.get("models") or []
+    matched = set()
+    for spec in planned:
+        base, _, prefix = spec.partition("@")
+        cands = [m for m in cfg["models"] if m == base or m.startswith(base + ":")]
+        if len(cands) != 1:
+            issues.append(f"{where}: frozen model {spec!r} matches "
+                          f"{cands} config models (want exactly 1)")
+            continue
+        cm = cands[0]
+        matched.add(cm)
+        dg = cfg["model_digests"].get(cm, "")
+        if not dg:
+            issues.append(f"{where}: model {cm!r} has no pinned digest")
+        elif prefix and not dg.replace("sha256:", "").startswith(prefix):
+            issues.append(f"{where}: model {cm!r} digest {dg[:16]}… does not "
+                          f"carry the frozen prefix {prefix!r} (new regime)")
+    extra = [m for m in cfg["models"] if m not in matched]
+    if extra:
+        issues.append(f"{where}: config adds models {extra} absent from the "
+                      "frozen design")
+    for m in cfg["models"]:
+        if m not in cfg["model_digests"]:
+            issues.append(f"{where}: model {m!r} missing from model_digests")
+
+    # cardinality sanity: expected_run_count must equal the grid it declares
+    grid = (len(cfg["models"]) * len(set(cfg["scenarios"])) *
+            len(cfg["seeds"]) * len(cfg["sampler_seeds"]))
+    if cfg["expected_run_count"] != grid:
+        issues.append(f"{where}: expected_run_count {cfg['expected_run_count']} "
+                      f"!= models*scenarios*seeds*sampler_seeds = {grid}")
+    return issues
+
+
 # ------------------------------------------------------------- claims (M5)
 
 def load_claims_registry(path: str) -> dict:

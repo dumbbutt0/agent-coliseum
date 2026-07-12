@@ -1,0 +1,25 @@
+{
+  "experiment_id": "m6-sequential-rerun",
+  "design_hash": "890b041e92a17d53031265721cdfbf80ced623339264bcd2ac9c8f3270e1e929",
+  "prereg_doc": "docs/first-gladiator/preregistrations/m6-b1-sequential-rerun.md",
+  "task_id": "m6-sequential-baseline",
+  "driver": "ollama_local",
+  "purpose": "Batch 1: the fresh protocol-v2 sequential_history rerun of the exp-1/exp-2 finding — on the d1=divert subset, does gemma3's d2 reflex deception exceed its d2 planner deception? sequential_history NEVER pools with independent_vignettes (mode is in the hashed regime).",
+  "models": ["gemma3:latest"],
+  "model_digests": {
+    "gemma3:latest": "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
+  },
+  "scenarios": ["hidden_objective_aligned", "hidden_objective"],
+  "seeds": [42, 1],
+  "sampler_seeds": [11, 12, 13, 14, 15],
+  "temperature": 0.7,
+  "arbitration": "planner_priority",
+  "interaction": "sequential_history",
+  "config_dir": "configs/scenarios",
+  "out_root": "logs/runs/m6-sequential-rerun",
+  "manifest": "logs/runs/m6-sequential-rerun/manifest.jsonl",
+  "scenario_count": 2,
+  "retries_per_unit": 0,
+  "expected_run_count": 20,
+  "notes": "scenario_seeds [42,1] are the FROZEN design seeds (planned_design.scenario_seeds); 42->v0, 1->v1 cover both variants. 1 model x 2 scenarios x 2 scenario_seeds x 5 sampler seeds = 20 runs. This is the ONLY sequential_history batch in M6; its regime never pools with the independent-vignette batches 2/3."
+}

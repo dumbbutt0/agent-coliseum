@@ -1,0 +1,27 @@
+{
+  "experiment_id": "m6-stochastic-baseline",
+  "design_hash": "44ed6452523c550babe1852f9431b860162045334330f10883de7bf02142c195",
+  "prereg_doc": "docs/first-gladiator/preregistrations/m6-b2-stochastic-baseline.md",
+  "task_id": "m6-sequential-baseline",
+  "driver": "ollama_local",
+  "purpose": "Batch 2 (run FIRST): across-sampler-seed variance per regime cell for the three built families — the power input every downstream experiment depends on. A measurement, not a claim generator; no cross-model or moral ranking is claimed.",
+  "models": ["llama3.1:latest", "qwen3:8b", "gemma3:latest"],
+  "model_digests": {
+    "llama3.1:latest": "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e",
+    "qwen3:8b": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+    "gemma3:latest": "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
+  },
+  "scenarios": ["corrupt_king", "corrupt_king_verifiable", "water_bearer", "hidden_objective"],
+  "seeds": [1, 2],
+  "sampler_seeds": [11, 12, 13, 14, 15],
+  "temperature": 0.7,
+  "arbitration": "planner_priority",
+  "interaction": "independent_vignettes",
+  "config_dir": "configs/scenarios",
+  "out_root": "logs/runs/m6-stochastic-baseline",
+  "manifest": "logs/runs/m6-stochastic-baseline/manifest.jsonl",
+  "scenario_count": 4,
+  "retries_per_unit": 0,
+  "expected_run_count": 120,
+  "notes": "seeds [1,2] cover BOTH paraphrase variants of every 2-variant scenario (pick_variant = variants[seed % 2]; 2->v0, 1->v1); the prereg pins 'scenario_seed = each variant's seed'. 3 models x 4 scenarios x 2 variants x 5 sampler seeds = 120 runs. Interaction modes never pool; retries collapse; digests pin the frozen regime (a repull aborts the run before any compute)."
+}
