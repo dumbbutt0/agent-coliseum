@@ -223,28 +223,37 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     def _deadline_hit():
         return deadline is not None and time.monotonic() > deadline
 
+    # ---- ATOMIC fleet preflight (audit blocker): probe and validate the
+    # digest of EVERY configured model BEFORE any compute or evidence write.
+    # Validating model-by-model inside the run loop let an earlier model run
+    # and write rows before a later repulled model aborted; a mismatch
+    # anywhere must refuse the whole sweep before run_scenario is ever called.
+    probes = {}
+    for model in spec["models"]:
+        if _deadline_hit():
+            raise SweepAborted("wall-clock deadline exceeded during preflight "
+                               f"before model {model!r}")
+        probe = OllamaAgent(model)
+        if probe.digest_status != "ok":
+            raise SweepAborted(
+                f"{model}: digest could not be pinned (endpoint unreachable "
+                "or model absent) — refusing to run an unpinned regime")
+        if expected_digests is not None:
+            want = expected_digests.get(model)
+            if want and probe.model_digest != want:
+                raise SweepAborted(
+                    f"{model}: served digest {probe.model_digest[:20]} != "
+                    f"frozen digest {str(want)[:20]} — a repulled model is a "
+                    "NEW regime; refusing to run against the frozen design")
+        probe.configure_sampling(sampling, sampler_seeds[0])
+        probe.resolve_effective_config()
+        probes[model] = probe
+        result.digests[model] = probe.model_digest
+    # only now that the ENTIRE fleet is pinned+validated do we touch evidence
+
     with open(manifest_path, "a", encoding="utf-8") as manifest:
         for model in spec["models"]:
-            if _deadline_hit():
-                raise SweepAborted("wall-clock deadline exceeded before "
-                                   f"model {model!r}")
-            probe = OllamaAgent(model)
-            if probe.digest_status != "ok":
-                raise SweepAborted(
-                    f"{model}: digest could not be pinned (endpoint "
-                    "unreachable or model absent) — refusing to run an "
-                    "unpinned regime")
-            result.digests[model] = probe.model_digest
-            if expected_digests is not None:
-                want = expected_digests.get(model)
-                if want and probe.model_digest != want:
-                    raise SweepAborted(
-                        f"{model}: served digest {probe.model_digest[:20]} != "
-                        f"frozen digest {str(want)[:20]} — a repulled model is "
-                        "a NEW regime; refusing to run against the frozen "
-                        "design")
-            probe.configure_sampling(sampling, sampler_seeds[0])
-            probe.resolve_effective_config()
+            probe = probes[model]
             say(f"== {model}  digest={probe.model_digest[:20]}  "
                 f"family={probe.model_family}  host={probe.host}  "
                 f"backend={probe.backend_version}  mode={mode}")

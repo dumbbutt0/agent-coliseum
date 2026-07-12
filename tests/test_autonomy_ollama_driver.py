@@ -114,6 +114,42 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     assert len(rows) == 1 and rows[0]["model"] == MODEL
 
 
+def test_fleet_preflight_is_atomic(tmp_path, monkeypatch):
+    """Audit blocker regression: a mismatch in a LATER model must refuse the
+    whole sweep BEFORE the earlier (valid) model runs — no run dirs, no rows.
+    Two models: model[0] serves the frozen digest, model[1] is repulled."""
+    good, bad = "llama3.1:latest", "gemma3:latest"
+    fixture_dg = _fixture_digest()
+
+    def _probe(model, host=None):
+        p = _mk_mock(model)
+        p.host = host or "http://mock"
+        if model == bad:
+            p.model_digest = "sha256:repulled-second-model"
+        return p
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _probe)
+    monkeypatch.setattr(runner_mod, "make_agent",
+                        lambda s: _mk_mock(s.split("llm:ollama:", 1)[1]))
+
+    out_root = str(tmp_path / "runs")
+    spec = {"models": [good, bad], "scenarios": [SCENARIO], "seeds": [42],
+            "sampler_seeds": None, "temperature": 0.0,
+            "arbitration": "planner_priority",
+            "interaction": "independent_vignettes",
+            "config_dir": os.path.join(ROOT, "configs", "scenarios"),
+            "out_root": out_root, "manifest": os.path.join(out_root, "m.jsonl")}
+    with pytest.raises(SweepAborted, match="NEW regime"):
+        run_sweep(spec, expected_digests={good: fixture_dg, bad: fixture_dg})
+    # the valid FIRST model must not have produced anything
+    produced = [p for p in (os.listdir(out_root) if os.path.exists(out_root)
+                            else []) if p != "m.jsonl"]
+    assert produced == [], f"first model ran before the fleet was validated: {produced}"
+    rows = [l for l in open(spec["manifest"], encoding="utf-8")] \
+        if os.path.exists(spec["manifest"]) else []
+    assert rows == []
+
+
 def test_resume_is_idempotent(tmp_path, monkeypatch):
     """A second identical run adds no rows and still passes — the manifest is
     keyed by (regime, scenario_seed, sampler_seed)."""
