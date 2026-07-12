@@ -141,18 +141,23 @@ def _events_for(chain: list, rid: str) -> list:
     return [e for e in chain if e.get("request_id") == rid]
 
 
-def classify_prior_attempt(chain: list, rid: str, active_halt: bool) -> str:
-    """Fail-closed retry classification of a terminal attempt, derived only from
-    chain facts. Retryable ONLY when the loop canceled it BEFORE any live
-    execution with no active standing halt. Any ambiguity => non-retryable."""
+def classify_prior_attempt(chain: list, rid: str) -> str:
+    """Fail-closed retry classification, derived only from immutable chain facts.
+
+    Retryable ONLY when the attempt reached AUTO_APPROVED — the policy-gated
+    authority event that cannot be forged (it requires an independent Codex GO
+    plus a full policy.evaluate pass, M7a) — and was then aborted BEFORE any
+    live execution, with no owner cancellation and no audit/design failure. It
+    is the AUTO_APPROVED lifecycle, NOT the cancel's sender, that authorizes a
+    retry: a bare Claude cancellation of an attempt that never earned policy
+    approval cannot manufacture retry authority (the hole Codex found)."""
     evs = _events_for(chain, rid)
     if not evs:
         return "other"
     types = [e["event_type"] for e in evs]
     # Disqualifiers are checked across the WHOLE history, never just the final
     # event: a later REQUEST_CANCELED must not launder an earlier execution,
-    # result, audit/design failure, or owner cancellation into a retryable
-    # state (the audit-blocked-then-canceled laundering Codex found).
+    # result, audit/design failure, or owner cancellation into a retryable state.
     if any(t in _EXECUTION_EVENTS for t in types):
         return "result_stage"                 # it ran or produced a result
     if "AUDIT_BLOCKED" in types:
@@ -162,9 +167,11 @@ def classify_prior_attempt(chain: list, rid: str, active_halt: bool) -> str:
         return "owner_directed"               # owner cancellation, ever
     if "REQUEST_CANCELED" not in types:
         return "other"
-    if active_halt:
-        return "standing_halt"                # a halt is engaged right now
-    return "pre_execution_retryable"          # loop-canceled, pre-execution
+    # positive, unforgeable authority evidence: the loop's policy-gated
+    # auto-approval was reached, then aborted pre-execution.
+    if "AUTO_APPROVED" in types:
+        return "pre_execution_retryable"
+    return "other"                            # a cancel without policy approval
 
 
 def _active_halt(root: str, proj: dict) -> bool:
@@ -198,8 +205,13 @@ def plan_reattempt(root: str, repo: str, eid: str):
 
     chain = events.read_chain(root)
     proj = state_machine.project(chain)
+    # An active standing halt (STOP / MANUAL / autonomy_paused / milestone)
+    # refuses EVERY proposal, including a first attempt — nothing new may be
+    # minted while a halt is engaged (Codex: the initial path skipped this).
+    if _active_halt(root, proj):
+        return None, {"reason_class": "standing_halt", "experiment_id": eid,
+                      "retry_ceiling": ceiling}
     attempts = _attempt_rids(proj, eid)
-    active_halt = _active_halt(root, proj)
 
     if not attempts:                          # first attempt ever
         return _PREFIX + eid, {
@@ -211,7 +223,7 @@ def plan_reattempt(root: str, repo: str, eid: str):
 
     prior_rid = max(attempts, key=lambda r: _ordinal_of(r, eid))
     next_ord = _ordinal_of(prior_rid, eid) + 1
-    reason = classify_prior_attempt(chain, prior_rid, active_halt)
+    reason = classify_prior_attempt(chain, prior_rid)
     prior_evs = _events_for(chain, prior_rid)
     prior_terminal = prior_evs[-1]["event_id"] if prior_evs else None
     base_refusal = {"reason_class": reason, "prior_request_id": prior_rid,

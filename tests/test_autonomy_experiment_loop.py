@@ -111,32 +111,39 @@ def _cancel(rid, sender="claude", eid_events=None):
             "event_id": f"evt-{rid}", "sender": sender, "payload": {}}
 
 
+def _approved(rid):
+    """The policy-gated AUTO_APPROVED authority event (unforgeable per M7a)."""
+    return {"request_id": rid, "event_type": "AUTO_APPROVED",
+            "event_id": f"appr-{rid}", "sender": "claude", "payload": {}}
+
+
 def test_classify_reason_awareness():
-    """Every non-retryable reason is derived from chain facts, fail-closed."""
+    """Retryability is derived from immutable chain facts, fail-closed. The
+    positive authorization is AUTO_APPROVED (policy-gated), NOT the cancel's
+    sender — an arbitrary Claude cancel cannot manufacture retry authority."""
     import tools.autonomy.experiment_loop as L
     rid = "autoloop-x"
     # executed -> result_stage (never auto-retried)
-    ch = [{"request_id": rid, "event_type": "EXPERIMENT_STARTED",
-           "event_id": "e1", "sender": "claude"}]
-    assert L.classify_prior_attempt(ch, rid, False) == "result_stage"
-    # audit-blocked terminal -> audit_blocked
-    ch = [{"request_id": rid, "event_type": "AUDIT_BLOCKED",
-           "event_id": "e1", "sender": "codex"}]
-    assert L.classify_prior_attempt(ch, rid, False) == "audit_blocked"
-    # owner cancellation -> owner_directed
-    assert L.classify_prior_attempt([_cancel(rid, "human")], rid,
-                                    False) == "owner_directed"
-    # loop cancel under an ACTIVE halt -> standing_halt
-    assert L.classify_prior_attempt([_cancel(rid, "claude")], rid,
-                                    True) == "standing_halt"
-    # loop cancel, pre-execution, no halt -> the ONLY retryable cancel
-    assert L.classify_prior_attempt([_cancel(rid, "claude")], rid,
-                                    False) == "pre_execution_retryable"
+    assert L.classify_prior_attempt(
+        [{"request_id": rid, "event_type": "EXPERIMENT_STARTED",
+          "event_id": "e1", "sender": "claude"}], rid) == "result_stage"
+    # audit-blocked -> audit_blocked
+    assert L.classify_prior_attempt(
+        [{"request_id": rid, "event_type": "AUDIT_BLOCKED",
+          "event_id": "e1", "sender": "codex"}], rid) == "audit_blocked"
+    # owner cancellation of an approved attempt -> owner_directed
+    assert L.classify_prior_attempt(
+        [_approved(rid), _cancel(rid, "human")], rid) == "owner_directed"
+    # policy-approved then a loop cancel, pre-execution -> the ONLY retryable path
+    assert L.classify_prior_attempt(
+        [_approved(rid), _cancel(rid, "claude")], rid) \
+        == "pre_execution_retryable"
+    # a Claude cancel WITHOUT policy approval -> NOT retryable (the Codex hole)
+    assert L.classify_prior_attempt([_cancel(rid, "claude")], rid) == "other"
     # nothing we understand -> other (fail-closed)
-    assert L.classify_prior_attempt([{"request_id": rid,
-                                      "event_type": "BUILD_READY",
-                                      "event_id": "e", "sender": "claude"}],
-                                    rid, False) == "other"
+    assert L.classify_prior_attempt(
+        [{"request_id": rid, "event_type": "BUILD_READY",
+          "event_id": "e", "sender": "claude"}], rid) == "other"
 
 
 def test_classify_later_cancel_cannot_launder_a_failure():
@@ -150,19 +157,19 @@ def test_classify_later_cancel_cannot_launder_a_failure():
            "sender": "codex"},
           {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
            "sender": "claude", "payload": {}}]
-    assert L.classify_prior_attempt(ch, rid, False) == "audit_blocked"
+    assert L.classify_prior_attempt(ch, rid) == "audit_blocked"
     # executed then a later Claude cancel -> STILL result_stage
     ch = [{"request_id": rid, "event_type": "EXPERIMENT_STARTED",
            "event_id": "e1", "sender": "claude"},
           {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
            "sender": "claude", "payload": {}}]
-    assert L.classify_prior_attempt(ch, rid, False) == "result_stage"
+    assert L.classify_prior_attempt(ch, rid) == "result_stage"
     # an owner cancel anywhere -> owner_directed even if a Claude cancel follows
     ch = [{"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e1",
            "sender": "human", "payload": {}},
           {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
            "sender": "claude", "payload": {}}]
-    assert L.classify_prior_attempt(ch, rid, False) == "owner_directed"
+    assert L.classify_prior_attempt(ch, rid) == "owner_directed"
 
 
 def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
@@ -170,7 +177,8 @@ def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
     eid, _ = __import__("tools.autonomy.experiment_loop", fromlist=["x"]) \
         .select_next_experiment(root, REAL_REPO)
     base = "autoloop-" + eid
-    chain = [_cancel(base, "claude")]
+    # a policy-approved attempt aborted pre-execution (the B1 lifecycle)
+    chain = [_approved(base), _cancel(base, "claude")]
     proj = {base: {"state": "canceled"}}
     L = _stub_chain_proj(monkeypatch, chain, proj)
     rid, lineage = L.plan_reattempt(root, REAL_REPO, eid)
@@ -191,21 +199,21 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     base = "autoloop-" + eid
 
     # (a) owner cancellation is never auto-retried
-    L = _stub_chain_proj(monkeypatch, [_cancel(base, "human")],
+    L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "human")],
                          {base: {"state": "canceled"}})
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "owner_directed"
 
     # (b) an executed attempt (produced a result) is never auto-retried
-    ch = [{"request_id": base, "event_type": "RESULT_BLOCKED",
-           "event_id": "r1", "sender": "codex"}]
+    ch = [_approved(base), {"request_id": base, "event_type": "RESULT_BLOCKED",
+                            "event_id": "r1", "sender": "codex"}]
     L = _stub_chain_proj(monkeypatch, ch, {base: {"state": "result_blocked"}})
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "result_stage"
 
-    # (c) budget exhaustion: base + -002 + -003 all pre-exec cancels -> 4th denied
+    # (c) budget exhaustion: base + -002 + -003 all approved+cancels -> 4th denied
     ids = [base, f"{base}-002", f"{base}-003"]
-    ch = [_cancel(r, "claude") for r in ids]
+    ch = [ev for r in ids for ev in (_approved(r), _cancel(r, "claude"))]
     proj = {r: {"state": "canceled"} for r in ids}
     L = _stub_chain_proj(monkeypatch, ch, proj)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
@@ -213,8 +221,19 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     assert refusal["attempt_ordinal"] == 4
 
     # (d) an active standing halt blocks even a pre-execution cancel
-    L = _stub_chain_proj(monkeypatch, [_cancel(base, "claude")],
+    L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "claude")],
                          {base: {"state": "canceled"}}, halt=True)
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "standing_halt"
+
+    # (e) a bare Claude cancel WITHOUT policy approval is NOT retryable
+    L = _stub_chain_proj(monkeypatch, [_cancel(base, "claude")],
+                         {base: {"state": "canceled"}})
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "other"
+
+    # (f) NO attempt yet, but a halt is active -> even a first request is refused
+    L = _stub_chain_proj(monkeypatch, [], {}, halt=True)
     rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
     assert rid is None and refusal["reason_class"] == "standing_halt"
 
