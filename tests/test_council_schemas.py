@@ -137,7 +137,11 @@ def test_request_test_command_allowlist(tmp_path):
         repo, head, expected_test_command="python3 -c 'import os'")
     with pytest.raises(SchemaViolation):
         validate_request(request, (repo,))
-    assert ALLOWED_TEST_COMMANDS == ("python3 -m pytest tests/ -q",)
+    # full suite (source audits) + the fast experiment-relevant subset
+    # (experiment run requests bind already-integrated code)
+    assert "python3 -m pytest tests/ -q" in ALLOWED_TEST_COMMANDS
+    assert len(ALLOWED_TEST_COMMANDS) == 2
+    assert any("test_autonomy_ollama_driver" in c for c in ALLOWED_TEST_COMMANDS)
 
 
 def test_request_payload_hash_must_match(tmp_path):

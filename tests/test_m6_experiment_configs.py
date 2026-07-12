@@ -92,6 +92,22 @@ def test_run_count_must_match_grid(tmp_path):
     assert any("expected_run_count" in i for i in issues)
 
 
+def test_same_parity_seeds_drop_a_variant_refused(tmp_path):
+    """Cycle-1 batch-3 audit regression: seeds that all select the same
+    variant index (e.g. both odd -> variants[seed % 2] == 1) silently drop a
+    variant. The run COUNT can still be 120, so only a variant-coverage check
+    catches it — a wording contrast with no variant-A observations is refused."""
+    issues = _mutated(tmp_path, "m6-paraphrase-replication",
+                      lambda c: c.update(seeds=[7, 9]))  # 7%2==9%2==1 -> variant B only
+    assert any("every variant must be selected" in i for i in issues)
+
+
+@pytest.mark.parametrize("name", ["m6-sequential-rerun", "m6-paraphrase-replication"])
+def test_committed_configs_cover_all_variants(name):
+    """Every pending batch's frozen seeds cover BOTH paraphrase variants."""
+    assert lint_experiment_config(_path(name), REG, ROOT) == []
+
+
 def test_duplicate_scenario_refused(tmp_path):
     """A duplicate frozen scenario would run extra cells the declared count
     never counted — the gate refuses it (and it cannot keep the old

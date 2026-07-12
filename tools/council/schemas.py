@@ -172,8 +172,19 @@ VERDICT_REQUIRED_FIELDS = (
     "findings", "commands_run", "timestamp_utc", "verdict_payload_hash",
 )
 
-# The only test command an audit request may name (never executed here).
-ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q",)
+# Test commands an audit request may name (never executed here). SOURCE audits
+# use the full suite (they change code). EXPERIMENT run requests bind an
+# ALREADY-INTEGRATED commit whose full suite was verified at integration, so
+# their no-regression check is the fast experiment-relevant subset (config
+# binding, driver, registry, reports, metrics freeze) — ~6s, which completes
+# reliably inside the auditor's command window, instead of the ~95s full suite
+# that intermittently gets terminated mid-run in the sandbox.
+EXPERIMENT_TEST_COMMAND = (
+    "python3 -m pytest tests/test_textlab_experiment_registry.py "
+    "tests/test_textlab_reports_claims.py tests/test_autonomy_ollama_driver.py "
+    "tests/test_m6_experiment_configs.py tests/test_textlab_prereg.py "
+    "tests/test_textlab_metrics_freeze.py -q")
+ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q", EXPERIMENT_TEST_COMMAND)
 
 # H2 item 11 bounds on request AND verdict content (reject unbounded
 # strings/arrays). Finding prose (evidence, failure_mode, ...) gets a

@@ -315,6 +315,30 @@ def lint_experiment_config(config_path: str, registry_path: str,
     if not cfg["seeds"]:
         issues.append(f"{where}: seeds is empty — no variant would be selected")
 
+    # variant coverage: run_sweep selects scenario.variants[seed % n_variants],
+    # so the config's seeds must cover EVERY variant of each scenario. The
+    # run-count check alone cannot catch a config that (e.g.) uses same-parity
+    # seeds and silently drops variant A — for a wording contrast that would
+    # answer the pre-registered question with no variant-A observations at all.
+    try:
+        from .scenario import load_scenario
+        cfg_scen_dir = os.path.join(
+            repo_root, cfg.get("config_dir", "configs/scenarios"))
+        for sid in cfg["scenarios"]:
+            spath = os.path.join(cfg_scen_dir, f"{sid}.yaml")
+            if not os.path.exists(spath):
+                continue   # unregistered-scenario check above already flags it
+            nv = len(load_scenario(spath).variants)
+            covered = {s % nv for s in cfg["seeds"]}
+            if covered != set(range(nv)):
+                miss = sorted(set(range(nv)) - covered)
+                issues.append(
+                    f"{where}: seeds {cfg['seeds']} cover variant indices "
+                    f"{sorted(covered)} for {sid!r} ({nv} variants) — miss "
+                    f"{miss}; every variant must be selected (seed % n_variants)")
+    except (SchemaError, OSError) as exc:
+        issues.append(f"{where}: variant-coverage check failed: {str(exc)[:120]}")
+
     # models: every frozen 'tag@digest-prefix' must map to exactly one config
     # model whose pinned digest carries that prefix; no unfrozen extras
     planned = design.get("models") or []
