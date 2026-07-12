@@ -12,6 +12,34 @@ import pytest
 from tests.council_util import TEST_ENROLLMENT_TOKEN, TEST_PASSPHRASE
 from tools.council import identity
 
+# --- progress observability under redirection --------------------------------
+# The allowlisted audit command is `python3 -m pytest tests/ -q > log 2>&1`.
+# When stdout is a FILE (not a TTY) pytest's `[N%]` markers are block-buffered
+# and emitted only every ~80 tests, so the FIRST marker ("[ 8%]") does not
+# reach the file until ~40s in and then sits unchanged for tens of seconds
+# while the slow early council/mock tests run. An auditor tailing the file
+# early misreads that stale "8%" as a hang. Flushing the terminal writer after
+# every test makes the redirected file update continuously (real-time progress,
+# correct completion + exit status), so the suite's completion is always
+# observable. Pure observability — it changes no test outcome.
+_TERMINAL_WRITER = None
+
+
+def pytest_configure(config):
+    global _TERMINAL_WRITER
+    try:
+        _TERMINAL_WRITER = config.get_terminal_writer()
+    except Exception:
+        _TERMINAL_WRITER = None
+
+
+def pytest_runtest_logreport(report):
+    if _TERMINAL_WRITER is not None:
+        try:
+            _TERMINAL_WRITER.flush()
+        except Exception:
+            pass
+
 
 @pytest.fixture(autouse=True)
 def _test_owner_passphrase(monkeypatch):
