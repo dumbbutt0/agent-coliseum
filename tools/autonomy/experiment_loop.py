@@ -149,15 +149,19 @@ def classify_prior_attempt(chain: list, rid: str, active_halt: bool) -> str:
     if not evs:
         return "other"
     types = [e["event_type"] for e in evs]
+    # Disqualifiers are checked across the WHOLE history, never just the final
+    # event: a later REQUEST_CANCELED must not launder an earlier execution,
+    # result, audit/design failure, or owner cancellation into a retryable
+    # state (the audit-blocked-then-canceled laundering Codex found).
     if any(t in _EXECUTION_EVENTS for t in types):
         return "result_stage"                 # it ran or produced a result
-    if types[-1] == "AUDIT_BLOCKED":
-        return "audit_blocked"                # design/audit failure
-    cancels = [e for e in evs if e["event_type"] == "REQUEST_CANCELED"]
-    if not cancels:
+    if "AUDIT_BLOCKED" in types:
+        return "audit_blocked"                # design/audit failure, ever
+    if any(e["event_type"] == "REQUEST_CANCELED"
+           and e.get("sender") == "human" for e in evs):
+        return "owner_directed"               # owner cancellation, ever
+    if "REQUEST_CANCELED" not in types:
         return "other"
-    if cancels[-1].get("sender") == "human":
-        return "owner_directed"               # owner cancellation
     if active_halt:
         return "standing_halt"                # a halt is engaged right now
     return "pre_execution_retryable"          # loop-canceled, pre-execution

@@ -139,6 +139,32 @@ def test_classify_reason_awareness():
                                     rid, False) == "other"
 
 
+def test_classify_later_cancel_cannot_launder_a_failure():
+    """Codex-found defect: a REQUEST_CANCELED appended AFTER a disqualifying
+    event must not overwrite the classification into a retryable one. Every
+    disqualifier is checked across the whole history, not just the last event."""
+    import tools.autonomy.experiment_loop as L
+    rid = "autoloop-x"
+    # AUDIT_BLOCKED then a later Claude cancel -> STILL audit_blocked
+    ch = [{"request_id": rid, "event_type": "AUDIT_BLOCKED", "event_id": "e1",
+           "sender": "codex"},
+          {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
+           "sender": "claude", "payload": {}}]
+    assert L.classify_prior_attempt(ch, rid, False) == "audit_blocked"
+    # executed then a later Claude cancel -> STILL result_stage
+    ch = [{"request_id": rid, "event_type": "EXPERIMENT_STARTED",
+           "event_id": "e1", "sender": "claude"},
+          {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
+           "sender": "claude", "payload": {}}]
+    assert L.classify_prior_attempt(ch, rid, False) == "result_stage"
+    # an owner cancel anywhere -> owner_directed even if a Claude cancel follows
+    ch = [{"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e1",
+           "sender": "human", "payload": {}},
+          {"request_id": rid, "event_type": "REQUEST_CANCELED", "event_id": "e2",
+           "sender": "claude", "payload": {}}]
+    assert L.classify_prior_attempt(ch, rid, False) == "owner_directed"
+
+
 def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
     root = make_root(tmp_path)
     eid, _ = __import__("tools.autonomy.experiment_loop", fromlist=["x"]) \
