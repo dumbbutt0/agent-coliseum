@@ -139,6 +139,15 @@ def cmd_run_task(cfg, args) -> int:
                            roadmap_path=args.roadmap)
 
 
+def cmd_experiment_loop(cfg, args) -> int:
+    """M7d: one idempotent step of the autonomous experiment loop (propose the
+    next registered experiment, or advance the in-flight one). Stops itself on
+    STOP/MANUAL; the immutable policy decides whether anything auto-runs."""
+    from tools.autonomy import experiment_loop
+    print(experiment_loop.advance(cfg, roadmap_path=args.roadmap))
+    return 0
+
+
 def cmd_codex_launcher(cfg, args) -> int:
     """Delegates to the launcher's own entrypoint, which builds a
     codex-role config and holds the single-instance lock itself."""
@@ -191,6 +200,10 @@ def main(argv=None) -> int:
     s.add_argument("--audit-timeout-seconds", type=float, default=3600.0)
     s.add_argument("--max-launches", type=int, default=None)
     s.set_defaults(fn=cmd_codex_launcher)
+
+    s = sub.add_parser("experiment-loop")
+    s.add_argument("--roadmap", default=None)
+    s.set_defaults(fn=cmd_experiment_loop)
 
     args = parser.parse_args(argv)
     cfg = get_config(role=SENDER)
