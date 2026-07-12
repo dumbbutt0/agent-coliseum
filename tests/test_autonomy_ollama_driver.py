@@ -15,7 +15,8 @@ import pytest
 import coliseum.textlab.runner as runner_mod
 import coliseum.textlab.sweep as sweep_mod
 from coliseum.textlab.agents import MockLLMAgent, make_agent as real_make_agent
-from coliseum.textlab.sweep import (SweepAborted, resolve_sampling, run_sweep,
+from coliseum.textlab.sweep import (SweepAborted, norm_digest,
+                                    resolve_sampling, run_sweep,
                                     verify_run_replay)
 from tools.autonomy.drivers import DRIVERS, RunnerRefusal, _drive_ollama_local
 
@@ -190,6 +191,25 @@ def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
     assert calls == [], "manifest_load ran before the fleet preflight"
     produced = [p for p in os.listdir(out_root) if p != "m.jsonl"]
     assert produced == [], f"evidence created despite preflight refusal: {produced}"
+
+
+def test_digest_comparison_is_format_tolerant(tmp_path, monkeypatch):
+    """Cycle-3 audit regression: the live endpoint may serve a bare-hex OR a
+    'sha256:'-prefixed digest. A frozen config's digest and the served digest
+    must compare on identity, never on formatting — otherwise the pinned fleet
+    is falsely refused as a NEW regime before any batch can run."""
+    assert norm_digest("sha256:ABC123") == norm_digest("abc123") == "abc123"
+    # a real mismatch is still a mismatch
+    assert norm_digest("sha256:aaa") != norm_digest("bbb")
+
+    _install_offline_ollama(monkeypatch)          # probe serves 'sha256:<hex>'
+    served = _fixture_digest()
+    bare = served.split(":", 1)[-1]               # the frozen config's bare hex
+    assert served != bare                          # formats genuinely differ
+    cfg = _config(tmp_path, model_digests={MODEL: bare})
+    outcome = _drive_ollama_local(ROOT, cfg, _far_deadline())
+    val = {v["name"]: v for v in outcome["validations"]}
+    assert val["manifest_run_count"]["got"] == 1   # ran; no false NEW-regime refusal
 
 
 def test_resume_is_idempotent(tmp_path, monkeypatch):

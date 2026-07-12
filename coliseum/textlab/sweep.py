@@ -45,6 +45,15 @@ class SweepAborted(Exception):
     the wall-clock deadline. Recorded and surfaced, never worked around."""
 
 
+def norm_digest(d: str) -> str:
+    """Canonical digest hex for EQUALITY only: drop an optional 'sha256:'
+    prefix so a frozen bare-hex config and a served 'sha256:'-prefixed digest
+    (ollama versions differ) compare on identity, never on formatting. The
+    regime hash still stores the raw served digest verbatim — this normalizes
+    the preflight comparison, not the recorded lineage."""
+    return (d or "").split(":", 1)[-1].strip().lower()
+
+
 def verify_run_replay(run_dir: str, config_dir: str) -> tuple[bool, str]:
     """Re-run from run.json config into a temp dir and byte-compare
     decisions.jsonl — the same gate as `textlab replay`, but returning
@@ -232,7 +241,7 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                 "or model absent) — refusing to run an unpinned regime")
         if expected_digests is not None:
             want = expected_digests.get(model)
-            if want and probe.model_digest != want:
+            if want and norm_digest(probe.model_digest) != norm_digest(want):
                 raise SweepAborted(
                     f"{model}: served digest {probe.model_digest[:20]} != "
                     f"frozen digest {str(want)[:20]} — a repulled model is a "
