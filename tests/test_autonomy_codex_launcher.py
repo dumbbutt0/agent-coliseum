@@ -214,6 +214,58 @@ def test_status_paused_halts_before_launch(env, tmp_path, monkeypatch):
     assert not os.path.exists(marker)
 
 
+def test_transient_pause_is_not_a_terminal_halt(env, tmp_path, monkeypatch):
+    """Reliability: STOP and milestone terminally halt the launcher; the
+    fail-closed autonomy_paused FLAG does NOT — so it idles and can auto-resume
+    (this flag is exactly what stopped the launcher after the M7 activation)."""
+    root, repo, head, cfg = env
+    from tools.council import state_machine
+    # the autonomy_paused flag is a stop reason but NOT terminal
+    append(root, cfg, "AUTONOMY_PAUSED", "claude", "pause-req", repo, head,
+           {"reason": "test"})
+    proj = state_machine.project(events.read_chain(root))
+    assert codex_launcher._stop_reason(root, proj) is not None
+    assert codex_launcher._terminal_halt(root, proj) is False
+    # STOP file (halt-all) IS terminal
+    open(os.path.join(root, "STOP"), "w").close()
+    assert codex_launcher._terminal_halt(root, proj) is True
+    os.unlink(os.path.join(root, "STOP"))
+    # a reached society milestone IS terminal
+    append(root, cfg, "AUTONOMY_MILESTONE_REACHED", "claude", "ms-req", repo,
+           head, {"reason": "society milestone"})
+    proj = state_machine.project(events.read_chain(root))
+    assert codex_launcher._terminal_halt(root, proj) is True
+
+
+def test_pause_cleared_resumes_and_launches(env, tmp_path, monkeypatch):
+    """The fix's core property: the autonomy_paused flag makes the launcher
+    IDLE, and when the pause clears it RESUMES and launches with no manual
+    restart. (Before: it exited cleanly and Restart=on-failure left it dead.)"""
+    root, repo, head, cfg = env
+    marker = _install_fake_codex(tmp_path, monkeypatch, FAKE_GO)
+    _publish_requested(root, cfg, repo, head)
+    append(root, cfg, "AUTONOMY_PAUSED", "claude", "pause-req", repo, head,
+           {"reason": "transient pause"})
+
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds):
+        calls["n"] += 1
+        # clear the pause the way the owner did live: cancel the paused request
+        from tools.council import state_machine
+        st = state_machine.project(events.read_chain(root)).get(
+            "pause-req", {}).get("state")
+        if st != "canceled":
+            append(root, cfg, "REQUEST_CANCELED", "claude", "pause-req", repo,
+                   head, {"reason": "resume"})
+
+    monkeypatch.setattr(codex_launcher.time, "sleep", fake_sleep)
+    rc = codex_launcher.main(["--max-launches", "1", "--poll-seconds", "0"])
+    assert rc == 0
+    assert calls["n"] >= 1               # idled at least one cycle
+    assert os.path.exists(marker)        # then resumed and launched
+
+
 def test_log_md_edit_never_resumes(env, tmp_path, monkeypatch):
     """H1: the log.md STATUS line is cosmetic — editing it cannot resume
     a paused council; only the control record (human token) can."""

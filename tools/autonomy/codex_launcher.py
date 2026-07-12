@@ -403,6 +403,20 @@ def _stop_reason(root: str, requests: dict) -> str | None:
     return None
 
 
+def _terminal_halt(root: str, requests: dict) -> bool:
+    """True only for halts that should STOP the launcher process (the owner
+    restarts it deliberately): the STOP file (halt-all) and a reached society
+    milestone. Transient owner pauses (autonomy_paused, STATUS-pause) return
+    False, so the launcher IDLES and auto-resumes when they clear.
+
+    Reliability fix: a clean exit is NOT resurrected by Restart=on-failure, so
+    exiting on a transient pause stranded the auditor until a manual restart —
+    the exact cause of the observed inactivity after the M7 activation pause."""
+    if storage.emergency_stop_reason(root):
+        return True
+    return bool(state_machine.global_flags(requests)["milestone_reached"])
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="codex_launcher")
     parser.add_argument("--once", action="store_true")
@@ -432,6 +446,7 @@ def main(argv=None) -> int:
 def _run(cfg, root: str, args) -> int:
     started = time.monotonic()
     launches = 0
+    idle_reason = None
     while True:
         # Self-heal any interrupted transaction (e.g. a claim whose process
         # died mid-move) BEFORE deriving work, so recovery never depends on
@@ -454,8 +469,22 @@ def _run(cfg, root: str, args) -> int:
         requests = state_machine.project(chain)
         reason = _stop_reason(root, requests)
         if reason:
-            print(f"codex_launcher: {reason} — stopping")
-            return 0
+            if _terminal_halt(root, requests):
+                print(f"codex_launcher: {reason} — stopping")
+                return 0
+            # transient owner pause: idle and auto-resume when it clears (never
+            # a clean exit — that would strand the auditor). Hold the singleton
+            # lock; launch nothing until the pause lifts.
+            if reason != idle_reason:
+                print(f"codex_launcher: {reason} — idling until it clears")
+                idle_reason = reason
+            if args.once:
+                return 0
+            time.sleep(args.poll_seconds)
+            continue
+        if idle_reason is not None:
+            print("codex_launcher: pause cleared — resuming")
+            idle_reason = None
 
         work = actionable(chain, requests)
         launched = False
