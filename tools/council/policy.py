@@ -205,6 +205,36 @@ def amend_policy(root: str, target_version: int) -> tuple:
     return prev_hash, new_hash, _policy_diff(_content(prev), _content(new))
 
 
+def restore_policy_version(root: str, version: int) -> None:
+    """Roll the policy file back to the code-defined `version`, preserving the
+    original created_utc. Used to make `amend-policy` atomic: if recording the
+    owner-token POLICY_AMENDED fails (e.g. an invalid token), the file is
+    restored so an invalid token leaves BOTH the file and the effective pin at
+    the previous version — never a v2 file drifting unpinned."""
+    if version not in POLICY_VERSIONS:
+        raise SchemaViolation(f"no code-defined policy version {version}")
+    path = storage.policy_path(root)
+    created = None
+    if os.path.exists(path):
+        try:
+            current, _ = load_policy(root)
+            created = current.get("created_utc")
+        except SchemaViolation:
+            pass
+    restored = dict(POLICY_VERSIONS[version])
+    if created is not None:
+        restored["created_utc"] = created
+    try:
+        os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+    except OSError:
+        pass
+    storage.atomic_write_json(path, restored)
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except OSError:
+        pass
+
+
 def _policy_diff(old: dict, new: dict) -> dict:
     """Minimal semantic diff of the two auto_approval-bearing policies."""
     diff = {}

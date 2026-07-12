@@ -122,11 +122,18 @@ def cmd_amend_policy(args) -> int:
                     "policy_version": args.target_version,
                     "policy_diff": diff, "impl_commit": impl_commit,
                     "policy_file": storage.POLICY_FILE}
-    token = _maybe_human_token(root, args, "POLICY_AMENDED",
-                               CONTROL_RID, impl_commit, payload_core)
-    event = events.append_event(root, cfg, "POLICY_AMENDED", "human",
-                                CONTROL_RID, cfg.repo_roots[0], impl_commit,
-                                _with_token(payload_core, token))
+    # ATOMIC: if minting/verifying the owner token or the append fails, roll the
+    # file back to the previous version so an invalid token leaves BOTH the file
+    # and the effective pin unchanged (never a v2 file drifting unpinned).
+    try:
+        token = _maybe_human_token(root, args, "POLICY_AMENDED",
+                                   CONTROL_RID, impl_commit, payload_core)
+        event = events.append_event(root, cfg, "POLICY_AMENDED", "human",
+                                    CONTROL_RID, cfg.repo_roots[0], impl_commit,
+                                    _with_token(payload_core, token))
+    except Exception:
+        policy.restore_policy_version(root, args.target_version - 1)
+        raise
     print(f"policy amended to version {args.target_version}\n"
           f"prev_hash: {prev_hash}\nnew_hash:  {new_hash}\n"
           f"diff: {diff}\npinned by event {event['event_id']} "

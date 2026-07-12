@@ -107,6 +107,27 @@ def test_forged_amendment_events_never_advance_the_pin(env):
     assert policy.effective_policy_pin(forged) == (v1_hash, 1)
 
 
+def test_invalid_token_amendment_rolls_back_to_v1(env):
+    """M7a cycle-2 condition: amend-policy is atomic — an invalid owner token
+    (append refused) leaves BOTH the file and the effective pin at v1, never a
+    v2 file drifting unpinned."""
+    root, repo, head, cfg, v1_hash = env
+    prev_hash, new_hash, diff = policy.amend_policy(root, 2)   # v2 on disk
+    assert policy.policy_version_of(policy.load_policy(root)[0]) == 2
+    # POLICY_AMENDED with a BAD owner token is refused at append...
+    bad_payload = {"policy_hash": new_hash, "prev_policy_hash": prev_hash,
+                   "policy_version": 2, "policy_diff": diff, "impl_commit": head,
+                   "human_token": {"counter": 1, "preimage_hex": "00" * 32}}
+    with pytest.raises(Exception):
+        append(root, cfg, "POLICY_AMENDED", "human", CONTROL_RID, repo, head,
+               bad_payload)
+    # ...and the CLI's atomic rollback restores v1
+    policy.restore_policy_version(root, 1)
+    live, live_hash = policy.load_policy(root)
+    assert policy.policy_version_of(live) == 1 and live_hash == v1_hash
+    assert policy.effective_policy_pin(events.read_chain(root)) == (v1_hash, 1)
+
+
 def test_hand_edited_policy_is_not_a_code_defined_version(env):
     """An owner (or anyone) hand-editing the file to grant extra classes
     without going through amend_policy fails the code-defined-version gate."""
