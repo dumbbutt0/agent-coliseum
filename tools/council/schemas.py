@@ -184,7 +184,13 @@ EXPERIMENT_TEST_COMMAND = (
     "python3 -m pytest tests/test_textlab_experiment_registry.py "
     "tests/test_textlab_reports_claims.py tests/test_autonomy_ollama_driver.py "
     "tests/test_m6_experiment_configs.py tests/test_textlab_prereg.py "
-    "tests/test_textlab_metrics_freeze.py -q")
+    "tests/test_textlab_metrics_freeze.py "
+    # the LIVE run_task provenance gate that refuses a weakened design before
+    # the driver launches — the critical experiment-run path (audit condition)
+    "tests/test_autonomy_runner.py::test_provenance_gate_blocks_weakened_design_config "
+    "tests/test_autonomy_runner.py::test_provenance_gate_skipped_without_design_hash "
+    "tests/test_autonomy_runner.py::test_human_approved_without_binding_refused_before_driver "
+    "-q")
 ALLOWED_TEST_COMMANDS = (FULL_TEST_COMMAND, EXPERIMENT_TEST_COMMAND)
 
 # H2 item 11 bounds on request AND verdict content (reject unbounded
