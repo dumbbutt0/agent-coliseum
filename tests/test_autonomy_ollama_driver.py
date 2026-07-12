@@ -212,6 +212,30 @@ def test_digest_comparison_is_format_tolerant(tmp_path, monkeypatch):
     assert val["manifest_run_count"]["got"] == 1   # ran; no false NEW-regime refusal
 
 
+def test_run_sweep_refuses_duplicate_scenarios(tmp_path, monkeypatch):
+    """Defense in depth (cycle-5 audit): run_sweep iterates the raw scenario
+    list, so a duplicate would launch unplanned cells. It must refuse before
+    ANY compute — no probe, no run dirs, no rows."""
+    probed = {"n": 0}
+
+    def _probe(model, host=None):
+        probed["n"] += 1
+        return _mk_mock(model)
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _probe)
+    out_root = str(tmp_path / "runs")
+    spec = {"models": [MODEL], "scenarios": [SCENARIO, SCENARIO], "seeds": [42],
+            "sampler_seeds": None, "temperature": 0.0,
+            "arbitration": "planner_priority",
+            "interaction": "independent_vignettes",
+            "config_dir": os.path.join(ROOT, "configs", "scenarios"),
+            "out_root": out_root, "manifest": os.path.join(out_root, "m.jsonl")}
+    with pytest.raises(SweepAborted, match="duplicate scenarios"):
+        run_sweep(spec)
+    assert probed["n"] == 0, "probed a model before refusing the duplicate grid"
+    assert not os.path.exists(out_root)
+
+
 def test_resume_is_idempotent(tmp_path, monkeypatch):
     """A second identical run adds no rows and still passes — the manifest is
     keyed by (regime, scenario_seed, sampler_seed)."""

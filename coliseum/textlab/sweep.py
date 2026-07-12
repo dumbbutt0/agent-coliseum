@@ -220,6 +220,17 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
 
     result = SweepResult()
 
+    # defense in depth: run_sweep iterates the RAW lists, so a duplicated grid
+    # dimension would launch unplanned/duplicate cells (and collide on the
+    # resume key). Refuse before any compute — the provenance lint refuses this
+    # too, this guards every other caller (e.g. the human CLI).
+    for dim, vals in (("models", spec["models"]), ("scenarios", scenarios),
+                      ("seeds", seeds), ("sampler_seeds", sampler_seeds)):
+        if len(vals) != len(set(vals)):
+            raise SweepAborted(
+                f"duplicate {dim} in the sweep spec ({vals}) — refusing to "
+                "launch unplanned/duplicate cells")
+
     def _deadline_hit():
         return deadline is not None and time.monotonic() > deadline
 

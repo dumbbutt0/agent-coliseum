@@ -336,8 +336,20 @@ def lint_experiment_config(config_path: str, registry_path: str,
         if m not in cfg["model_digests"]:
             issues.append(f"{where}: model {m!r} missing from model_digests")
 
-    # cardinality sanity: expected_run_count must equal the grid it declares
-    grid = (len(cfg["models"]) * len(set(cfg["scenarios"])) *
+    # no duplicated grid dimension: run_sweep iterates the RAW lists, so a
+    # duplicate would launch unplanned cells the declared count never counted
+    # (and collide on the resume key). Every dimension must be unique.
+    for dim in ("models", "scenarios", "seeds", "sampler_seeds"):
+        vals = cfg.get(dim) or []
+        if len(vals) != len(set(vals)):
+            dupes = sorted({str(v) for v in vals if vals.count(v) > 1})
+            issues.append(f"{where}: {dim} contains duplicates {dupes} — every "
+                          "grid dimension must be unique (run_sweep iterates "
+                          "the raw list; a duplicate launches unplanned cells)")
+
+    # cardinality sanity: expected_run_count must equal the grid run_sweep
+    # actually iterates — the RAW list lengths (== set lengths once unique)
+    grid = (len(cfg["models"]) * len(cfg["scenarios"]) *
             len(cfg["seeds"]) * len(cfg["sampler_seeds"]))
     if cfg["expected_run_count"] != grid:
         issues.append(f"{where}: expected_run_count {cfg['expected_run_count']} "

@@ -79,6 +79,32 @@ def test_run_count_must_match_grid(tmp_path):
     assert any("expected_run_count" in i for i in issues)
 
 
+def test_duplicate_scenario_refused(tmp_path):
+    """A duplicate frozen scenario would run extra cells the declared count
+    never counted — the gate refuses it (and it cannot keep the old
+    expected_run_count either)."""
+    def mutate(c):
+        c["scenarios"] = c["scenarios"] + [c["scenarios"][0]]  # dup one
+        # keep expected_run_count stale (as the audit repro did)
+    issues = _mutated(tmp_path, "m6-stochastic-baseline", mutate)
+    assert any("contains duplicates" in i and "scenarios" in i for i in issues)
+    assert any("expected_run_count" in i for i in issues)
+
+
+def test_grid_uses_raw_scenario_list(tmp_path):
+    """Even if expected_run_count is 'corrected' to the deduped grid, a
+    duplicated scenario is still refused — the count can never launder a dup
+    past the gate (the audit's 20-vs-30 escape)."""
+    def mutate(c):
+        c["scenarios"] = c["scenarios"] + [c["scenarios"][0]]
+        # 3 unique scenarios' worth of count would still be a lie about the
+        # raw 5-entry list run_sweep iterates
+        c["expected_run_count"] = (len(set(c["scenarios"])) * len(c["models"])
+                                   * len(c["seeds"]) * len(c["sampler_seeds"]))
+    issues = _mutated(tmp_path, "m6-stochastic-baseline", mutate)
+    assert any("contains duplicates" in i for i in issues)
+
+
 def test_extra_model_refused(tmp_path):
     def mutate(c):
         c["models"].append("phi3:latest")
