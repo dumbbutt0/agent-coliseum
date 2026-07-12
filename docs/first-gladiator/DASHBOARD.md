@@ -4,22 +4,22 @@
 
 ## Milestones
 
-- roadmap milestone: **first-gladiator**  (4/15 integrated on the chain)
-- integrated: first-gladiator-m0, first-gladiator-m1, first-gladiator-m2, first-gladiator-m3, first-gladiator-m4
-- current: **m5-reports-claims**  next: m6-sequential-baseline
+- roadmap milestone: **first-gladiator**  (5/15 integrated on the chain)
+- integrated: first-gladiator-m0, first-gladiator-m1, first-gladiator-m2, first-gladiator-m3, first-gladiator-m4, first-gladiator-m5
+- current: **m6-sequential-baseline**  next: m7-loop-amendment
 
 ## Council health
 
-- chain length: 328  verify: OK
+- chain length: 334  verify: OK
 - active requests: codex-auto-launcher-audit-002:go
-- BLOCKED requests: first-gladiator-m5-reports-001
+- BLOCKED requests: none
 
 ## Coverage
 
-- tests: 817
+- tests: 825
 - scenario families: 3/8 present (authority, deception, moral_conflict)
 - families still to build: uncertainty, time_pressure, self_preservation, social_pressure, memory_persistence
-- registered scenarios: 7  experiments: 4
+- registered scenarios: 7  experiments: 7
 
 ## Claim ladder census
 

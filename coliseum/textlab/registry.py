@@ -49,6 +49,14 @@ def entry_hash(entry: dict) -> str:
     return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 
+def design_hash(planned_design: dict) -> str:
+    """sha256 over a pre-registered experiment's planned_design — the frozen
+    hypothesis. The eventual runs' autonomy-block experiment_config_hash must
+    match this, binding evidence to the pre-registration."""
+    return hashlib.sha256(
+        canonical_json(planned_design).encode("utf-8")).hexdigest()
+
+
 def load_experiments_registry(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
@@ -88,25 +96,77 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
     for eid in {i for i in ids if ids.count(i) > 1}:
         issues.append(f"duplicate experiment entry {eid!r}")
 
+    # a scenario registry (M3) is consulted so pre-registered designs can
+    # only name real, non-held-out scenarios
+    try:
+        from .scenario import load_registry as _load_scen_registry
+        scen_reg = _load_scen_registry(os.path.join(
+            repo_root, "configs", "registry", "scenarios.yaml"))
+        registered_scen = {s["scenario_id"] for s in scen_reg["scenarios"]}
+    except Exception:
+        registered_scen = None
+
     out_root = os.path.join(repo_root, "logs", "runs")
     for e in entries:
         eid = e.get("experiment_id", "?")
-        if e.get("status") not in EXPERIMENT_STATUSES:
-            issues.append(f"{eid}: status {e.get('status')!r} not in "
-                          f"{EXPERIMENT_STATUSES}")
-        if e.get("validation") not in VALIDATION_TIERS:
-            issues.append(f"{eid}: validation {e.get('validation')!r} not in "
-                          f"{VALIDATION_TIERS}")
-            continue
+        status = e.get("status")
         if e.get("generalization_level") not in GENERALIZATION_LEVELS:
             issues.append(f"{eid}: generalization_level "
                           f"{e.get('generalization_level')!r} not in "
                           f"{GENERALIZATION_LEVELS}")
-        # citability guard: demoted datasets may never claim full tier's
-        # citable statuses, and citable statuses require full validation
-        if e.get("status") in ("pre-registered", "complete") and \
-                e.get("validation") != "full":
-            issues.append(f"{eid}: citable status {e['status']!r} requires "
+        if status not in EXPERIMENT_STATUSES:
+            issues.append(f"{eid}: status {status!r} not in "
+                          f"{EXPERIMENT_STATUSES}")
+            continue
+
+        # --- pre-registered: DESIGN frozen, NOT yet run (M6). No manifest;
+        # a design_hash pins the planned design so the eventual runs' autonomy
+        # block must match it. Not citable evidence until it becomes complete.
+        if status == "pre-registered":
+            if e.get("manifest") not in (None, "", "null"):
+                issues.append(f"{eid}: pre-registered entry must have "
+                              "manifest: null (no runs yet)")
+            pd = e.get("planned_design")
+            if not isinstance(pd, dict):
+                issues.append(f"{eid}: pre-registered entry needs a "
+                              "planned_design mapping")
+                continue
+            want = design_hash(pd)
+            if e.get("design_hash") != want:
+                issues.append(f"{eid}: design_hash "
+                              f"{str(e.get('design_hash'))[:16]}… != "
+                              f"recomputed {want[:16]}… (pre-registration "
+                              "is frozen by its design_hash)")
+            for req in ("hypothesis", "models", "interaction_mode",
+                        "scenarios", "sampler_seeds", "primary_event",
+                        "prereg_doc"):
+                if not pd.get(req):
+                    issues.append(f"{eid}: planned_design missing {req!r}")
+            if pd.get("interaction_mode") and pd["interaction_mode"] not in \
+                    ("independent_vignettes", "sequential_history"):
+                issues.append(f"{eid}: planned interaction_mode "
+                              f"{pd['interaction_mode']!r} invalid")
+            for sid in pd.get("scenarios", []):
+                if registered_scen is not None and sid not in registered_scen:
+                    issues.append(f"{eid}: planned scenario {sid!r} is not "
+                                  "in the scenario registry")
+                if sid in held_ids:
+                    issues.append(f"{eid}: planned scenario {sid!r} is "
+                                  "HELD-OUT (SPEC E6)")
+            doc = os.path.join(repo_root, pd.get("prereg_doc", ""))
+            if pd.get("prereg_doc") and not os.path.exists(doc):
+                issues.append(f"{eid}: prereg_doc {pd['prereg_doc']!r} "
+                              "missing")
+            continue
+
+        # --- everything else is evidence-bearing: needs a validation tier
+        if e.get("validation") not in VALIDATION_TIERS:
+            issues.append(f"{eid}: validation {e.get('validation')!r} not in "
+                          f"{VALIDATION_TIERS}")
+            continue
+        # only `complete` is citable, and it requires full validation
+        if status == "complete" and e.get("validation") != "full":
+            issues.append(f"{eid}: citable status 'complete' requires "
                           "validation: full")
         mpath = os.path.join(repo_root, e.get("manifest", ""))
         if not os.path.exists(mpath):
@@ -198,8 +258,10 @@ def lint_claims_registry(claims_path: str, experiments_path: str,
     except (SchemaError, OSError, yaml.YAMLError) as exc:
         return [f"registry unreadable: {exc}"]
     exp_by_id = {e["experiment_id"]: e for e in exp_raw["experiments"]}
+    # ONLY `complete` experiments are citable evidence — a pre-registered
+    # design has no runs yet; demoted datasets are never citable.
     citable_exp = {eid for eid, e in exp_by_id.items()
-                   if e.get("status") in ("pre-registered", "complete")}
+                   if e.get("status") == "complete"}
 
     ids = [c.get("claim_id") for c in raw["claims"]]
     for cid in {i for i in ids if ids.count(i) > 1}:

@@ -36,16 +36,16 @@ def test_pre_migration_backups_preserved():
 def test_backfill_shape():
     raw = load_experiments_registry(REGISTRY)
     by_id = {e["experiment_id"]: e for e in raw["experiments"]}
-    assert set(by_id) == {"pilot-cross-model-sweep", "sweep-v2",
-                          "exp1-gemma3-reversal",
-                          "exp2-v1cistern-replication"}
+    # the four historical entries are present (M6 adds pre-registered ones)
+    assert {"pilot-cross-model-sweep", "sweep-v2", "exp1-gemma3-reversal",
+            "exp2-v1cistern-replication"} <= set(by_id)
     # demotions preserved honestly; citable entries fully validated
     assert by_id["pilot-cross-model-sweep"]["status"] == "pilot-demoted"
     assert by_id["sweep-v2"]["status"] == "legacy-demoted"
     for eid in ("exp1-gemma3-reversal", "exp2-v1cistern-replication"):
         assert by_id[eid]["status"] == "complete"
         assert by_id[eid]["validation"] == "full"
-    assert all(e["frozen"] for e in raw["experiments"])
+        assert by_id[eid]["frozen"]
 
 
 def _mutated(tmp_path, mutate):
