@@ -375,6 +375,23 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     if cardinality_failures:
         return refuse(cardinality_failures)
 
+    # ---- frozen-design provenance gate (audit blocker): the request-pinned
+    # experiment_config_hash proves these exact bytes were AUDITED; it does not
+    # prove they FAITHFULLY REALIZE the pre-registered design. A config that
+    # carries a design_hash must therefore pass lint_experiment_config on the
+    # LIVE path — refusing any weakening of the frozen hypothesis (interaction,
+    # scenarios, seeds, sampler seeds, temperature, pinned digests, held-out,
+    # run-count) before a single model is called. Configs with no design_hash
+    # (e.g. the mock pipeline probe) carry no pre-registration to bind.
+    if config.get("design_hash"):
+        from coliseum.textlab.registry import lint_experiment_config
+        registry_path = os.path.join(
+            repo, "configs", "registry", "experiments.yaml")
+        design_issues = lint_experiment_config(config_path, registry_path, repo)
+        if design_issues:
+            return refuse([f"frozen-design provenance gate: {i}"
+                           for i in design_issues])
+
     # ---- lifecycle: start
     events.append_event(
         root, cfg, "EXPERIMENT_STARTED", SENDER, request_id, repo, commit,

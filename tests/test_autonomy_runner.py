@@ -231,6 +231,63 @@ def test_human_approved_without_binding_refused_before_driver(
     assert "EXPERIMENT_STARTED" not in _event_types(root)
 
 
+def test_provenance_gate_blocks_weakened_design_config(tmp_path, monkeypatch):
+    """Cycle-4 blocker regression: a config that carries a design_hash must
+    pass lint_experiment_config ON THE LIVE PATH — a hash-valid but
+    design-weakened config is refused BEFORE any driver runs. Proves the
+    provenance gate is wired into run_task, not merely unit-tested."""
+    from coliseum.textlab import registry as textlab_registry
+    config_path, config_sha = write_mock_config(tmp_path, design_hash="0" * 64)
+    roadmap_path = write_roadmap(tmp_path)
+    root, repo, head, cfg = _drive_to_auto_approved(
+        tmp_path, config_sha, roadmap_path, config_path=config_path)
+
+    seen = {"lint": False, "drove": False}
+
+    def lint_spy(cp, rp, rr):
+        seen["lint"] = True
+        return ["config interaction 'independent_vignettes' != frozen "
+                "'sequential_history'"]
+
+    def drive_spy(*a, **k):
+        seen["drove"] = True
+        return GOOD_OUTCOME
+
+    monkeypatch.setattr(textlab_registry, "lint_experiment_config", lint_spy)
+    monkeypatch.setattr(runner, "_run_driver_bounded", drive_spy)
+    code = runner.run_task(cfg, RID, config_path, roadmap_path=roadmap_path)
+    assert code == 1
+    assert seen["lint"] is True, "provenance gate was not on the live path"
+    assert seen["drove"] is False, "weakened design config reached the driver"
+    last = events.read_chain(root)[-1]
+    assert last["event_type"] == "AUTONOMY_PAUSED"
+    assert "frozen-design provenance gate" in last["payload"]["reason"]
+    assert "EXPERIMENT_STARTED" not in _event_types(root)
+
+
+def test_provenance_gate_skipped_without_design_hash(tmp_path, monkeypatch):
+    """A config with NO design_hash (the mock pipeline probe) carries no
+    pre-registration to bind, so the gate is correctly skipped and the run
+    proceeds — the gate keys on design_hash, never on driver alone."""
+    from coliseum.textlab import registry as textlab_registry
+    config_path, config_sha = write_mock_config(tmp_path)   # no design_hash
+    roadmap_path = write_roadmap(tmp_path)
+    root, repo, head, cfg = _drive_to_auto_approved(
+        tmp_path, config_sha, roadmap_path, config_path=config_path)
+
+    called = {"lint": False}
+
+    def lint_spy(*a, **k):
+        called["lint"] = True
+        return ["should never be consulted"]
+
+    monkeypatch.setattr(textlab_registry, "lint_experiment_config", lint_spy)
+    code = runner.run_task(cfg, RID, config_path, roadmap_path=roadmap_path)
+    assert code == 0
+    assert called["lint"] is False, "gate ran for a config with no design_hash"
+    assert "EXPERIMENT_STARTED" in _event_types(root)
+
+
 # ------------------------------- cycle-2 blocker: request root of trust
 
 def _tamper_completed_request(root, new_config_path, new_sha,

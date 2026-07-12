@@ -67,7 +67,8 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
     Evidence: all runs + the sweep manifest land under one dedicated out_root,
     which the parent runner hashes into the evidence inventory and hands to the
     Codex result audit."""
-    from coliseum.textlab.sweep import (SweepAborted, manifest_load, run_sweep,
+    from coliseum.textlab.sweep import (SweepAborted, manifest_load,
+                                        norm_digest, run_sweep,
                                         verify_run_replay)
 
     out_root = os.path.join(repo, config["out_root"])
@@ -106,14 +107,23 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
     expected_runs = config.get("expected_run_count")
     count_ok = expected_runs is None or len(done) == expected_runs
 
+    # honestly recompute (never hardcode) whether every served digest matches
+    # its frozen pin — run_sweep's preflight already aborts on a mismatch, so
+    # this is True whenever we reach here, but it is COMPUTED evidence
+    digest_ok = expected_digests is None or all(
+        (not expected_digests.get(m)) or
+        norm_digest(dg) == norm_digest(expected_digests[m])
+        for m, dg in sweep.digests.items())
+
     return {
         "run_id": config.get("run_id") or config["task_id"],
         "run_dir": os.path.relpath(out_root, repo),
         "final_actions": [],   # a sweep has no single decision path
         "validations": [
-            {"name": "fleet_digests_match_pinned", "ok": True,
+            {"name": "fleet_digests_match_pinned", "ok": digest_ok,
              "served_digests": dict(sweep.digests),
-             "note": "run_sweep aborts before any run on a digest mismatch"},
+             "note": "computed vs frozen pins (norm_digest); run_sweep also "
+                     "aborts before any run on a mismatch"},
             {"name": "sweep_completed_without_errors",
              "ok": not sweep.errors, "errors": sweep.errors},
             {"name": "manifest_run_count", "ok": count_ok,
