@@ -141,14 +141,28 @@ def effective_policy_pin(chain: list):
     append), so an agent cannot advance the pin — it cannot expand its own
     authority. A malformed/non-monotonic amendment STOPS the walk (fail closed:
     the pin never advances past an invalid link). (None, None) before any pin."""
-    # base pin: the first event carrying a policy_hash (v1) — preserves the
-    # pre-M7 behaviour; version 1 has no policy_version field
+    # AUTHORITY IS RE-VALIDATED FROM THE CHAIN, NEVER TRUSTED FROM THE PAYLOAD.
+    # The events file is agent-writable, so a POLICY_AMENDED could be present
+    # with the wrong sender or a forged/absent token. Two independent gates:
+    #   (a) identity replay must succeed — every human token in the chain must
+    #       burn in sequence, action-bound; ANY inconsistency fails the whole
+    #       walk closed (no amendment honored, fall back to the base v1 pin);
+    #   (b) an amendment advances the pin ONLY if it is a human-SENDER event
+    #       carrying a human_token (append enforces this, but policy replay must
+    #       not depend on append having been the only writer).
+    from tools.council import identity
     pin = pinned_policy_hash(chain)
     version = 1 if pin is not None else None
+    try:
+        identity.replay_identity(chain)
+    except Exception:
+        return pin, version   # identity chain invalid -> honor no amendment
     for e in chain:
         if e.get("event_type") != "POLICY_AMENDED":
             continue
         p = e.get("payload", {}) or {}
+        if e.get("sender") != "human" or not p.get("human_token"):
+            break   # only an owner-token-authenticated amendment counts
         if pin is None or p.get("prev_policy_hash") != pin:
             break
         nv = p.get("policy_version")
@@ -297,6 +311,16 @@ def evaluate(root: str, cfg: Config, request: dict, verdict_event: dict,
     report = events_mod.verify_chain(root)
     cond("event_chain_verifies", report.healthy,
          report.error or ("torn suffix" if report.suffix_incomplete else ""))
+
+    # the human-authority (S/KEY) chain must replay cleanly — every human token
+    # burns in sequence, action-bound. A forged/misbound token anywhere (e.g. a
+    # fabricated POLICY_AMENDED) fails this closed, so no auto-approval proceeds.
+    from tools.council import identity
+    try:
+        identity.replay_identity(chain)
+        cond("identity_chain_valid", True)
+    except Exception as exc:
+        cond("identity_chain_valid", False, str(exc))
 
     # no autonomous continuation after the society milestone
     requests = state_machine.project(chain)

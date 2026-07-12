@@ -75,6 +75,38 @@ def test_agent_cannot_record_policy_amended(env, sender):
                 "policy_version": 2, "policy_diff": diff, "impl_commit": head})
 
 
+def test_forged_amendment_events_never_advance_the_pin(env):
+    """M7a cycle-1 SECURITY regression: policy replay must RE-VALIDATE authority
+    from the chain, not trust the event payload. A hash-consistent POLICY_AMENDED
+    forged onto the chain — codex sender, or human sender with no token — must
+    NOT advance the effective pin (the events file is agent-writable)."""
+    root, repo, head, cfg, v1_hash = env
+    prev_hash, new_hash, diff = policy.amend_policy(root, 2)  # v2 file now on disk
+    chain = events.read_chain(root)
+    good_payload = {"policy_hash": new_hash, "prev_policy_hash": prev_hash,
+                    "policy_version": 2, "policy_diff": diff, "impl_commit": head}
+
+    def _forge(sender, payload):
+        import hashlib
+        from tools.council.schemas import compute_event_hash
+        prev = chain[-1]["event_hash"]
+        ev = {"event_type": "POLICY_AMENDED", "sender": sender,
+              "request_id": CONTROL_RID, "repository": repo,
+              "target_commit": head, "payload": payload,
+              "previous_event_hash": prev, "protocol_version": "1.0",
+              "seq": len(chain) + 1,
+              "event_id": f"{len(chain)+1:06d}-forged00"}
+        ev["event_hash"] = compute_event_hash(ev)
+        return chain + [ev]
+
+    # codex sender, no token — the auditor's exact probe
+    forged = _forge("codex", good_payload)
+    assert policy.effective_policy_pin(forged) == (v1_hash, 1)
+    # human sender but NO human_token — also refused
+    forged = _forge("human", good_payload)
+    assert policy.effective_policy_pin(forged) == (v1_hash, 1)
+
+
 def test_hand_edited_policy_is_not_a_code_defined_version(env):
     """An owner (or anyone) hand-editing the file to grant extra classes
     without going through amend_policy fails the code-defined-version gate."""
