@@ -28,6 +28,41 @@ from tools.council.schemas import (SchemaViolation, payload_hash,
 
 POLICY_ID = "coliseum-autonomy-policy-v1"
 
+# M7c autonomous safety envelope. Code-defined ceilings (agent-immutable; raising
+# them is an audited code change the owner integrates, satisfying "increased
+# ceilings require the owner"). The window resets on the owner's most recent
+# control action (STATUS_CHANGED / POLICY_AMENDED) — re-asserting control clears
+# the counters. auto-approval halts to the human gate when either is exceeded.
+AUTO_HALT_CONSECUTIVE_FAILURES = 3      # BLOCKED/PAUSED runs since a success
+MAX_AGGREGATE_COMPUTE_MINUTES = 720.0   # rolling autonomous compute budget
+
+
+def autonomous_safety_metrics(chain: list):
+    """(consecutive_failures, aggregate_compute_minutes) for the autonomous
+    experiment loop, counted since the owner's most recent control action."""
+    start = 0
+    for i, e in enumerate(chain):
+        if e.get("event_type") in ("STATUS_CHANGED", "POLICY_AMENDED"):
+            start = i + 1
+    window = chain[start:]
+    aggregate = 0.0
+    for e in window:
+        if e.get("event_type") == "EXPERIMENT_COMPLETE":
+            try:
+                aggregate += float((e.get("payload") or {}).get(
+                    "elapsed_minutes", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+    fails = 0
+    for e in reversed(window):
+        et = e.get("event_type")
+        if et in ("RESULT_BLOCKED", "AUTONOMY_PAUSED"):
+            fails += 1
+        elif et in ("RESULT_APPROVED", "EXPERIMENT_APPROVED",
+                    "CHANGE_INTEGRATED"):
+            break
+    return fails, aggregate
+
 # capability strings a request's forbidden_actions must explicitly carry
 FORBIDDEN_CAPABILITIES = ("destructive_tools", "cloud_apis",
                           "website_automation", "weight_training")
@@ -356,6 +391,21 @@ def evaluate(root: str, cfg: Config, request: dict, verdict_event: dict,
     # emergency stop precedes everything
     stop = storage.emergency_stop_reason(root)
     cond("emergency_stop_clear", stop is None, stop or "")
+
+    # M7c safety envelope: return-to-manual + runaway/compute auto-halt. These
+    # only gate AUTO-approval — the human gate (manual approval) still works.
+    cond("auto_approval_enabled", not storage.manual_mode_present(root),
+         "council is in manual mode (MANUAL marker present) — auto-approval "
+         "disabled; experiments require the human gate")
+    fails, aggregate = autonomous_safety_metrics(chain)
+    cond("consecutive_failures_within_bound",
+         fails < AUTO_HALT_CONSECUTIVE_FAILURES,
+         f"{fails} consecutive autonomous failures since the last owner "
+         "control action — the loop halts to the human gate pending review")
+    cond("aggregate_compute_within_bound",
+         aggregate <= MAX_AGGREGATE_COMPUTE_MINUTES,
+         f"{aggregate:.0f} min autonomous compute since the last owner control "
+         f"action exceeds the {MAX_AGGREGATE_COMPUTE_MINUTES:.0f} min ceiling")
 
     # event chain must verify end to end
     report = events_mod.verify_chain(root)

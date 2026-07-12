@@ -200,6 +200,17 @@ def stop_file_present(root: str) -> bool:
     return os.path.exists(stop_file_path(root))
 
 
+# M7c: return-to-manual. A `MANUAL` marker disables AUTO-approval of experiments
+# (they fall back to the human gate) WITHOUT halting the council — distinct from
+# STOP/paused, which halt every transition. The owner creates it to reclaim the
+# routine loop and removes it to resume autonomy.
+MANUAL_FILE = "MANUAL"
+
+
+def manual_mode_present(root: str) -> bool:
+    return os.path.exists(os.path.join(root, MANUAL_FILE))
+
+
 def policy_path(root: str) -> str:
     return os.path.join(root, POLICY_FILE)
 
