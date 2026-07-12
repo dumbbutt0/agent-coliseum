@@ -4,6 +4,7 @@ policy (re-checked in policy.evaluate) decides whether it may auto-run."""
 import json
 import os
 
+import pytest
 import yaml
 
 from tests.autonomy_util import REAL_REPO
@@ -13,34 +14,71 @@ from tools.autonomy import roadmap as roadmap_mod
 from tools.council.schemas import (validate_autonomy_block, validate_request)
 
 REG = os.path.join(REAL_REPO, "configs", "registry", "experiments.yaml")
+GEMMA_DIGEST = "a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a"
 
 
-def test_select_skips_complete_and_picks_a_registered_experiment(tmp_path):
+@pytest.fixture
+def synth_repo(tmp_path):
+    """A minimal repo (registry + one committed config) holding exactly one
+    pre-registered experiment plus one complete one. Loop selection/retry tests
+    use this instead of the real registry, which no longer has a pre-registered
+    experiment now that all M6 batches are complete. The config's task_id points
+    at a real roadmap task so build_run_request works against the real roadmap."""
+    from coliseum.textlab.registry import design_hash
+    repo = tmp_path / "synthrepo"
+    (repo / "configs" / "registry").mkdir(parents=True)
+    (repo / "configs" / "experiments").mkdir(parents=True)
+    pd = {"hypothesis": "loop fixture", "models": ["gemma3@a2af6cc3"],
+          "interaction_mode": "sequential_history",
+          "scenarios": ["hidden_objective"], "sampler_seeds": [11],
+          "temperature": 0.7, "prereg_doc": "docs/x.md"}
+    dh = design_hash(pd)
+    reg = {"registry_version": "1",
+           "held_out": {"policy": "", "scenarios": [], "scenario_hashes": []},
+           "experiments": [
+               {"experiment_id": "fixture-complete", "status": "complete"},
+               {"experiment_id": "loop-fixture-exp", "status": "pre-registered",
+                "generalization_level": "L2", "manifest": None,
+                "planned_design": pd, "design_hash": dh}]}
+    (repo / "configs" / "registry" / "experiments.yaml").write_text(
+        yaml.safe_dump(reg, sort_keys=False))
+    cfg = {"experiment_id": "loop-fixture-exp", "design_hash": dh,
+           "task_id": "m6-sequential-baseline", "driver": "ollama_local",
+           "models": ["gemma3:latest"],
+           "model_digests": {"gemma3:latest": GEMMA_DIGEST},
+           "scenarios": ["hidden_objective"], "seeds": [42],
+           "sampler_seeds": [11], "temperature": 0.7,
+           "interaction": "sequential_history",
+           "out_root": "logs/runs/loop-fixture-exp",
+           "manifest": "logs/runs/loop-fixture-exp.manifest.json",
+           "scenario_count": 1, "retries_per_unit": 0, "expected_run_count": 1}
+    (repo / "configs" / "experiments" /
+     "loop-fixture-exp.experiment.json").write_text(json.dumps(cfg))
+    return str(repo)
+
+
+def test_select_skips_complete_and_picks_a_registered_experiment(tmp_path,
+                                                                 synth_repo):
     root = make_root(tmp_path)
-    picked = loop.select_next_experiment(root, REAL_REPO)
+    picked = loop.select_next_experiment(root, synth_repo)
     assert picked is not None
     eid, config_path = picked
-    reg = yaml.safe_load(open(REG))
-    by_id = {e["experiment_id"]: e for e in reg["experiments"]}
-    # the pick is a PRE-REGISTERED experiment (never the completed batch 2)
-    assert by_id[eid]["status"] == "pre-registered"
-    assert eid != "m6-stochastic-baseline"
+    # the pick is the PRE-REGISTERED experiment; the `complete` one is skipped
+    assert eid == "loop-fixture-exp"
     assert os.path.exists(config_path)
     assert json.load(open(config_path))["experiment_id"] == eid
 
 
-def test_build_run_request_is_a_valid_auto_approve_request(tmp_path):
+def test_build_run_request_is_a_valid_auto_approve_request(tmp_path, synth_repo):
     root = make_root(tmp_path)
-    eid, config_path = loop.select_next_experiment(root, REAL_REPO)
+    eid, config_path = loop.select_next_experiment(root, synth_repo)
     config = json.load(open(config_path))
-    policy_doc = yaml.safe_load(open(os.path.join(
-        REAL_REPO, "configs", "registry", "experiments.yaml")))  # any doc
     roadmap = roadmap_mod.load_roadmap(
         os.path.join(REAL_REPO, "configs", "autonomy-roadmap.yaml"),
         _min_policy())[0]
     task = roadmap_mod.task_by_id(roadmap, config["task_id"])
     head = "a" * 40
-    req = loop.build_run_request(REAL_REPO, head, "b" * 64, eid,
+    req = loop.build_run_request(synth_repo, head, "b" * 64, eid,
                                  config_path, config, task)
     # it is an AUTO-approve request with a structurally valid autonomy block
     assert req["human_approval_required"] is False
@@ -61,7 +99,7 @@ def test_build_run_request_is_a_valid_auto_approve_request(tmp_path):
         assert f in req
 
 
-def test_canceled_attempt_does_not_orphan_experiment(tmp_path, monkeypatch):
+def test_canceled_attempt_does_not_orphan_experiment(tmp_path, synth_repo):
     """Regression (M7 activation): a `canceled` loop attempt is terminal-but-
     unsuccessful and must NOT permanently drop its experiment. The experiment
     stays selectable and the NEXT attempt uses a fresh, disambiguated id.
@@ -70,7 +108,7 @@ def test_canceled_attempt_does_not_orphan_experiment(tmp_path, monkeypatch):
     autoloop request was canceled to clear the activation pause: the old
     `proj.get(rid) is None` guard treated the cancel as 'already attempted'."""
     root = make_root(tmp_path)
-    picked = loop.select_next_experiment(root, REAL_REPO)
+    picked = loop.select_next_experiment(root, synth_repo)
     assert picked is not None
     eid, _ = picked
     base = loop._PREFIX + eid
@@ -115,9 +153,9 @@ def _stub_chain_proj(monkeypatch, chain, proj, halt=False,
     return L
 
 
-def _real_cfg_hash(eid):
+def _real_cfg_hash(eid, repo=REAL_REPO):
     import tools.autonomy.experiment_loop as L
-    return L._sha256_file(L._load_configs(REAL_REPO)[eid][0])
+    return L._sha256_file(L._load_configs(repo)[eid][0])
 
 
 def _cancel(rid, sender="claude", eid_events=None):
@@ -197,18 +235,18 @@ def test_classify_later_cancel_cannot_launder_a_failure():
     assert L.classify_prior_attempt(ch, rid) == "owner_directed"
 
 
-def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
+def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch,
+                                                  synth_repo):
     root = make_root(tmp_path)
-    eid, _ = __import__("tools.autonomy.experiment_loop", fromlist=["x"]) \
-        .select_next_experiment(root, REAL_REPO)
+    eid, _ = loop.select_next_experiment(root, synth_repo)
     base = "autoloop-" + eid
     # a codex-GO'd attempt aborted pre-execution (the B1 lifecycle), authority
     # valid, config unchanged
     chain = [_go(base), _cancel(base, "claude")]
     proj = {base: {"state": "canceled"}}
     L = _stub_chain_proj(monkeypatch, chain, proj,
-                         prior_cfg_hash=_real_cfg_hash(eid))
-    rid, lineage = L.plan_reattempt(root, REAL_REPO, eid)
+                         prior_cfg_hash=_real_cfg_hash(eid, synth_repo))
+    rid, lineage = L.plan_reattempt(root, synth_repo, eid)
     assert rid == f"{base}-002"
     assert lineage["reason_class"] == "pre_execution_retryable"
     assert lineage["attempt_ordinal"] == 2
@@ -221,18 +259,17 @@ def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
 
 
 def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, synth_repo):
     root = make_root(tmp_path)
-    import tools.autonomy.experiment_loop as L0
-    eid, _ = L0.select_next_experiment(root, REAL_REPO)
+    eid, _ = loop.select_next_experiment(root, synth_repo)
     base = "autoloop-" + eid
 
-    real = _real_cfg_hash(eid)
+    real = _real_cfg_hash(eid, synth_repo)
 
     # (a) owner cancellation is never auto-retried
     L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "human")],
                          {base: {"state": "canceled"}}, prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "owner_directed"
 
     # (b) an executed attempt (produced a result) is never auto-retried
@@ -240,7 +277,7 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
                       "event_id": "r1", "sender": "codex"}]
     L = _stub_chain_proj(monkeypatch, ch, {base: {"state": "result_blocked"}},
                          prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "result_stage"
 
     # (c) budget exhaustion: base + -002 + -003 all GO'd+cancels -> 4th denied
@@ -248,7 +285,7 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     ch = [ev for r in ids for ev in (_go(r), _cancel(r, "claude"))]
     proj = {r: {"state": "canceled"} for r in ids}
     L = _stub_chain_proj(monkeypatch, ch, proj, prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "retry_budget_exhausted"
     assert refusal["attempt_ordinal"] == 4
 
@@ -256,18 +293,18 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
                          {base: {"state": "canceled"}}, halt=True,
                          prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "standing_halt"
 
     # (e) a bare Claude cancel with no codex GO is NOT retryable (self-assertion)
     L = _stub_chain_proj(monkeypatch, [_approved(base), _cancel(base, "claude")],
                          {base: {"state": "canceled"}}, prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "other"
 
     # (f) NO attempt yet, but a halt is active -> even a first request is refused
     L = _stub_chain_proj(monkeypatch, [], {}, halt=True)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "standing_halt"
 
     # (g) a GO'd pre-execution cancel whose verdict authority is INVALID/
@@ -275,33 +312,30 @@ def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
     L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
                          {base: {"state": "canceled"}},
                          authority_valid=False, prior_cfg_hash=real)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "authority_invalid"
 
     # (h) a changed experiment config (predecessor hash differs) is refused
     L = _stub_chain_proj(monkeypatch, [_go(base), _cancel(base, "claude")],
                          {base: {"state": "canceled"}},
                          prior_cfg_hash="deadbeef" * 8)
-    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    rid, refusal = L.plan_reattempt(root, synth_repo, eid)
     assert rid is None and refusal["reason_class"] == "config_changed"
 
 
-def test_select_skips_non_retryable_experiment(tmp_path, monkeypatch):
+def test_select_skips_non_retryable_experiment(tmp_path, monkeypatch,
+                                               synth_repo):
     """A registered experiment whose only attempt was owner-canceled must NOT be
     auto-selected — selection is tightened, never loosened."""
     root = make_root(tmp_path)
-    import tools.autonomy.experiment_loop as L0
-    eid, _ = L0.select_next_experiment(root, REAL_REPO)
-    base = "autoloop-" + eid
-    # owner-cancel EVERY registered pre-registered experiment's base attempt
-    import yaml
-    reg = yaml.safe_load(open(REG))
+    reg = yaml.safe_load(open(os.path.join(
+        synth_repo, "configs", "registry", "experiments.yaml")))
     prereg = [e["experiment_id"] for e in reg["experiments"]
               if e.get("status") == "pre-registered"]
     chain = [_cancel("autoloop-" + x, "human") for x in prereg]
     proj = {"autoloop-" + x: {"state": "canceled"} for x in prereg}
     L = _stub_chain_proj(monkeypatch, chain, proj)
-    assert L.select_next_experiment(root, REAL_REPO) is None
+    assert L.select_next_experiment(root, synth_repo) is None
 
 
 def _min_policy():
