@@ -150,19 +150,39 @@ def effective_policy_pin(chain: list):
     #   (b) an amendment advances the pin ONLY if it is a human-SENDER event
     #       carrying a human_token (append enforces this, but policy replay must
     #       not depend on append having been the only writer).
-    from tools.council import identity
+    from tools.council import checkpoint, identity
     pin = pinned_policy_hash(chain)
     version = 1 if pin is not None else None
     try:
         identity.replay_identity(chain)
     except Exception:
         return pin, version   # identity chain invalid -> honor no amendment
+
+    # ROOT-ANCHOR the identity: an agent that can write events.jsonl could forge
+    # a HUMAN_IDENTITY_INITIALIZED root + a matching forged token, which
+    # replay_identity alone would trust. A POLICY_AMENDED is therefore honored
+    # ONLY when the root-owned chain-head checkpoint (/etc/coliseum/..., outside
+    # any agent's write authority) is provisioned, intact, and pins a prefix
+    # that COVERS the identity root — so the root cannot have been fabricated.
+    try:
+        cp = checkpoint.read_checkpoint()
+        cp_intact = cp is not None and checkpoint.verify_checkpoint(chain) is None
+    except Exception:
+        cp, cp_intact = None, False   # unreadable checkpoint -> fail closed
+    first_init = next((i for i, e in enumerate(chain)
+                       if e.get("event_type") == "HUMAN_IDENTITY_INITIALIZED"),
+                      None)
+    root_anchored = bool(cp_intact and first_init is not None
+                         and cp["length"] > first_init)
+
     for e in chain:
         if e.get("event_type") != "POLICY_AMENDED":
             continue
         p = e.get("payload", {}) or {}
         if e.get("sender") != "human" or not p.get("human_token"):
             break   # only an owner-token-authenticated amendment counts
+        if not root_anchored:
+            break   # amendment requires a root-owned checkpoint over the root
         if pin is None or p.get("prev_policy_hash") != pin:
             break
         nv = p.get("policy_version")

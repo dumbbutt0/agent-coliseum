@@ -9,10 +9,18 @@ import os
 import pytest
 
 from tests.council_util import append, make_cfg, make_repo, make_root
-from tools.council import events, policy, storage
+from tools.council import checkpoint, events, policy, storage
 from tools.council.schemas import SchemaViolation
 
 CONTROL_RID = "council-control"
+
+
+def _provision_checkpoint(root):
+    """Install a root-owned checkpoint over the current head (conftest isolates
+    CHECKPOINT_FILE to a per-test path) so amendments are root-anchored."""
+    cp = checkpoint.render_checkpoint(events.read_chain(root))
+    with open(checkpoint.CHECKPOINT_FILE, "w", encoding="utf-8") as fh:
+        json.dump(cp, fh)
 
 
 @pytest.fixture()
@@ -24,6 +32,7 @@ def env(tmp_path):
     _p, v1_hash = policy.load_policy(root)
     append(root, cfg, "POLICY_INITIALIZED", "human", CONTROL_RID, repo,
            "0" * 40, {"policy_hash": v1_hash, "policy_file": storage.POLICY_FILE})
+    _provision_checkpoint(root)   # root-owned anchor over the identity root
     return root, repo, head, cfg, v1_hash
 
 
@@ -125,6 +134,22 @@ def test_invalid_token_amendment_rolls_back_to_v1(env):
     policy.restore_policy_version(root, 1)
     live, live_hash = policy.load_policy(root)
     assert policy.policy_version_of(live) == 1 and live_hash == v1_hash
+    assert policy.effective_policy_pin(events.read_chain(root)) == (v1_hash, 1)
+
+
+def test_amendment_requires_root_owned_checkpoint(env):
+    """M7a cycle-3 SECURITY regression: an agent that can write events.jsonl
+    could forge an identity root + a matching forged token that replay_identity
+    alone would trust. A POLICY_AMENDED is honored ONLY when the root-owned
+    chain-head checkpoint anchors the identity root — remove the checkpoint and
+    the amendment is no longer trusted (fail closed to v1)."""
+    root, repo, head, cfg, v1_hash = env
+    _prev, new_hash = _amend_to_v2(root, repo, head, cfg)
+    # with the root-owned checkpoint, the owner amendment is honored
+    assert policy.effective_policy_pin(events.read_chain(root)) == (new_hash, 2)
+    # without a root-owned checkpoint anchoring the root, it is NOT trusted —
+    # exactly the forged-identity-root case (no genuine root anchor exists)
+    os.remove(checkpoint.CHECKPOINT_FILE)
     assert policy.effective_policy_pin(events.read_chain(root)) == (v1_hash, 1)
 
 
