@@ -89,6 +89,31 @@ def test_policy_drift_trips(tmp_path):
     assert any("policy" in f and "pinned" in f for f in report.failures)
 
 
+def test_valid_amendment_is_not_policy_drift(tmp_path):
+    """M7 activation regression: after the owner's POLICY_AMENDED, the v2 file
+    is the effective pin — guard.preflight must NOT report drift (the bug that
+    paused the first autonomous run). Uses the amendment-aware effective pin."""
+    import json
+
+    from tools.council import checkpoint
+    root, repo, head, cfg, rm_path = _setup(tmp_path)
+    _pol, v1_hash = policy.load_policy(root)
+    append(root, cfg, "POLICY_INITIALIZED", "human", "council-control", repo,
+           "0" * 40, {"policy_hash": v1_hash, "policy_file": storage.POLICY_FILE})
+    cp = checkpoint.render_checkpoint(events.read_chain(root))   # anchors root
+    with open(checkpoint.CHECKPOINT_FILE, "w", encoding="utf-8") as fh:
+        json.dump(cp, fh)
+    prev, new, diff = policy.amend_policy(root, 2)               # owner amends
+    append(root, cfg, "POLICY_AMENDED", "human", "council-control", repo, head,
+           {"policy_hash": new, "prev_policy_hash": prev, "policy_version": 2,
+            "policy_diff": diff, "impl_commit": head,
+            "policy_file": storage.POLICY_FILE})
+    report = guard.preflight(cfg, repo=repo, expect_head=head,
+                             roadmap_path=rm_path)
+    assert not any("policy" in f and "pinned" in f for f in report.failures), \
+        report.failures
+
+
 def test_roadmap_pin_drift_trips(tmp_path):
     root, repo, head, cfg, rm_path = _setup(tmp_path)
     report = guard.preflight(cfg, roadmap_path=rm_path,

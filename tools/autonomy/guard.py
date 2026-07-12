@@ -106,12 +106,16 @@ def preflight(cfg: Config, repo: str | None = None,
     try:
         pol, pol_hash = policy.load_policy(root)
         if report.ok:
-            pinned = policy.pinned_policy_hash(
+            # amendment-aware: the effective pin follows the owner-authorized
+            # POLICY_INITIALIZED + POLICY_AMENDED chain (M7a), so an activated
+            # v2 policy is NOT "drift". Uses the same authority walk as
+            # policy.evaluate — the two must agree.
+            eff_hash, _eff_ver = policy.effective_policy_pin(
                 events.read_chain(root, verify=False))
-            if pinned is not None and pinned != pol_hash:
+            if eff_hash is not None and eff_hash != pol_hash:
                 failures.append(
                     "policy: autonomy_policy.json changed since it was "
-                    f"pinned in the chain (pinned {pinned[:12]}, "
+                    f"pinned in the chain (effective pin {eff_hash[:12]}, "
                     f"now {pol_hash[:12]})")
     except Exception as exc:
         failures.append(f"policy: {exc}")

@@ -109,8 +109,9 @@ def compute_resume(cfg: Config, roadmap_path: str | None = None) -> dict:
     try:
         pol, pol_hash = policy.load_policy(root)
         out["policy_hash"] = pol_hash
-        pinned = policy.pinned_policy_hash(chain)
-        if pinned is not None and pinned != pol_hash:
+        # amendment-aware (M7a): an owner-authorized POLICY_AMENDED is not drift
+        eff_hash, _ = policy.effective_policy_pin(chain)
+        if eff_hash is not None and eff_hash != pol_hash:
             out["ok"] = False
             out["problems"].append("policy hash drifted from the pinned one")
     except Exception as exc:
