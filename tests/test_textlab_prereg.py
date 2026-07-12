@@ -74,6 +74,19 @@ def test_prereg_with_manifest_refused(tmp_path):
     assert any("must have manifest: null" in i for i in issues)
 
 
+def test_prereg_manifest_must_be_literal_null(tmp_path):
+    """Only literal YAML null passes — an empty string or the string
+    'null' is a non-null field and must be refused (it would smuggle a
+    non-null manifest past the no-runs guard)."""
+    for sentinel in ("", "null"):
+        def fn(raw, s=sentinel):
+            e = next(x for x in raw["experiments"]
+                     if x["experiment_id"] == "m6-stochastic-baseline")
+            e["manifest"] = s
+        issues = _mutate(tmp_path, fn)
+        assert any("must have manifest: null" in i for i in issues), sentinel
+
+
 def test_prereg_unregistered_scenario_refused(tmp_path):
     def fn(raw):
         e = next(x for x in raw["experiments"]

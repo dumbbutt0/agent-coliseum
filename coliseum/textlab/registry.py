@@ -123,9 +123,12 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
         # a design_hash pins the planned design so the eventual runs' autonomy
         # block must match it. Not citable evidence until it becomes complete.
         if status == "pre-registered":
-            if e.get("manifest") not in (None, "", "null"):
+            # LITERAL null only — an empty string or the string "null" is a
+            # non-null manifest field and must not bypass the no-runs guard
+            if "manifest" in e and e["manifest"] is not None:
                 issues.append(f"{eid}: pre-registered entry must have "
-                              "manifest: null (no runs yet)")
+                              "manifest: null (got "
+                              f"{e['manifest']!r}); no runs yet")
             pd = e.get("planned_design")
             if not isinstance(pd, dict):
                 issues.append(f"{eid}: pre-registered entry needs a "
