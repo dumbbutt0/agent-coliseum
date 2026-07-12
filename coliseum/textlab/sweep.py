@@ -209,25 +209,17 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     scenarios = list(spec["scenarios"])
     seeds = list(spec["seeds"])
 
-    os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
-    os.makedirs(out_root, exist_ok=True)
-    done = manifest_load(manifest_path, out_root)
     result = SweepResult()
-
-    total = len(spec["models"]) * len(scenarios) * len(seeds) * len(sampler_seeds)
-    say(f"sweep[{mode}|{interaction}]: {len(spec['models'])} models x "
-        f"{len(scenarios)} scenarios x {len(seeds)} scenario-seeds x "
-        f"{len(sampler_seeds)} sampler-seeds = {total} runs "
-        f"({len(done)} already done)")
 
     def _deadline_hit():
         return deadline is not None and time.monotonic() > deadline
 
-    # ---- ATOMIC fleet preflight (audit blocker): probe and validate the
-    # digest of EVERY configured model BEFORE any compute or evidence write.
-    # Validating model-by-model inside the run loop let an earlier model run
-    # and write rows before a later repulled model aborted; a mismatch
-    # anywhere must refuse the whole sweep before run_scenario is ever called.
+    # ---- ATOMIC fleet preflight (audit blocker, cycle-2): probe and validate
+    # the digest of EVERY configured model FIRST — before any filesystem touch
+    # (no out_root/manifest dir creation, no manifest read) and before any
+    # compute. A mismatched/unreachable model anywhere in the fleet refuses the
+    # whole sweep here, so a repulled LATER model can never be masked by an
+    # earlier model's runs OR by a malformed pre-existing manifest.
     probes = {}
     for model in spec["models"]:
         if _deadline_hit():
@@ -249,7 +241,18 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
         probe.resolve_effective_config()
         probes[model] = probe
         result.digests[model] = probe.model_digest
-    # only now that the ENTIRE fleet is pinned+validated do we touch evidence
+
+    # only now that the ENTIRE fleet is pinned+validated do we touch the
+    # filesystem: create the evidence root and read any resumable manifest
+    os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
+    os.makedirs(out_root, exist_ok=True)
+    done = manifest_load(manifest_path, out_root)
+
+    total = len(spec["models"]) * len(scenarios) * len(seeds) * len(sampler_seeds)
+    say(f"sweep[{mode}|{interaction}]: {len(spec['models'])} models x "
+        f"{len(scenarios)} scenarios x {len(seeds)} scenario-seeds x "
+        f"{len(sampler_seeds)} sampler-seeds = {total} runs "
+        f"({len(done)} already done)")
 
     with open(manifest_path, "a", encoding="utf-8") as manifest:
         for model in spec["models"]:

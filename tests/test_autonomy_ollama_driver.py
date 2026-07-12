@@ -150,6 +150,48 @@ def test_fleet_preflight_is_atomic(tmp_path, monkeypatch):
     assert rows == []
 
 
+def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
+    """Cycle-2 audit regression: the atomic fleet preflight must run BEFORE
+    manifest_load and before the out_root is created — so a later repulled
+    model is refused even when a malformed manifest already exists, and
+    manifest_load is never reached on a preflight refusal."""
+    good, bad = "llama3.1:latest", "gemma3:latest"
+    fixture_dg = _fixture_digest()
+
+    def _probe(model, host=None):
+        p = _mk_mock(model)
+        if model == bad:
+            p.model_digest = "sha256:repulled-second-model"
+        return p
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _probe)
+
+    # a manifest_load spy: if the preflight is correctly first, it is never hit
+    calls = []
+    real_load = sweep_mod.manifest_load
+    monkeypatch.setattr(sweep_mod, "manifest_load",
+                        lambda *a, **k: (calls.append(a), real_load(*a, **k))[1])
+
+    out_root = str(tmp_path / "runs")
+    os.makedirs(out_root)
+    # a MALFORMED prior manifest that WOULD raise if parsed before the probe
+    manifest = os.path.join(out_root, "m.jsonl")
+    with open(manifest, "w", encoding="utf-8") as fh:
+        fh.write("{ this is not valid json\n")
+    spec = {"models": [good, bad], "scenarios": [SCENARIO], "seeds": [42],
+            "sampler_seeds": None, "temperature": 0.0,
+            "arbitration": "planner_priority",
+            "interaction": "independent_vignettes",
+            "config_dir": os.path.join(ROOT, "configs", "scenarios"),
+            "out_root": out_root, "manifest": manifest}
+    # the abort is the DIGEST refusal (preflight), not a JSON/Schema error
+    with pytest.raises(SweepAborted, match="NEW regime"):
+        run_sweep(spec, expected_digests={good: fixture_dg, bad: fixture_dg})
+    assert calls == [], "manifest_load ran before the fleet preflight"
+    produced = [p for p in os.listdir(out_root) if p != "m.jsonl"]
+    assert produced == [], f"evidence created despite preflight refusal: {produced}"
+
+
 def test_resume_is_idempotent(tmp_path, monkeypatch):
     """A second identical run adds no rows and still passes — the manifest is
     keyed by (regime, scenario_seed, sampler_seed)."""
@@ -172,13 +214,12 @@ def test_served_digest_mismatch_refuses(tmp_path, monkeypatch):
     cfg = _config(tmp_path)   # model_digests still pins the ORIGINAL fixture digest
     with pytest.raises(RunnerRefusal, match="NEW regime"):
         _drive_ollama_local(ROOT, cfg, _far_deadline())
-    # aborted before any run — the manifest may be an empty touched file, but
-    # no evidence rows and no run dirs were produced
-    rows = [l for l in open(cfg["manifest"], encoding="utf-8")] \
-        if os.path.exists(cfg["manifest"]) else []
-    assert rows == []
-    assert not any(p not in ("manifest.jsonl",)
-                   for p in os.listdir(cfg["out_root"]))
+    # aborted in the preflight before any filesystem touch — the out_root is
+    # never created and no manifest/evidence exists
+    produced = os.listdir(cfg["out_root"]) if os.path.exists(cfg["out_root"]) \
+        else []
+    assert produced == []
+    assert not os.path.exists(cfg["manifest"])
 
 
 def test_unreachable_endpoint_refuses(tmp_path, monkeypatch):
