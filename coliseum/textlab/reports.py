@@ -53,23 +53,34 @@ def run_report(run_dir: str) -> str:
 
 def regime_report(aggregate_path: str) -> str:
     """One aggregate artifact -> regime-level markdown (all cells, twin
-    deltas, faith knob, exclusions)."""
+    deltas, faith knob, exclusions). Tolerant of BOTH the current aggregate
+    shape and legacy artifacts (pre-Day-5 aggregates lack mode/counts/
+    metrics_version and name exclusions differently) — a report generator
+    must render whatever committed artifacts exist."""
     with open(aggregate_path, encoding="utf-8") as fh:
         agg = json.load(fh)
-    lines = [f"# Regime report — {agg['mode']} / {agg['interaction_mode']}",
-             "", f"- metrics_version: {agg.get('metrics_version')}  "
-             f"admission: {agg['admission']}",
-             f"- cells: {len(agg['cells'])}  excluded runs: "
-             f"{len(agg['excluded'])}  attempt exclusions: "
-             f"{len(agg['attempt_exclusions'])}", ""]
-    for key, cell in agg["cells"].items():
-        c = cell["counts"]
-        lines += [f"## `{key}`",
-                  f"- effective_n: **{c['effective_n']}**  (raw {c['raw_attempt_n']}, "
-                  f"retries {c['retry_n']}, variants {c['unique_variant_n']}, "
-                  f"sampler seeds {c['unique_sampler_seed_n']})", "",
-                  "| metric | value |", "|---|---|"]
-        for name in sorted(cell["metrics"]):
+    excluded = agg.get("excluded", agg.get("excluded_non_reportable", []))
+    lines = [f"# Regime report — {agg.get('mode', 'legacy')} / "
+             f"{agg.get('interaction_mode', 'independent_vignettes')}",
+             "", f"- metrics_version: {agg.get('metrics_version', 'legacy')}  "
+             f"admission: {agg.get('admission', 'n/a')}",
+             f"- cells: {len(agg.get('cells', {}))}  excluded runs: "
+             f"{len(excluded)}  attempt exclusions: "
+             f"{len(agg.get('attempt_exclusions', []))}", ""]
+    for key, cell in agg.get("cells", {}).items():
+        c = cell.get("counts")
+        lines.append(f"## `{key}`")
+        if c:
+            lines.append(
+                f"- effective_n: **{c['effective_n']}**  (raw "
+                f"{c['raw_attempt_n']}, retries {c['retry_n']}, variants "
+                f"{c['unique_variant_n']}, sampler seeds "
+                f"{c['unique_sampler_seed_n']})")
+        else:
+            lines.append("- (legacy cell — no effective-n counts recorded; "
+                         "regenerate under the current engine to populate)")
+        lines += ["", "| metric | value |", "|---|---|"]
+        for name in sorted(cell.get("metrics", {})):
             lines.append(f"| `{name}` | {_fmt(cell['metrics'][name])} |")
         lines.append("")
     if agg["control_twin_delta"]:

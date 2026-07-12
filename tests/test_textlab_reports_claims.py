@@ -122,15 +122,42 @@ def test_unregistered_evidence_refused(tmp_path):
 
 # ------------------------------------------------------------- dashboard
 
-def test_dashboard_is_pure_function_of_inputs():
+def _load_dashboard():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "dashboard", os.path.join(ROOT, "scripts", "dashboard.py"))
     dash = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dash)
-    a = dash.render(test_count=999)
-    b = dash.render(test_count=999)
-    assert a == b                                   # deterministic
+    return dash
+
+
+def test_dashboard_render_is_pure_over_snapshot():
+    """render() must be a PURE function of an explicit snapshot — the same
+    snapshot yields byte-identical output; gather() is the impure step."""
+    dash = _load_dashboard()
+    snap = {
+        "roadmap": {"milestone": "first-gladiator",
+                    "tasks": [{"task_id": f"m{i}-x", "status": "pending"}
+                              for i in range(1, 16)]},
+        "scenarios": [{"scenario_id": "s", "family": "authority"}],
+        "experiments": [], "claims": [
+            {"claim_id": "c", "state": "accepted"}],
+        "council": {"chain_len": 100, "verify": True, "active": [],
+                    "blocked": [], "integrated_milestones":
+                    ["first-gladiator-m1", "first-gladiator-m2"]},
+        "test_count": 999}
+    a = dash.render(snap)
+    b = dash.render(copy.deepcopy(snap))
+    assert a == b                                   # pure over the snapshot
     assert "Program Dashboard" in a
-    assert "ACCEPTED only" in a
-    assert "/8 present" in a                         # family coverage line
+    assert "/8 present" in a
+    # accepted claim surfaces as a paper candidate
+    assert "`c`" in a.split("Paper candidates")[1]
+    # milestone completion derived from the chain snapshot, not statuses
+    assert "2/15 integrated" in a
+
+
+def test_dashboard_gather_render_end_to_end():
+    dash = _load_dashboard()
+    text = dash.render(dash.gather(test_count=777))
+    assert "Program Dashboard" in text and "777" in text

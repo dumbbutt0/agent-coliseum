@@ -10,13 +10,13 @@
 
 ## Council health
 
-- chain length: 323  verify: OK
+- chain length: 328  verify: OK
 - active requests: codex-auto-launcher-audit-002:go
-- BLOCKED requests: none
+- BLOCKED requests: first-gladiator-m5-reports-001
 
 ## Coverage
 
-- tests: 816
+- tests: 817
 - scenario families: 3/8 present (authority, deception, moral_conflict)
 - families still to build: uncertainty, time_pressure, self_preservation, social_pressure, memory_persistence
 - registered scenarios: 7  experiments: 4

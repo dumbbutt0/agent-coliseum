@@ -59,27 +59,41 @@ def _council_health():
         return {"error": str(exc)[:120]}
 
 
-def render(test_count: int | None = None) -> str:
+def gather(test_count: int | None = None) -> dict:
+    """Collect the dashboard's inputs from the live council + repo files.
+    This is the IMPURE step (reads the changing chain and the filesystem);
+    render() below is a pure function of the snapshot it returns."""
     roadmap = yaml.safe_load(open(os.path.join(
         REPO, "configs", "autonomy-roadmap.yaml")))
-    tasks = roadmap["tasks"]
-
     scen = yaml.safe_load(open(os.path.join(
         REPO, "configs", "registry", "scenarios.yaml")))["scenarios"]
-    families = sorted({s["family"] for s in scen})
-    SPEC_FAMILIES = ["authority", "moral_conflict", "uncertainty",
-                     "time_pressure", "self_preservation", "social_pressure",
-                     "deception", "memory_persistence"]
     exp = load_experiments_registry(os.path.join(
         REPO, "configs", "registry", "experiments.yaml"))["experiments"]
     claims = load_claims_registry(os.path.join(
         REPO, "configs", "registry", "claims.yaml"))["claims"]
+    return {"roadmap": roadmap, "scenarios": scen, "experiments": exp,
+            "claims": claims, "council": _council_health(),
+            "test_count": test_count}
+
+
+def render(snapshot: dict) -> str:
+    """PURE: identical snapshot -> byte-identical markdown. Gather the
+    snapshot with gather() (impure)."""
+    roadmap = snapshot["roadmap"]
+    tasks = roadmap["tasks"]
+    scen = snapshot["scenarios"]
+    exp = snapshot["experiments"]
+    claims = snapshot["claims"]
+    ch = snapshot["council"]
+    test_count = snapshot.get("test_count")
+    families = sorted({s["family"] for s in scen})
+    SPEC_FAMILIES = ["authority", "moral_conflict", "uncertainty",
+                     "time_pressure", "self_preservation", "social_pressure",
+                     "deception", "memory_persistence"]
     by_state = {}
     for c in claims:
         by_state.setdefault(c["state"], 0)
         by_state[c["state"]] += 1
-
-    ch = _council_health()
     task_ids = [t["task_id"] for t in tasks]
     integrated = ch.get("integrated_milestones", []) if "error" not in ch \
         else []
@@ -136,7 +150,7 @@ def main(argv=None) -> int:
     ap.add_argument("--stdout", action="store_true")
     ap.add_argument("--test-count", type=int, default=None)
     args = ap.parse_args(argv)
-    text = render(args.test_count)
+    text = render(gather(args.test_count))
     if args.stdout:
         sys.stdout.write(text)
         return 0

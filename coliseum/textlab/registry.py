@@ -224,12 +224,18 @@ def lint_claims_registry(claims_path: str, experiments_path: str,
                               f"(demoted) evidence {eid!r} — demoted "
                               "evidence can never carry a claim up the "
                               "ladder")
+        prereg = c.get("preregistered_replication_of")
+        if prereg is not None and prereg not in citable_exp:
+            issues.append(f"{cid}: preregistered_replication_of {prereg!r} "
+                          "does not resolve to a citable experiment")
         if state in ("replicated", "generalized", "accepted"):
-            if len(set(evidence) & citable_exp) < 2 and not \
-                    c.get("preregistered_replication_of"):
+            # replication inherently needs the original + its reproduction:
+            # >=2 CITABLE evidence experiments, full stop. A pre-registration
+            # link is extra provenance, never a substitute for the evidence.
+            if len(set(evidence) & citable_exp) < 2:
                 issues.append(f"{cid}: {state!r} requires >=2 citable "
-                              "evidence experiments or an explicit "
-                              "preregistered_replication_of link")
+                              "evidence experiments (a pre-registration "
+                              "link does not substitute for evidence)")
         if state == "accepted" and not c.get("finding_audit"):
             issues.append(f"{cid}: 'accepted' requires a finding_audit "
                           "reference (the independent audit of the claim)")
