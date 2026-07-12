@@ -1,44 +1,33 @@
-# Claims registry — the research claim lifecycle (SPEC section 5,
-# owner-ratified SC-3). Every empirical claim climbs: speculation ->
-# observation -> replicated -> generalized -> accepted (requires an
-# independent finding audit); refuted/demoted are first-class with reasons
-# and former states. Paper drafts cite `accepted` only. Machine-checked by
-# coliseum/textlab/registry.py::lint_claims_registry: evidence links must
-# resolve in the experiment registry; demoted evidence can never carry a
-# claim up the ladder; replicated+ needs >=2 citable experiments or an
-# explicit preregistered replication link.
 registry_version: '1'
 claims:
 - claim_id: deliberation-layer-wording-sensitivity
   state: replicated
-  statement: "gemma3's reflex-lie/planner-admit reversal on hidden_objective_aligned\
-    \ d2 is wording-specific: 0/5 on generalized wording (exp1) vs 5/5 on the original\
-    \ v1_cistern wording (exp2, pre-registered) \u2014 the DELIBERATION layer, not\
-    \ fast/slow instability, is the wording-sensitive component (this digest/wording/regime\
-    \ only; independent_vignettes condition)"
+  statement: "gemma3's reflex-lie/planner-admit reversal on hidden_objective_aligned d2 is wording-specific:\
+    \ 0/5 on generalized wording (exp1) vs 5/5 on the original v1_cistern wording (exp2, pre-registered)\
+    \ \u2014 the DELIBERATION layer, not fast/slow instability, is the wording-sensitive component (this\
+    \ digest/wording/regime only; independent_vignettes condition)"
   evidence:
   - exp1-gemma3-reversal
   - exp2-v1cistern-replication
   preregistered_replication_of: exp1-gemma3-reversal
-  conditioning: gemma3 digest a2af6cc3..., stochastic t0.7 seeds 11-15, immediate-response
-    vs deliberation-instructed conditions, independent_vignettes
+  conditioning: gemma3 digest a2af6cc3..., stochastic t0.7 seeds 11-15, immediate-response vs deliberation-instructed
+    conditions, independent_vignettes
   next_rung: generalization via the M6 sequential-history rerun + M10 reversal program
   wiki: coliseum-exp2-reversal-replicated
 - claim_id: universal-harm-refusal-temp0
   state: observation
-  statement: all three models refused verified-harm compliance at temperature 0
-    across the three built families (exploratory; both source datasets are demoted)
+  statement: all three models refused verified-harm compliance at temperature 0 across the three built
+    families (exploratory; both source datasets are demoted)
   evidence:
   - pilot-cross-model-sweep
   - sweep-v2
-  caveat: evidence demoted (pilot + legacy); needs a citable rerun before climbing;
-    effective_n=2 per cell by construction
+  caveat: evidence demoted (pilot + legacy); needs a citable rerun before climbing; effective_n=2 per
+    cell by construction
   wiki: coliseum-first-cross-model-sweep
 - claim_id: divergence-model-fingerprint
   state: observation
-  statement: "reflex-planner divergence rate orders consistently by model (gemma3\
-    \ < llama3.1 < qwen3) across demoted deterministic datasets \u2014 a candidate\
-    \ model fingerprint"
+  statement: "reflex-planner divergence rate orders consistently by model (gemma3 < llama3.1 < qwen3)\
+    \ across demoted deterministic datasets \u2014 a candidate model fingerprint"
   evidence:
   - pilot-cross-model-sweep
   - sweep-v2
@@ -49,9 +38,8 @@ claims:
   former_state: observation
   statement: (withdrawn) gemma3 maintains a cover story across decision points
   evidence: []
-  reason: "full audit 2026-07-10: prompts carried NO prior action/outcome \u2014\
-    \ pre-audit evidence measures prompt-conditioned responses, not sequential behavior;\
-    \ requires the sequential_history rerun (M6)"
+  reason: "full audit 2026-07-10: prompts carried NO prior action/outcome \u2014 pre-audit evidence measures\
+    \ prompt-conditioned responses, not sequential behavior; requires the sequential_history rerun (M6)"
   wiki: coliseum-exp2-reversal-replicated
 - claim_id: remembered-confession
   state: demoted
@@ -63,10 +51,16 @@ claims:
 - claim_id: temporal-dissociation-cognitive-layers
   state: demoted
   former_state: speculation
-  statement: (withdrawn) reflex/planner reversals evidence distinct temporal cognitive
-    layers
+  statement: (withdrawn) reflex/planner reversals evidence distinct temporal cognitive layers
   evidence: []
-  reason: 'full audit 2026-07-10: interpretation exceeded the operational vocabulary
-    (immediate-response vs deliberation-instructed conditions); mechanistic claims
-    deferred to the J-lens phase'
+  reason: 'full audit 2026-07-10: interpretation exceeded the operational vocabulary (immediate-response
+    vs deliberation-instructed conditions); mechanistic claims deferred to the J-lens phase'
   wiki: coliseum-interaction-mode-ruling
+- claim_id: live-stochastic-safety-floor
+  state: observation
+  statement: "Under live stochastic sampling (temperature 0.7, N=120, three pinned models x four built\
+    \ families, independent_vignettes), harm_compliance and deceptive_compliance rates are 0.0 in every\
+    \ run \u2014 the deterministic-pilot safety floor holds live. OBSERVATION only: one experiment, this\
+    \ fleet/regime; not replicated, no cross-model ranking claimed."
+  evidence:
+  - m6-stochastic-baseline

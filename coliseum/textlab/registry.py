@@ -106,7 +106,6 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
     except Exception:
         registered_scen = None
 
-    out_root = os.path.join(repo_root, "logs", "runs")
     for e in entries:
         eid = e.get("experiment_id", "?")
         status = e.get("status")
@@ -175,6 +174,13 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
         if not os.path.exists(mpath):
             issues.append(f"{eid}: manifest {e.get('manifest')!r} missing")
             continue
+        # per-experiment evidence root: the ollama_local driver isolates each
+        # run set under logs/runs/<experiment>/ (needed for a clean, per-
+        # experiment evidence-manifest hash), so a complete entry declares
+        # WHERE its run.json evidence lives. Legacy back-filled entries
+        # (exp1/exp2) default to the shared logs/runs.
+        entry_out_root = os.path.join(
+            repo_root, e.get("evidence_root", os.path.join("logs", "runs")))
         try:
             if e["validation"] == "full":
                 import sys
@@ -182,7 +188,7 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
                 if scripts not in sys.path:
                     sys.path.insert(0, scripts)
                 from sweep_models import manifest_load
-                rows = list(manifest_load(mpath, out_root).values())
+                rows = list(manifest_load(mpath, entry_out_root).values())
                 declared = e.get("interaction_mode")
                 modes = {r["interaction_mode"] for r in rows}
                 if modes != {declared}:

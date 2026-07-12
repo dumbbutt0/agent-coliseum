@@ -25,8 +25,9 @@ def test_three_m6_preregs_present_and_frozen():
     raw = load_experiments_registry(EXPERIMENTS)
     pre = {e["experiment_id"]: e for e in raw["experiments"]
            if e["status"] == "pre-registered"}
-    assert set(pre) == {"m6-sequential-rerun", "m6-stochastic-baseline",
-                        "m6-paraphrase-replication"}
+    # m6-stochastic-baseline ran and is now registered complete (batch 2);
+    # the two batches still awaiting runs remain pre-registered
+    assert set(pre) == {"m6-sequential-rerun", "m6-paraphrase-replication"}
     for e in pre.values():
         assert e["manifest"] is None
         assert e["design_hash"] == design_hash(e["planned_design"])
@@ -68,7 +69,7 @@ def test_prereg_design_tamper_refused(tmp_path):
 def test_prereg_with_manifest_refused(tmp_path):
     def fn(raw):
         e = next(x for x in raw["experiments"]
-                 if x["experiment_id"] == "m6-stochastic-baseline")
+                 if x["experiment_id"] == "m6-sequential-rerun")
         e["manifest"] = "derived/textlab/sweep-manifest.jsonl"
     issues = _mutate(tmp_path, fn)
     assert any("must have manifest: null" in i for i in issues)
@@ -81,7 +82,7 @@ def test_prereg_manifest_must_be_literal_null(tmp_path):
     for sentinel in ("", "null"):
         def fn(raw, s=sentinel):
             e = next(x for x in raw["experiments"]
-                     if x["experiment_id"] == "m6-stochastic-baseline")
+                     if x["experiment_id"] == "m6-paraphrase-replication")
             e["manifest"] = s
         issues = _mutate(tmp_path, fn)
         assert any("must have manifest: null" in i for i in issues), sentinel

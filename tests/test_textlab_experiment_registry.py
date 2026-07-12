@@ -48,12 +48,39 @@ def test_backfill_shape():
         assert by_id[eid]["frozen"]
 
 
+def test_m6_stochastic_baseline_registered_complete():
+    """M6 batch 2 closed the loop: the first live experiment is registered
+    complete + full + frozen, with a per-experiment evidence_root (the driver
+    isolates each run set under logs/runs/<experiment>/)."""
+    e = {x["experiment_id"]: x for x in
+         load_experiments_registry(REGISTRY)["experiments"]}[
+        "m6-stochastic-baseline"]
+    assert e["status"] == "complete" and e["validation"] == "full"
+    assert e["frozen"] and e["rows"] == 120
+    assert e["evidence_root"] == "logs/runs/m6-stochastic-baseline"
+    assert e["design_hash"] and e["evidence_inventory_hash"]  # provenance kept
+
+
 def _mutated(tmp_path, mutate):
     raw = load_experiments_registry(REGISTRY)
     mutate(raw)
     p = tmp_path / "experiments.yaml"
     p.write_text(yaml.safe_dump(raw, sort_keys=False))
     return lint_experiments_registry(str(p), ROOT)
+
+
+def test_wrong_evidence_root_refused(tmp_path):
+    """A complete entry whose evidence_root points where the run.json evidence
+    is NOT found fails full validation — the manifest can't be validated
+    against absent evidence (the per-experiment root must be correct)."""
+    def mutate(raw):
+        e = next(x for x in raw["experiments"]
+                 if x["experiment_id"] == "m6-stochastic-baseline")
+        e["evidence_root"] = "logs/runs/no-such-experiment-dir"
+        e["entry_hash"] = entry_hash(e)   # rehash so it's not a frozen-mutation hit
+    issues = _mutated(tmp_path, mutate)
+    assert any("manifest validation failed" in i or "missing run.json" in i
+               or "evidence dir missing" in i for i in issues)
 
 
 def test_frozen_entry_mutation_refused(tmp_path):

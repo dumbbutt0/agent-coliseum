@@ -23,9 +23,22 @@ def _path(name):
     return os.path.join(CONFIG_DIR, CONFIGS[name])
 
 
-@pytest.mark.parametrize("name", list(CONFIGS))
+# m6-stochastic-baseline (batch 2) has RUN and is registered complete; the two
+# batches still awaiting runs bind a pre-registered design and must lint clean
+PENDING = ["m6-sequential-rerun", "m6-paraphrase-replication"]
+
+
+@pytest.mark.parametrize("name", PENDING)
 def test_committed_config_binds_to_frozen_design(name):
     assert lint_experiment_config(_path(name), REG, ROOT) == []
+
+
+def test_completed_experiment_config_no_longer_runnable():
+    """Once an experiment is registered complete, its run config is refused —
+    the provenance gate binds only PRE-REGISTERED designs, so a completed
+    experiment can never be silently re-run against the same frozen design."""
+    issues = lint_experiment_config(_path("m6-stochastic-baseline"), REG, ROOT)
+    assert any("pre-registered" in i for i in issues)
 
 
 def test_all_three_batches_present():
