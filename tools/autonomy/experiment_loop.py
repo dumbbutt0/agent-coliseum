@@ -111,16 +111,131 @@ def next_request_id(proj: dict, eid: str) -> str:
     return f"{base}-{n:03d}"
 
 
+# --- retry safety: a re-attempt must be BOUNDED and REASON-AWARE ------------
+# Only a PRE-EXECUTION cancel by the loop may be auto-retried. Owner
+# cancellation, rejected results, standing halts, design/audit failures, and an
+# exhausted budget must never mint a fresh request id automatically. The
+# classification is DERIVED from immutable chain facts (never a self-asserted
+# field) so an agent cannot expand its own retry authority.
+MAX_ATTEMPTS_PER_EXPERIMENT = 3
+
+# event types that prove an attempt actually EXECUTED (ran live / had a result)
+_EXECUTION_EVENTS = frozenset({
+    "EXPERIMENT_STARTED", "EXPERIMENT_COMPLETE", "RESULT_VALIDATION_REQUIRED",
+    "RESULT_AUDIT_REQUESTED", "RESULT_APPROVED", "RESULT_BLOCKED"})
+
+# reason classes that permit an automatic fresh attempt
+_RETRYABLE = frozenset({"initial", "pre_execution_retryable"})
+
+
+def _ordinal_of(rid: str, eid: str) -> int:
+    """1 for the base id, N for autoloop-<eid>-00N."""
+    base = _PREFIX + eid
+    if rid == base:
+        return 1
+    m = re.match("^" + re.escape(base) + r"-(\d{3,})$", rid)
+    return int(m.group(1)) if m else 1
+
+
+def _events_for(chain: list, rid: str) -> list:
+    return [e for e in chain if e.get("request_id") == rid]
+
+
+def classify_prior_attempt(chain: list, rid: str, active_halt: bool) -> str:
+    """Fail-closed retry classification of a terminal attempt, derived only from
+    chain facts. Retryable ONLY when the loop canceled it BEFORE any live
+    execution with no active standing halt. Any ambiguity => non-retryable."""
+    evs = _events_for(chain, rid)
+    if not evs:
+        return "other"
+    types = [e["event_type"] for e in evs]
+    if any(t in _EXECUTION_EVENTS for t in types):
+        return "result_stage"                 # it ran or produced a result
+    if types[-1] == "AUDIT_BLOCKED":
+        return "audit_blocked"                # design/audit failure
+    cancels = [e for e in evs if e["event_type"] == "REQUEST_CANCELED"]
+    if not cancels:
+        return "other"
+    if cancels[-1].get("sender") == "human":
+        return "owner_directed"               # owner cancellation
+    if active_halt:
+        return "standing_halt"                # a halt is engaged right now
+    return "pre_execution_retryable"          # loop-canceled, pre-execution
+
+
+def _active_halt(root: str, proj: dict) -> bool:
+    flags = state_machine.global_flags(proj)
+    return bool(storage.stop_file_present(root)
+                or storage.manual_mode_present(root)
+                or flags.get("autonomy_paused")
+                or flags.get("milestone_reached"))
+
+
+def plan_reattempt(root: str, repo: str, eid: str):
+    """Decide whether experiment `eid` may take a fresh autonomous attempt.
+    Returns (request_id, lineage) when permitted, else (None, refusal). The
+    lineage records every property the owner requires: prior request id, the
+    cancellation/failure event, the reason classification, the attempt ordinal,
+    the (unchanged) experiment + design hashes, and the applicable ceiling."""
+    configs = _load_configs(repo)
+    if eid not in configs:
+        return None, {"reason_class": "other", "detail": "no committed config"}
+    config_path, config = configs[eid]
+    reg = {e["experiment_id"]: e for e in _registry(repo)["experiments"]}
+    design_hash = config.get("design_hash")
+    registry_design = reg.get(eid, {}).get("design_hash")
+    cfg_hash = _sha256_file(config_path)
+    ceiling = MAX_ATTEMPTS_PER_EXPERIMENT
+    # unchanged experiment + design: the frozen config's design must equal the
+    # registry's pre-registered design (the provenance gate also enforces this).
+    if registry_design is not None and design_hash != registry_design:
+        return None, {"reason_class": "design_changed", "experiment_id": eid,
+                      "detail": "config design_hash != registry design_hash"}
+
+    chain = events.read_chain(root)
+    proj = state_machine.project(chain)
+    attempts = _attempt_rids(proj, eid)
+    active_halt = _active_halt(root, proj)
+
+    if not attempts:                          # first attempt ever
+        return _PREFIX + eid, {
+            "prior_request_id": None, "prior_terminal_event_id": None,
+            "reason_class": "initial", "attempt_ordinal": 1,
+            "experiment_id": eid, "design_hash": design_hash,
+            "prior_design_hash": design_hash, "experiment_config_hash": cfg_hash,
+            "retry_ceiling": ceiling}
+
+    prior_rid = max(attempts, key=lambda r: _ordinal_of(r, eid))
+    next_ord = _ordinal_of(prior_rid, eid) + 1
+    reason = classify_prior_attempt(chain, prior_rid, active_halt)
+    prior_evs = _events_for(chain, prior_rid)
+    prior_terminal = prior_evs[-1]["event_id"] if prior_evs else None
+    base_refusal = {"reason_class": reason, "prior_request_id": prior_rid,
+                    "prior_terminal_event_id": prior_terminal,
+                    "attempt_ordinal": next_ord, "experiment_id": eid,
+                    "retry_ceiling": ceiling}
+    if reason not in _RETRYABLE:
+        return None, base_refusal
+    if next_ord > ceiling:                    # budget exhausted -> escalate
+        return None, {**base_refusal, "reason_class": "retry_budget_exhausted"}
+    return next_request_id(proj, eid), {
+        "prior_request_id": prior_rid, "prior_terminal_event_id": prior_terminal,
+        "reason_class": reason, "attempt_ordinal": next_ord,
+        "experiment_id": eid, "design_hash": design_hash,
+        "prior_design_hash": design_hash, "experiment_config_hash": cfg_hash,
+        "retry_ceiling": ceiling}
+
+
 def select_next_experiment(root: str, repo: str):
-    """The next PRE-REGISTERED experiment that has a committed run config, is
-    not registry-complete, and has no IN-FLIGHT loop attempt. Returns
+    """The next PRE-REGISTERED experiment with a committed config, no IN-FLIGHT
+    attempt, and a PERMITTED (bounded, reason-aware) next attempt. Returns
     (experiment_id, config_path) or None. Deterministic (registry order).
 
-    A prior terminal-but-unsuccessful attempt (e.g. a `canceled` request) does
-    NOT orphan the experiment — it stays eligible for a fresh attempt under a
-    disambiguated request id (chosen by next_request_id in publish_next).
-    Eligibility is unchanged: registered + frozen config + nothing in flight;
-    this only stops a cancel from becoming a permanent dead-end."""
+    A prior terminal attempt no longer orphans an experiment, but only a
+    loop-canceled PRE-EXECUTION attempt within budget is auto-retried
+    (plan_reattempt decides). Owner cancellation, rejected results, standing
+    halts, design/audit failures, and an exhausted budget are NOT re-selected —
+    they need the owner. Eligibility is thus tightened, never loosened."""
     reg = _registry(repo)
     configs = _load_configs(repo)
     proj = state_machine.project(events.read_chain(root))
@@ -132,12 +247,14 @@ def select_next_experiment(root: str, repo: str):
             continue
         if _experiment_in_flight(proj, eid, terminal):
             return None
-    # 2. the first registered, not-complete, not-in-flight experiment is next
+    # 2. the first registered experiment whose next attempt is PERMITTED
     for e in reg["experiments"]:
         eid = e["experiment_id"]
         if e.get("status") != "pre-registered" or eid not in configs:
             continue
-        return eid, configs[eid][0]
+        rid, _plan = plan_reattempt(root, repo, eid)
+        if rid is not None:
+            return eid, configs[eid][0]
     return None
 
 
@@ -233,12 +350,17 @@ def publish_next(root, cfg, repo: str, head: str, roadmap, roadmap_hash: str):
     eid, config_path = picked
     config = _read_json(config_path)
     task = roadmap_mod.task_by_id(roadmap, config["task_id"])
-    proj = state_machine.project(events.read_chain(root))
-    rid = next_request_id(proj, eid)
+    rid, lineage = plan_reattempt(root, repo, eid)
+    if rid is None:                 # defense in depth: select already agreed
+        return None
     request = build_run_request(repo, head, roadmap_hash, eid, config_path,
                                 config, task, request_id=rid)
+    # the reattempt lineage is recorded ON-CHAIN (append-only, hash-chained):
+    # prior request id, the cancellation/failure event, reason class, ordinal,
+    # unchanged experiment + design hashes, and the applicable retry ceiling.
     events.append_event(root, cfg, "BUILD_STARTED", SENDER, rid, repo, head,
-                        {"purpose": f"autonomous loop: {eid}"})
+                        {"purpose": f"autonomous loop: {eid}",
+                         "reattempt": lineage})
     events.append_event(root, cfg, "BUILD_READY", SENDER, rid, repo, head,
                         {"tests": request["expected_test_count"]})
     request["request_payload_hash"] = compute_request_payload_hash(request)

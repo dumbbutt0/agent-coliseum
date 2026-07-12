@@ -96,27 +96,119 @@ def test_canceled_attempt_does_not_orphan_experiment(tmp_path, monkeypatch):
     assert loop._attempt_rids(other, eid) == {}
 
 
-def test_select_returns_experiment_even_after_canceled_attempt(tmp_path):
-    """End-to-end of the fix through the real registry: with the base attempt
-    canceled in the chain-derived projection, selection still yields the
-    experiment (monkeypatched projection keeps the test hermetic)."""
+def _stub_chain_proj(monkeypatch, chain, proj, halt=False):
+    """Point experiment_loop at a synthetic chain + projection + halt state so
+    retry-safety paths can be exercised hermetically against the real registry."""
     import tools.autonomy.experiment_loop as L
+    monkeypatch.setattr(L.events, "read_chain", lambda *a, **k: chain)
+    monkeypatch.setattr(L.state_machine, "project", lambda c: proj)
+    monkeypatch.setattr(L, "_active_halt", lambda root, p: halt)
+    return L
+
+
+def _cancel(rid, sender="claude", eid_events=None):
+    return {"request_id": rid, "event_type": "REQUEST_CANCELED",
+            "event_id": f"evt-{rid}", "sender": sender, "payload": {}}
+
+
+def test_classify_reason_awareness():
+    """Every non-retryable reason is derived from chain facts, fail-closed."""
+    import tools.autonomy.experiment_loop as L
+    rid = "autoloop-x"
+    # executed -> result_stage (never auto-retried)
+    ch = [{"request_id": rid, "event_type": "EXPERIMENT_STARTED",
+           "event_id": "e1", "sender": "claude"}]
+    assert L.classify_prior_attempt(ch, rid, False) == "result_stage"
+    # audit-blocked terminal -> audit_blocked
+    ch = [{"request_id": rid, "event_type": "AUDIT_BLOCKED",
+           "event_id": "e1", "sender": "codex"}]
+    assert L.classify_prior_attempt(ch, rid, False) == "audit_blocked"
+    # owner cancellation -> owner_directed
+    assert L.classify_prior_attempt([_cancel(rid, "human")], rid,
+                                    False) == "owner_directed"
+    # loop cancel under an ACTIVE halt -> standing_halt
+    assert L.classify_prior_attempt([_cancel(rid, "claude")], rid,
+                                    True) == "standing_halt"
+    # loop cancel, pre-execution, no halt -> the ONLY retryable cancel
+    assert L.classify_prior_attempt([_cancel(rid, "claude")], rid,
+                                    False) == "pre_execution_retryable"
+    # nothing we understand -> other (fail-closed)
+    assert L.classify_prior_attempt([{"request_id": rid,
+                                      "event_type": "BUILD_READY",
+                                      "event_id": "e", "sender": "claude"}],
+                                    rid, False) == "other"
+
+
+def test_plan_reattempt_permits_one_bounded_retry(tmp_path, monkeypatch):
     root = make_root(tmp_path)
-    eid, _ = L.select_next_experiment(root, REAL_REPO)
-    base = L._PREFIX + eid
-    real_project = L.state_machine.project
+    eid, _ = __import__("tools.autonomy.experiment_loop", fromlist=["x"]) \
+        .select_next_experiment(root, REAL_REPO)
+    base = "autoloop-" + eid
+    chain = [_cancel(base, "claude")]
+    proj = {base: {"state": "canceled"}}
+    L = _stub_chain_proj(monkeypatch, chain, proj)
+    rid, lineage = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid == f"{base}-002"
+    assert lineage["reason_class"] == "pre_execution_retryable"
+    assert lineage["attempt_ordinal"] == 2
+    assert lineage["prior_request_id"] == base
+    assert lineage["retry_ceiling"] == L.MAX_ATTEMPTS_PER_EXPERIMENT
+    assert lineage["design_hash"] == lineage["prior_design_hash"]
+    assert lineage["prior_terminal_event_id"] == f"evt-{base}"
 
-    def fake_project(chain):
-        proj = real_project(chain)
-        proj[base] = {"state": "canceled"}
-        return proj
 
-    L.state_machine.project = fake_project
-    try:
-        again = L.select_next_experiment(root, REAL_REPO)
-        assert again is not None and again[0] == eid
-    finally:
-        L.state_machine.project = real_project
+def test_plan_reattempt_refuses_owner_cancel_and_budget_and_execution(
+        tmp_path, monkeypatch):
+    root = make_root(tmp_path)
+    import tools.autonomy.experiment_loop as L0
+    eid, _ = L0.select_next_experiment(root, REAL_REPO)
+    base = "autoloop-" + eid
+
+    # (a) owner cancellation is never auto-retried
+    L = _stub_chain_proj(monkeypatch, [_cancel(base, "human")],
+                         {base: {"state": "canceled"}})
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "owner_directed"
+
+    # (b) an executed attempt (produced a result) is never auto-retried
+    ch = [{"request_id": base, "event_type": "RESULT_BLOCKED",
+           "event_id": "r1", "sender": "codex"}]
+    L = _stub_chain_proj(monkeypatch, ch, {base: {"state": "result_blocked"}})
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "result_stage"
+
+    # (c) budget exhaustion: base + -002 + -003 all pre-exec cancels -> 4th denied
+    ids = [base, f"{base}-002", f"{base}-003"]
+    ch = [_cancel(r, "claude") for r in ids]
+    proj = {r: {"state": "canceled"} for r in ids}
+    L = _stub_chain_proj(monkeypatch, ch, proj)
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "retry_budget_exhausted"
+    assert refusal["attempt_ordinal"] == 4
+
+    # (d) an active standing halt blocks even a pre-execution cancel
+    L = _stub_chain_proj(monkeypatch, [_cancel(base, "claude")],
+                         {base: {"state": "canceled"}}, halt=True)
+    rid, refusal = L.plan_reattempt(root, REAL_REPO, eid)
+    assert rid is None and refusal["reason_class"] == "standing_halt"
+
+
+def test_select_skips_non_retryable_experiment(tmp_path, monkeypatch):
+    """A registered experiment whose only attempt was owner-canceled must NOT be
+    auto-selected — selection is tightened, never loosened."""
+    root = make_root(tmp_path)
+    import tools.autonomy.experiment_loop as L0
+    eid, _ = L0.select_next_experiment(root, REAL_REPO)
+    base = "autoloop-" + eid
+    # owner-cancel EVERY registered pre-registered experiment's base attempt
+    import yaml
+    reg = yaml.safe_load(open(REG))
+    prereg = [e["experiment_id"] for e in reg["experiments"]
+              if e.get("status") == "pre-registered"]
+    chain = [_cancel("autoloop-" + x, "human") for x in prereg]
+    proj = {"autoloop-" + x: {"state": "canceled"} for x in prereg}
+    L = _stub_chain_proj(monkeypatch, chain, proj)
+    assert L.select_next_experiment(root, REAL_REPO) is None
 
 
 def _min_policy():
