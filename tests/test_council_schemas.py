@@ -144,6 +144,28 @@ def test_request_test_command_allowlist(tmp_path):
     assert any("test_autonomy_ollama_driver" in c for c in ALLOWED_TEST_COMMANDS)
 
 
+def test_source_task_must_use_full_suite(tmp_path):
+    """The fast experiment subset is only for experiment run requests; a SOURCE
+    task changes code and must run the full suite (else a code change could
+    skip most of the regression)."""
+    from tools.council.schemas import (EXPERIMENT_TEST_COMMAND,
+                                       FULL_TEST_COMMAND)
+    repo, head = make_repo(tmp_path)
+    # source + subset -> refused
+    bad = _ready_request(repo, head, task_kind="source",
+                         expected_test_command=EXPERIMENT_TEST_COMMAND)
+    with pytest.raises(SchemaViolation, match="must run the full suite"):
+        validate_request(bad, (repo,))
+    # source + full suite -> accepted
+    good = _ready_request(repo, head, task_kind="source",
+                          expected_test_command=FULL_TEST_COMMAND)
+    validate_request(good, (repo,))
+    # experiment + subset -> accepted (binds already-integrated code)
+    exp = _ready_request(repo, head, task_kind="experiment",
+                         expected_test_command=EXPERIMENT_TEST_COMMAND)
+    validate_request(exp, (repo,))
+
+
 def test_request_payload_hash_must_match(tmp_path):
     repo, head = make_repo(tmp_path)
     request = _ready_request(repo, head)

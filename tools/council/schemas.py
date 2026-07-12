@@ -179,12 +179,13 @@ VERDICT_REQUIRED_FIELDS = (
 # binding, driver, registry, reports, metrics freeze) — ~6s, which completes
 # reliably inside the auditor's command window, instead of the ~95s full suite
 # that intermittently gets terminated mid-run in the sandbox.
+FULL_TEST_COMMAND = "python3 -m pytest tests/ -q"
 EXPERIMENT_TEST_COMMAND = (
     "python3 -m pytest tests/test_textlab_experiment_registry.py "
     "tests/test_textlab_reports_claims.py tests/test_autonomy_ollama_driver.py "
     "tests/test_m6_experiment_configs.py tests/test_textlab_prereg.py "
     "tests/test_textlab_metrics_freeze.py -q")
-ALLOWED_TEST_COMMANDS = ("python3 -m pytest tests/ -q", EXPERIMENT_TEST_COMMAND)
+ALLOWED_TEST_COMMANDS = (FULL_TEST_COMMAND, EXPERIMENT_TEST_COMMAND)
 
 # H2 item 11 bounds on request AND verdict content (reject unbounded
 # strings/arrays). Finding prose (evidence, failure_mode, ...) gets a
@@ -504,6 +505,15 @@ def validate_request(request: dict, repo_roots) -> None:
         raise SchemaViolation(
             f"expected_test_command {request['expected_test_command']!r} "
             f"not in allowlist {ALLOWED_TEST_COMMANDS}")
+    # SOURCE tasks change code and MUST run the full suite; the fast
+    # experiment subset is only for experiment run requests, which bind an
+    # already-integrated commit whose full suite was verified at integration.
+    if task_kind == "source" and \
+            request["expected_test_command"] != FULL_TEST_COMMAND:
+        raise SchemaViolation(
+            "task_kind 'source' must run the full suite "
+            f"({FULL_TEST_COMMAND!r}); the experiment subset is only for "
+            "experiment run requests binding already-integrated code")
     # H2 item 11: bool is not an int (isinstance(True, int) is True in
     # Python) and the count is bounded
     if not isinstance(request["expected_test_count"], int) \
