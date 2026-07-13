@@ -44,6 +44,7 @@ def test_modern_run_projects_with_matching_ids():
     # absent policy info stays explicit-unavailable (no fabrication)
     assert c["tokenizer_identity"] == {"status": "unavailable"}
     assert c["action_score"] == {"status": "unavailable"}
+    assert c["memory_state_ref"] == {"status": "unavailable"}
     assert c["exploration_mechanism"] == "deterministic"
     assert is_modern_run(run)
 
