@@ -16,7 +16,8 @@ import json
 import sys
 
 from tools.council import (events, get_config, identity, locking, policy,
-                           publish, state_machine, storage, strictjson)
+                           publish, resume_locator, state_machine, storage,
+                           strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    validate_commit, validate_request_id)
 
@@ -192,6 +193,23 @@ def cmd_verify_chain(args) -> int:
     print(f"chain INVALID at event #{report.error_index}: {report.error}",
           file=sys.stderr)
     return 1
+
+
+def cmd_locate_resume_checkpoint(args) -> int:
+    """Resolve + validate the resume checkpoint strictly from configuration. Read-only.
+    Returns 0 iff resume is authorized (a fully validated RESOLVED status); non-zero
+    for every fail-closed status so a caller can gate resume on the exit code."""
+    cfg, _root = _cfg(args)
+    loc = resume_locator.locate_resume_checkpoint(cfg)
+    if getattr(args, "json", False):
+        print(json.dumps(loc.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"status: {loc.status}  resume_authorized: {loc.resume_authorized}")
+        print(f"locator: {loc.locator}")
+        print(f"resolved_path: {loc.resolved_path}")
+        for r in loc.reasons:
+            print(f"  - {r}")
+    return 0 if loc.resume_authorized else 1
 
 
 def cmd_rebuild_state(args) -> int:
@@ -674,6 +692,9 @@ def main(argv=None) -> int:
     p.add_argument("--token-file", default=None)
     sub.add_parser("status")
     sub.add_parser("verify-chain")
+    p = sub.add_parser("locate-resume-checkpoint")
+    p.add_argument("--json", action="store_true",
+                   help="emit the full machine-readable resolution + validation")
     sub.add_parser("rebuild-state")
     sub.add_parser("milestone-status")
 
@@ -754,6 +775,7 @@ def main(argv=None) -> int:
                 "amend-policy": cmd_amend_policy,
                 "status": cmd_status, "show": cmd_show,
                 "verify-chain": cmd_verify_chain,
+                "locate-resume-checkpoint": cmd_locate_resume_checkpoint,
                 "rebuild-state": cmd_rebuild_state,
                 "publish-request": cmd_publish_request,
                 "record": cmd_record, "approve": cmd_approve,
