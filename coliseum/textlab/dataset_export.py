@@ -29,6 +29,25 @@ DATASET_SCHEMA_VERSION = "1"
 DATASET_COMMITMENT_DOMAIN = "dataset:commitment:v1"
 
 
+def _scenario_content_hashes(run_dirs):
+    """{scenario_id: scenario_hash} from run.json — the canonical content identity
+    the held-out gate keys on, and the input the §8 dedup partitions on. Fails
+    closed on a missing hash or a scenario_id carrying conflicting hashes across
+    runs (a provenance error)."""
+    out = {}
+    for d in run_dirs:
+        run = json.load(open(os.path.join(d, "run.json"), encoding="utf-8"))
+        sid, sh = run["scenario_id"], run.get("scenario_hash", "")
+        if not sh:
+            raise ValueError(f"run {os.path.basename(d)} has no scenario_hash — "
+                             "cannot content-dedup for partitioning")
+        if out.get(sid, sh) != sh:
+            raise ValueError(f"scenario {sid!r} has conflicting content hashes "
+                             "across runs (provenance error, fail closed)")
+        out[sid] = sh
+    return out
+
+
 def _held_out_offenders(run_dirs, held_ids, held_hashes):
     """Return [(scenario_id, run_dir_basename)] for any run whose scenario is held-out
     by id OR by scenario_hash — mirrors the registry held-out gate (registry.py:200-208)."""
@@ -112,9 +131,10 @@ def build_dataset(run_dirs, *, mode="deterministic",
         if not registry_path:
             raise ValueError("partition=True requires registry_path")
         siblings = load_scenario_siblings(registry_path)
+        content_ids = _scenario_content_hashes(run_dirs)
         scenario_ids = {u["scenario_id"] for u in units}
         partition_block = partition_manifest(
-            scenario_ids, siblings, splits=splits,
+            scenario_ids, siblings, content_ids, splits=splits,
             dataset_schema_version=DATASET_SCHEMA_VERSION)
         for u in units:
             u["split"] = partition_block["assignment"][u["scenario_id"]]
@@ -182,22 +202,26 @@ def dataset_card(descriptor):
     if part:
         sizes = ", ".join(f"{name}={n}" for name, n in
                           sorted(part["split_sizes"].items()))
+        dd = part["deduplication"]
         lines += [
             "",
             "## Group-aware partition (§8)",
             "",
             f"- partition scheme version: `{part['partition_scheme_version']}`",
-            f"- groups (co-assignment unit = registry family): "
-            f"**{part['group_count']}**",
+            "- groups (co-assignment unit = connected component under "
+            f"family / exact-content-hash / lineage): **{part['group_count']}**",
             f"- split sizes (scenarios): {sizes}",
+            f"- content dedup: `{dd['version']}` — "
+            f"{len(dd['exact_duplicate_clusters'])} exact-duplicate cluster(s)",
             f"- leakage lint: **{part['leakage_lint']}** "
-            "(no family or control-twin straddles a split)",
+            "(no family, content-duplicate, or control-twin straddles a split)",
             "",
-            "| partition group | family | split | members |",
+            "| partition group | families | split | members |",
             "|---|---|---|---|",
         ]
         for g in part["groups"]:
-            lines.append(f"| `{g['partition_group_id'][:12]}…` | `{g['family']}` | "
+            fams = ", ".join(g["families"])
+            lines.append(f"| `{g['partition_group_id'][:12]}…` | `{fams}` | "
                          f"`{g['split']}` | {len(g['members'])} |")
     partition_note = ("a deterministic, dataset-version-bound group-aware split "
                       "(§8) whose leakage lint refuses any sibling straddle"
