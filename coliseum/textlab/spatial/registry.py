@@ -43,7 +43,8 @@ _SCALAR_REFERENCES = {
         ("world_line_id", "spatial.world_line.v1"),
     ),
     "spatial.agent_body_instance.v1": (
-        ("agent_body_id", "spatial.agent_body_spec.v1"),
+        # preimage CONTENT key is agent_body_spec_id; agent_body_id is the output id.
+        ("agent_body_spec_id", "spatial.agent_body_spec.v1"),
         ("world_line_id", "spatial.world_line.v1"),
     ),
 }

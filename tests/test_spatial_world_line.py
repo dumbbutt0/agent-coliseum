@@ -122,10 +122,35 @@ def test_instance_refuses_unregistered_world_line():
         reg.register(RoomInstance(r1.id, wl.id, "room#0"))
 
 
-def test_instance_refuses_wrong_typed_spec_reference():
-    reg = SpatialSpecRegistry()
-    pr, r1, world = _world(reg)
+def _registered_world(reg):
+    """Register the full spec set + a root world-line; return the spec ids + world."""
+    pr = PerceptionRegime("r", "los", "adj", "o"); reg.register(pr)
+    room = RoomSpec("hall", ["public"], 4, "los", "adj", ["n"]); reg.register(room)
+    portal = PortalSpec(room.id, room.id, "bidirectional", 1, "p"); reg.register(portal)
+    obj = ObjectSpec("key", True, False, "visible", True, True); reg.register(obj)
+    body = AgentBodySpec("humanoid", pr.id, 2); reg.register(body)
+    world = SpatialWorldSpec([room.id], [portal.id], [obj.id], [body.id], pr.id, {})
+    reg.register(world)
     wl = WorldLine.root(world.id, "init-0"); reg.register(wl)
-    # a room instance whose 'room_spec_id' is actually the perception regime id.
+    return pr, room, portal, obj, body, wl
+
+
+# every instance kind must admit a valid record AND fail closed on a wrong-typed spec
+# reference — parametrised so no single kind (e.g. agent_body) is left uncovered.
+@pytest.mark.parametrize("kind,cls,spec_attr,key", [
+    ("room", RoomInstance, "room", "room#0"),
+    ("portal", PortalInstance, "portal", "portal#0"),
+    ("object", ObjectInstance, "obj", "obj#0"),
+    ("agent_body", AgentBodyInstance, "body", "body#0"),
+])
+def test_every_instance_kind_registers_and_type_checks(kind, cls, spec_attr, key):
+    reg = SpatialSpecRegistry()
+    pr, room, portal, obj, body, wl = _registered_world(reg)
+    specs = {"room": room, "portal": portal, "obj": obj, "body": body}
+    correct_spec = specs[spec_attr]
+    # (1) a valid instance of this kind is admitted.
+    inst = cls(correct_spec.id, wl.id, key)
+    assert reg.register(inst) == inst.id and inst.id in reg
+    # (2) the same kind with a wrong-typed spec reference (perception regime) is refused.
     with pytest.raises(ContentRecordError, match="wrong spec type|expected"):
-        reg.register(RoomInstance(pr.id, wl.id, "room#0"))
+        reg.register(cls(pr.id, wl.id, key + "!"))
