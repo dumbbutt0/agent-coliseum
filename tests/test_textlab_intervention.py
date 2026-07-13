@@ -8,6 +8,8 @@ existing code is touched, so legacy regime hashes cannot change.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from coliseum.textlab.intervention import (
@@ -148,7 +150,11 @@ def test_registry_register_get_and_idempotent():
     h = reg.register(iv)
     assert reg.register(iv) == h            # byte-identical re-register is idempotent
     assert iv.intervention_id in reg
-    assert reg.get(iv.intervention_id) is iv
+    # get() reconstructs a fresh detached definition (NOT the caller's object),
+    # with the same content identity as admitted.
+    got = reg.get(iv.intervention_id)
+    assert got is not iv
+    assert intervention_spec_hash(got) == h == reg.admitted_hash(iv.intervention_id)
     assert reg.ids() == [iv.intervention_id]
     assert len(reg) == 1
 
@@ -212,6 +218,28 @@ def test_registered_object_identity_attrs_are_frozen():
     assert intervention_spec_hash(reg.get("iv-frozen")) == admitted
     assert reg.get("iv-frozen").canonical_spec == {"n": 1}
     assert reg.register(reg.get("iv-frozen")) == admitted  # still idempotent, no drift
+
+
+def test_object_setattr_bypass_cannot_rewrite_registry_truth():
+    # audit 000826: an attribute guard is overridable (object.__setattr__), so the
+    # REGISTRY must not depend on the returned object's mutability. Registry truth
+    # is a captured admitted hash + reconstruct-on-get, independent of any later
+    # mutation of a previously returned object.
+    iv = Intervention("iv-bypass", "policy", "constitution", {"n": 1})
+    reg = InterventionRegistry()
+    admitted = reg.register(iv)
+    got = reg.get("iv-bypass")
+    # low-level bypass of the object's own attribute guard
+    object.__setattr__(got, "_spec_json", json.dumps({"n": 2}))
+    assert intervention_spec_hash(got) != admitted           # the HELD object drifted
+    # ...but registry truth is untouched: the captured admitted hash and a fresh
+    # get() both still yield the admitted identity.
+    assert reg.admitted_hash("iv-bypass") == admitted
+    assert intervention_spec_hash(reg.get("iv-bypass")) == admitted
+    assert reg.get("iv-bypass").canonical_spec == {"n": 1}
+    # re-registering the MUTATED object is detected as drift, never blessed.
+    with pytest.raises(InterventionError):
+        reg.register(got)
 
 
 # --------------------------- audit 000814 blocker 2: injective typed input

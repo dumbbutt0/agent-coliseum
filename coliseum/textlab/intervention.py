@@ -332,31 +332,60 @@ class InterventionRegistry:
 
     Ids are single-use: re-registering the same id with a *different* definition
     is refused (content drift), while re-registering the byte-identical
-    definition is idempotent."""
+    definition is idempotent.
+
+    Registry TRUTH is an immutable admission snapshot — the admitted hash plus
+    the canonical spec captured as strings at ``register()`` time — held
+    SEPARATELY from any object handed to a caller. The drift check compares a
+    re-registration against that captured hash, and ``get()`` reconstructs a
+    fresh definition from the stored canonical form. Consequently no later
+    mutation of a previously returned object (even via ``object.__setattr__``,
+    which bypasses the object's own attribute guard) can rewrite registry truth
+    or be blessed as idempotent (audit 000826)."""
     schema_version: str = INTERVENTION_SCHEMA_VERSION
-    _by_id: dict = field(default_factory=dict)
+    _records: dict = field(default_factory=dict)
 
     def register(self, iv: "Intervention") -> str:
         validate_intervention(iv)
         h = intervention_spec_hash(iv)
-        existing = self._by_id.get(iv.intervention_id)
-        if existing is not None and intervention_spec_hash(existing) != h:
+        prior = self._records.get(iv.intervention_id)
+        if prior is not None and prior["admitted_hash"] != h:
             raise InterventionError(
                 f"intervention_id {iv.intervention_id!r} already registered with "
                 "a different definition — ids are single-use (content-addressed)")
-        self._by_id[iv.intervention_id] = iv
+        # capture an immutable admission snapshot from CANONICAL values (strings),
+        # not by retaining the caller's object.
+        self._records[iv.intervention_id] = {
+            "admitted_hash": h,
+            "spec_json": canonical_json(iv.canonical_spec),
+            "cls": iv.cls,
+            "kind": iv.kind,
+            "schema_version": iv.schema_version,
+        }
         return h
 
     def get(self, intervention_id: str) -> "Intervention":
-        if intervention_id not in self._by_id:
+        rec = self._records.get(intervention_id)
+        if rec is None:
             raise InterventionError(f"unknown intervention_id {intervention_id!r}")
-        return self._by_id[intervention_id]
+        # reconstruct a FRESH definition from the immutable stored canonical form;
+        # the registry never hands out shared mutable owned state.
+        return Intervention(intervention_id, rec["cls"], rec["kind"],
+                            json.loads(rec["spec_json"]), rec["schema_version"])
+
+    def admitted_hash(self, intervention_id: str) -> str:
+        """The spec hash captured at admission — registry truth, independent of
+        any later mutation of a previously returned object."""
+        rec = self._records.get(intervention_id)
+        if rec is None:
+            raise InterventionError(f"unknown intervention_id {intervention_id!r}")
+        return rec["admitted_hash"]
 
     def ids(self) -> list:
-        return sorted(self._by_id)
+        return sorted(self._records)
 
     def __contains__(self, intervention_id) -> bool:
-        return intervention_id in self._by_id
+        return intervention_id in self._records
 
     def __len__(self) -> int:
-        return len(self._by_id)
+        return len(self._records)
