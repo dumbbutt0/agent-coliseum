@@ -41,15 +41,25 @@ agent can observe (mirrors the interaction-block version-dispatch discipline).
 ## 4. Identity model
 Immutable **specifications** vs world-specific mutable **instances**, all content-addressed via
 `schema.canonical_json` + `config_hash`, using the construction-freeze + content-addressed-registry standard
-(`_content_record`; `__slots__` alone is not immutability).
-- Spec ids: `spatial_world_spec_id`, `room_spec_id`, `portal_spec_id`, `object_spec_id`,
-  `agent_body_spec_id`, `perception_regime_id`.
-- Instance ids: `room_instance_id`, `portal_instance_id`, `object_instance_id`, `agent_body_id`.
-- Every instance is bound to exactly one `world_line_id` + the spatial schema version + its immutable spec +
-  a deterministic logical instance key.
+and the **universal self-exclusion + typed-preimage + registry-truth invariant** defined in
+`TRAINING-READINESS-SUBSTRATE-PROFILE.md` §3 (each id is `config_hash` of a typed, domain-separated preimage
+computed with the output field ABSENT; the protected guarantee is registry truth, not held-object
+immutability; `__slots__` alone is not immutability). Every id below has an exact typed preimage and a
+construction order in which all referenced ids pre-exist.
+- **Spec ids** (definition of a type; preimage = the spec's own typed fields only, self-excluded):
+  `spatial_world_spec_id`, `room_spec_id`, `portal_spec_id`, `object_spec_id`, `agent_body_spec_id`,
+  `perception_regime_id` (the last excludes world-truth-only fields, mirroring `agent_regime_id`).
+- **Instance ids** (preimage = `{_domain, spec_id, world_line_id, spatial_schema_version,
+  deterministic_logical_instance_key}`, self-excluded): `room_instance_id`, `portal_instance_id`,
+  `object_instance_id`, `agent_body_id`. The `deterministic_logical_instance_key` is a frozen logical index
+  (never wall-clock/PID/UUID/object-identity/mutable-name/run-row).
+- Construction order: `spatial_world_spec_id`/room/portal/object/agent_body **spec** ids first (pure content);
+  then `world_line_id` (§4.1); then instance ids referencing the spec + world_line. No id is part of its own
+  preimage; no id references a not-yet-built id.
 - Forbidden in identity: wall-clock, PID, random UUID (without a frozen derivation), object identity,
   mutable display names, run-row identity as world/scenario identity.
-- **Cross-world instance references fail closed.**
+- **Cross-world instance references fail closed** (an instance whose `world_line_id` differs from the
+  referencing context is refused).
 
 ### 4.1 World-line / fork identity (new, parallel to `control_of`)
 `world_line_id`/`fork_id` are a **new** lineage dimension, distinct from the existing `control_of` twin
@@ -59,6 +69,14 @@ state, object instance, body instance, observation, or memory may cross between 
 integrates via an **additive** `lineage_edges` input to the group-aware partition (default empty → existing
 callers byte-identical) and a **separate** `counterfactual_delta` metrics join — never by mutating
 `control_of` or `control_twin_delta`.
+
+Typed preimages + acyclic construction order (shared with `TRAINING-READINESS-SUBSTRATE-PROFILE.md` §4.7):
+a **root** world-line is `world_line_id = config_hash({_domain: "world_line", spatial_world_spec_id,
+initial_state_key, spatial_schema_version})` (no parent). A **forked child** world-line is
+`config_hash({_domain: "world_line", parent_world_line_id, source_fork_decision_hash, changed_dimension,
+unchanged_comparison_dims, spatial_schema_version})` — computed BEFORE any fork record; then
+`fork_id` references that already-built `branch_world_line_id`. Each is self-excluded from its own preimage,
+so `world_line_id`, `fork_id`, and the resulting branch identity form a strict order with no cycle.
 
 ## 5. Room and portal graph
 - **Room spec** (no mutable state): stable semantic name; room type/tags; permitted portal attachment
@@ -110,9 +128,14 @@ objects in its current room; sees portals attached to its room and only the port
 does not see entities in unrelated rooms; a held object is visible per object + holder rules; hidden objects
 are excluded unless a deterministic reveal condition holds; adjacent-room hearing is off by default (or
 narrowly versioned). Each observation carries: observer identity; `world_line_id`; logical step; perception
-regime; visible room identity; visible entity identities; the observable state projection; and an
-observation hash. Authoritative hidden fields are never included. The renderer emits the **actor**
-`ObservationArtifact`; a separate **privileged** `ObservationArtifact` carries world truth.
+regime; visible room identity; visible entity identities; and the observable state projection. Its
+`observation_hash = config_hash({_domain: "observation." + view_kind, observation_schema_version,
+observer_identity, world_line_id, logical_step, perception_regime, visible_room_identity,
+visible_entity_identities, observable_state_projection})` — self-excluded from its own preimage (§3/§4), with
+`view_kind` in the domain so the actor and privileged artifacts of the same emission can never alias.
+Authoritative hidden fields are never included in the actor preimage. The renderer emits the **actor**
+`ObservationArtifact` (this projection); a separate **privileged** `ObservationArtifact` carries world truth
+under `view_kind = privileged`.
 
 ## 11. Belief / memory boundary
 This slice does **not** implement persistent beliefs or relationships — it provides a clean interface

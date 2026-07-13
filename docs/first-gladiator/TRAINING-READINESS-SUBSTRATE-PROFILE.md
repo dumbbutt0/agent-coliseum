@@ -40,22 +40,43 @@ to hidden-evaluation contents. No behavioral **label creation** (T0-B gated, §8
 
 ## 3. Identity discipline (binding)
 
-- All ids derive from `schema.canonical_json` + `config_hash` (sha256), domain-separated per record kind and
-  per view (a `view_kind` string participates in the observation domain so an actor artifact can never share
-  an id with the privileged artifact of the same decision).
-- **Identity is a strict DAG.** Leaf records (BehaviorPolicySpec, ObservationArtifact, LegalActionSet) hash
-  from their own content only. A DecisionRecord references leaves + a `prev_decision_hash` (a Merkle-style
-  back-reference); **`next` links are never part of decision identity** — they live in the TrajectoryManifest
-  as derived pointers. TrajectoryManifest references decisions; no decision references its manifest.
-  CounterfactualForks reference only pre-existing hashes. No cycles.
+- All ids derive from `schema.canonical_json` + `config_hash` (sha256) over a **typed, domain-separated
+  preimage** that is unique per record kind (and per view — a `view_kind` string participates in the
+  observation preimage so an actor artifact can never share an id with the privileged artifact of the same
+  decision).
+- **Universal self-exclusion rule (binding).** A record's own derived id/hash is **never** part of its own
+  preimage. Each id is `config_hash({typed, domain-tagged preimage fields}) `computed with the output field
+  **absent**, exactly as the repository already does it
+  (`config_hash({k: v for k, v in content.items() if k != <hash_field>})`, cf. `intervention.py`
+  `intervention_spec_hash`). A payload that includes its own id field in the preimage is rejected. This makes
+  the content-addressing a well-defined function with no fixed-point/self-reference.
+- **Typed preimages + construction order (binding).** Every identity-bearing record specifies an exact,
+  ordered preimage: all ids it *references* must already exist before its own id is computed, so identity is
+  a strict DAG with a total construction order. Leaf records (BehaviorPolicySpec, ObservationArtifact,
+  LegalActionSet) hash from their own content only. A DecisionRecord references leaves + a `prev_decision_hash`
+  (a back-reference to the already-built prior decision); **`next` links are never part of decision
+  identity** — they live in the TrajectoryManifest as derived pointers. TrajectoryManifest references
+  decisions; no decision references its manifest. The fork/world-line/branch construction order is fixed in
+  §4.7 (child `world_line_id` first, then `fork_id` referencing it, then the fork record) so there is no
+  cycle among `fork_id`, `world_line_id`, and the resulting branch identity.
 - Forbidden in any identity: wall-clock, process id, random UUID (without a frozen deterministic
   derivation), Python object identity, mutable display names, or a run-row id used as a substitute for
   scenario/world identity. Wall-clock remains non-identity metadata.
-- Every content-addressed record object is **immutable after construction** using the repository's proven
-  construction-freeze standard (guarded `__setattr__`/`__delattr__` + detached canonical content; registry
-  truth = a captured admitted hash + reconstruct-on-get + single-snapshot admission). **`__slots__` alone is
-  NOT immutability** (hardened across intervention audits 000814/000820/000826/000832). A shared base
-  module (`coliseum/textlab/_content_record.py`) provides this so every record kind reuses it.
+- **Immutability invariant — the protected guarantee is REGISTRY TRUTH, not held-object immutability.**
+  Content-addressed records use the repository's construction-freeze standard: a guarded
+  `__setattr__`/`__delattr__` blocks *ordinary* attribute assignment on a constructed object, and detached
+  canonical content prevents caller-side aliasing. Per the 000826 lineage, this guard is **not** claimed to
+  withstand `object.__setattr__`: a caller holding a returned object *may* mutate its private storage at that
+  low level and observe its own copy drift. What is **immutable** is **registry truth** — the registry
+  captures the admitted hash at registration, reconstructs a fresh object from stored canonical content on
+  `get()`, and refuses re-registration of a drifted object. **Test oracle (the unambiguous pass criterion):**
+  `object.__setattr__` against a `get()`-returned object's private identity storage MUST leave
+  `admitted_hash(id)` unchanged, MUST leave a fresh `get(id)` at the admitted identity, and re-registering
+  the mutated object MUST fail closed as drift; the held object's own attribute guard blocks ordinary
+  assignment but is not required to survive `object.__setattr__`. A shared base module
+  (`coliseum/textlab/_content_record.py`) provides exactly this (freeze + captured-admission +
+  reconstruct-on-get + single-snapshot admission — hardened across intervention audits
+  000814/000820/000826/000832; `__slots__` alone is NOT immutability).
 
 ## 4. Record contracts
 
@@ -101,9 +122,26 @@ Owns: `decision_schema_version`; `sequence_position`; `prev_decision_hash` (back
 `termination_kind` (see §6); and the four-layer action split so movement failure is not mislabeled as
 moral/social/planning failure: `high_level_intent` (when available) / `symbolic_action` /
 `controller_actions` / `execution_result`.
-References: actor + privileged `observation` hashes; `legal_action_set` hash; `behavior_policy_spec` hash;
-(spatial producer) a world-instance hash. Extends the `DecisionNode` seam (state_before, reflex/planner/
-final, `arbitration_rule`/`arbitration_winner` — kept first-class, never inferred from action equality).
+References: actor `observation` hash; privileged `observation` hash; `legal_action_set` hash;
+`behavior_policy_spec` hash; (spatial producer) a privileged world-instance hash. Extends the `DecisionNode`
+seam (state_before, reflex/planner/final, `arbitration_rule`/`arbitration_winner` — kept first-class, never
+inferred from action equality). The canonical DecisionRecord above is the **privileged-view** record (it
+carries both observation references + any world-instance reference).
+
+**Actor DecisionRecord projection (typed; the only shape an actor export serializes).** `project_actor_decision`
+maps a canonical DecisionRecord to a typed `ActorDecisionRecord` that **physically omits** the
+`privileged_observation_hash` and every world-instance / research-only reference, and **retains only the
+actor-safe references**: the `actor_observation_hash`, the `legal_action_set` hash, the
+`behavior_policy_spec` hash (policy identity is the acting model, not privileged world truth), the actor-safe
+`memory_state_ref` (the agent's own history), `sequence_position`, `prev_actor_decision_hash` (the projection
+of the prior decision, not the privileged record), `termination_kind`, and the four-layer action split. It
+carries a **removed-references set** naming what was stripped (`privileged_observation_hash`, world-instance)
+so the omission is explicit, not silent. The `ActorDecisionRecord` has its **own** domain-separated identity
+(`_domain: "actor_decision"`) computed from actor-only content (self-excluded per §3); its id and every
+reference in it is recomputable with the privileged record and privileged observation **physically absent**
+(the actor-only reconstruction guarantee). `assert_no_privileged_leak` runs over the actor projection and
+fails closed if any privileged reference (direct or transitively resolvable) is present. A privileged
+reference must never be resolvable from an actor export.
 
 ### 4.5 TrajectoryManifest — the episode/trajectory
 Owns: `trajectory_schema_version`; ordered decision ids; episode boundaries; derived `next` links; a
@@ -122,11 +160,24 @@ vocabulary.
 ### 4.7 CounterfactualFork — a governed branch (Phase 2)
 Owns: `cf_schema_version`; the changed mechanism/action/label/intervention; the unchanged comparison
 dimensions; `fork_id`. References: source trajectory + the **exact** fork decision id + source environment
-identity + source policy identity + resulting branch identity. A `counterfactual_group_id` **alone is
-insufficient** — the fork must prove *where* and *why* the trajectories diverged. Reuses the matched-
-environment / realization-identity machinery and the `control_of`/partition lineage seam **without
-redefining `control_of`** (a parallel `world_line_id`/`fork_id` dimension; an additive `lineage_edges`
-partition input; a separate `counterfactual_delta` metrics join).
+identity + source policy identity + resulting branch identity (`branch_world_line_id`). A
+`counterfactual_group_id` **alone is insufficient** — the fork must prove *where* and *why* the trajectories
+diverged. Reuses the matched-environment / realization-identity machinery and the `control_of`/partition
+lineage seam **without redefining `control_of`** (a parallel `world_line_id`/`fork_id` dimension; an additive
+`lineage_edges` partition input; a separate `counterfactual_delta` metrics join).
+
+**Construction order (acyclic; binding — closes the fork/world-line/branch cycle risk).** Ids are built in
+this fixed order, each self-excluded from its own preimage (§3):
+1. `branch_world_line_id = config_hash({_domain: "world_line", parent_world_line_id, source_fork_decision_hash,
+   changed_dimension, unchanged_comparison_dims, schema_version})` — all inputs pre-exist (the parent
+   world-line, the source decision, and the declared change), so the child world-line id is fully determined
+   *before* any fork record exists.
+2. `fork_id = config_hash({_domain: "counterfactual_fork", source_trajectory_id, source_fork_decision_hash,
+   source_env_identity, source_policy_identity, changed_dimension, unchanged_comparison_dims,
+   branch_world_line_id, schema_version})` — references the already-built `branch_world_line_id`.
+3. The CounterfactualFork record's own id (if distinct from `fork_id`) is `config_hash` of its content with
+   its id field absent. Nothing references a not-yet-built id; `fork_id`, `world_line_id`, and the resulting
+   branch identity form a strict order, never a cycle.
 
 ### 4.8 LabelRecord — governed annotations (structural only; **gated**)
 Owns (structural slots only): `label_schema_version`, `label_id`, `label_kind`, `label_value`,
@@ -169,11 +220,14 @@ value-bootstrapping would be semantically allowed at a boundary — but do **not
 Two synchronized but explicitly separated views (§4.2). Actor exports must not silently contain privileged
 information; privileged data is never selected through a default actor path; every export requires an
 explicit `view_kind`; unknown/omitted fails closed; actor and privileged artifacts are independently
-content-addressed; a shared serialization path must not leak privileged fields. Leakage must be blocked on
-**indirect** channels too — labels, memory refs, and counterfactual references are projected to the actor
-view before an actor export. The actor policy is trainable from actor exports alone; the privileged view may
-train world-models / critics / evaluators / centralized-training components — and must never enter an actor
-export.
+content-addressed; a shared serialization path must not leak privileged fields. **An actor export serializes
+only the typed `ActorDecisionRecord` projection (§4.4), never the canonical (privileged-view) DecisionRecord**
+— so the `privileged_observation_hash` and every world-instance reference are physically absent from the
+exported bytes and identity, not merely filtered at read time. Leakage is blocked on **indirect** channels
+too — labels, memory refs, and counterfactual references are projected to the actor view before an actor
+export; a privileged reference must not be transitively resolvable from any actor artifact. The actor policy
+is trainable from actor exports alone (actor-only reconstruction); the privileged view may train world-models
+/ critics / evaluators / centralized-training components — and must never enter an actor export.
 
 ## 8. Partition & hidden-evaluation isolation
 Export fails closed without an explicit partition + view. Governed partitions: `training | validation |
@@ -207,7 +261,7 @@ completion. **M14/SC-8** = the training decision gate for any weight-level work.
 scripted validation do **not** constitute training authorization. LabelRecord normative labels wait for
 T0-B.
 
-## 12. Threat model — required adversarial tests (30)
+## 12. Threat model — required adversarial tests (31)
 Every production slice ships focused unit/integration/property tests covering at least: (1) actor export
 excludes privileged fields; (2) privileged view requires explicit selection; (3) unknown `view_kind` fails
 closed; (4) hidden-eval evidence cannot enter a training export; (5) hidden evidence referenced indirectly
@@ -222,13 +276,22 @@ the raw evidence layer; (17) training admission does not mutate source evidence;
 must identify the exact fork point + changed dimension; (19) forks cannot silently change more than the
 declared matched dimensions; (20) historical records replay through the historical builder; (21) new records
 cannot silently downgrade to a legacy schema; (22) repeated export is deterministic; (23) memory references
-are content-bound (a swap is detected); (24) behavior-policy records are immutable after construction —
-including an `object.__setattr__` private-attribute-mutation probe (`__slots__` alone is not immutability);
-(25) actor-only execution reconstruction succeeds without privileged inputs; (26) high-level intent,
-symbolic action, controller action, and execution result cannot be conflated; (27) parse failures,
-refusals, blocked actions, and recovery actions remain distinguishable; (28) admission supersession is
-append-only + auditable; (29) dataset manifests bind all transformations + ordering; (30) tampering with any
-referenced artifact changes validation or identity as appropriate.
+are content-bound (a swap is detected); (24) **registry-truth immutability oracle (§3):** `object.__setattr__` against a `get()`-returned record's
+private identity storage leaves `admitted_hash(id)` and a fresh `get(id)` at the admitted identity, and
+re-registration of the mutated object fails closed as drift (the held object's guard blocks ordinary
+assignment but is NOT required to survive `object.__setattr__`; `__slots__` alone is not immutability);
+(25) **actor-only reconstruction (§4.4):** an `ActorDecisionRecord` export contains neither the
+`privileged_observation_hash` nor any transitively-resolvable privileged/world-instance reference, and its id
++ every reference recompute with the privileged record and privileged observation physically absent, while
+deterministic re-export still succeeds; (26) high-level intent, symbolic action, controller action, and
+execution result cannot be conflated; (27) parse failures, refusals, blocked actions, and recovery actions
+remain distinguishable; (28) admission supersession is append-only + auditable; (29) dataset manifests bind
+all transformations + ordering; (30) tampering with any referenced artifact changes validation or identity as
+appropriate; (31) **self-exclusion + typed preimage (§3):** for every record kind, its id recomputes from the
+frozen typed preimage with the output field ABSENT; a payload that includes its own id field is rejected,
+cross-domain aliasing is rejected, an altered referenced hash changes the id, cross-world references fail
+closed, and `fork_id`/`world_line_id`/`branch_world_line_id` construct in the fixed acyclic order (§4.7) with
+no cycle.
 
 ## 13. Implementation staging (per the approved plan)
 - **Phase 1 (first code slice):** a narrow, **domain-neutral** vertical — define the canonical
