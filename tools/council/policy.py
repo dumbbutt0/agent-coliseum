@@ -1146,6 +1146,75 @@ def evaluate_class_c(root: str, cfg: Config,
                           reasons=reasons, checked=checked)
 
 
+# --------------------- A/B/C/D governance: acceptance authorization (generic core)
+
+@dataclass
+class AcceptanceAuthorization:
+    """The GENERIC accepted-transition authorization result (governance G3). The
+    generic council core answers only 'may this matter's subject advance to
+    accepted?' — it performs NO project-specific mutation. A project adapter (e.g.
+    the Coliseum claim registry) reads this decision and, only when authorized,
+    performs its own `accepted` transition. Kept free of any project claim state."""
+    authorized: bool
+    resolution: str | None          # the COUNCIL_RESOLVED resolution string
+    resolved_event_id: str | None
+    policy_hash: str | None
+    reasons: list = field(default_factory=list)
+
+
+def acceptance_authorization(root: str, cfg: Config,
+                             matter_id: str) -> AcceptanceAuthorization:
+    """Is a Class-C matter RESOLVED (authorizing an `accepted` transition) under
+    governance_v1? SELF-AUTHENTICATING and fail-closed: it re-reads and hash-verifies
+    the chain FROM ROOT and confirms a COUNCIL_RESOLVED for the matter is a member of
+    that verified chain — which is proof that evaluate_class_c's seven frozen gates
+    passed at its append boundary (the append boundary is the enforcement; presence
+    on the verified chain is the authority). Authorized ONLY when governance is
+    active on the exact owner-ratified pin (INERT under v3). The generic core NEVER
+    mutates a project registry and never encodes a project's claim states — it
+    returns the resolution for a project adapter to interpret."""
+    reasons: list = []
+    try:
+        policy, policy_hash = load_policy(root)
+    except SchemaViolation as exc:
+        return AcceptanceAuthorization(False, None, None, None,
+                                       [f"policy_installed: {exc}"])
+    try:
+        report = events_mod.verify_chain(root)
+        if not report.healthy:
+            return AcceptanceAuthorization(
+                False, None, None, policy_hash,
+                [f"chain not healthy: {report.error or 'torn suffix'}"])
+        chain = events_mod.read_chain(root, verify=True)
+    except Exception as exc:
+        return AcceptanceAuthorization(False, None, None, policy_hash,
+                                       [f"chain unreadable: {exc}"])
+    eff_hash, eff_version = effective_policy_pin(chain)
+    try:
+        code_defined = is_code_defined_version(policy)
+    except SchemaViolation:
+        code_defined = False
+    gov = policy.get("governance") or {}
+    if not (eff_version is not None and eff_version >= 4
+            and (eff_hash is None or eff_hash == policy_hash)
+            and code_defined and policy_version_of(policy) == eff_version
+            and bool(gov.get("enabled"))):
+        reasons.append("governance not active on the owner-ratified pin")
+        return AcceptanceAuthorization(False, None, None, policy_hash, reasons)
+    resolved = None
+    for e in chain:
+        if e.get("event_type") == "COUNCIL_RESOLVED" \
+                and e.get("request_id") == matter_id \
+                and e.get("sender") == "claude":
+            resolved = e   # the last resolution for the matter wins
+    if resolved is None:
+        reasons.append("no COUNCIL_RESOLVED for this matter on the verified chain")
+        return AcceptanceAuthorization(False, None, None, policy_hash, reasons)
+    resolution = (resolved.get("payload") or {}).get("resolution")
+    return AcceptanceAuthorization(True, resolution, resolved.get("event_id"),
+                                   policy_hash, reasons)
+
+
 # ------------------------------------------------------------ society milestone
 
 def milestone_status(chain: list, policy: dict) -> tuple:
