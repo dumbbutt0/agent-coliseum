@@ -664,10 +664,29 @@ def evaluate_delegation(root: str, cfg: Config, request: dict,
                                      or []),
              "a condition class is outside the charter's authorized set")
         protected = tuple(policy["protected_paths"])
-        touched = [s for s in request.get("scope", [])
-                   if any(p in str(s) for p in protected)]
-        cond("no_protocol_self_modification", not touched,
-             f"scope touches protected paths: {touched}")
+        # AUTHORITATIVE guard (slice-1 audit HIGH finding 000621): the charter
+        # invariant "the delegation cannot be modified from inside the delegated
+        # program" must be enforced against the EXACT audited commit's real diff,
+        # NOT the builder's free-form scope prose (a benign scope can hide a
+        # tools/council change). git_state.changed_paths fails closed on any git
+        # error or ambiguous (merge) ancestry, so a raise here => refuse.
+        try:
+            changed = git_state.changed_paths(
+                request["repository"], request["target_commit"], cfg.repo_roots)
+            commit_touched = [p for p in changed
+                              if any(prot in p for prot in protected)]
+            cond("no_protocol_self_modification", not commit_touched,
+                 f"audited commit changes protected paths: {commit_touched}")
+        except Exception as exc:
+            cond("no_protocol_self_modification", False,
+                 f"cannot derive the audited commit's changed paths "
+                 f"(fail-closed): {exc}")
+        # defense in depth: the DECLARED scope must also not name a protected
+        # path — a secondary, non-authoritative signal (never the boundary).
+        scope_touched = [s for s in request.get("scope", [])
+                         if any(p in str(s) for p in protected)]
+        cond("scope_declares_no_protected_path", not scope_touched,
+             f"scope names protected paths: {scope_touched}")
         forbidden = set(request.get("forbidden_actions", []))
         missing = [c for c in policy["auto_approval"]["forbidden_capabilities"]
                    if c not in forbidden]

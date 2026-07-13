@@ -19,6 +19,7 @@ Every test proves a fail-closed boundary:
 """
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -237,15 +238,74 @@ def test_non_source_task_kind_refused(env):
 
 
 def test_protected_path_scope_refused(env):
-    """A request whose scope touches the council protocol cannot self-authorize
-    — the delegation mechanism cannot be changed from inside the delegation."""
+    """Defense in depth: a request whose DECLARED scope even names the council
+    protocol is refused (the secondary, non-authoritative signal)."""
     root, repo, head, cfg = env
     _ratify_v3(root, repo, head, cfg)
     d = _decide(root, cfg,
                 _source_request(repo, head, scope=["patch tools/council/policy.py"]),
                 _verdict_event(head))
     assert not d.auto_approve
+    assert any("scope_declares_no_protected_path" in r for r in d.reasons)
+
+
+def _repo_touching_protected(tmp_path, name="protrepo"):
+    """A TWO-commit repo whose HEAD modifies a protected path
+    (tools/council/policy.py) — the audit's exact reproduction shape."""
+    repo = str(tmp_path / name)
+    os.makedirs(os.path.join(repo, "tools", "council"), exist_ok=True)
+    subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+    with open(os.path.join(repo, "f.txt"), "w") as fh:
+        fh.write("base\n")
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-qm", "base"], check=True)
+    with open(os.path.join(repo, "tools", "council", "policy.py"), "w") as fh:
+        fh.write("# a change smuggled into the council protocol\n")
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c",
+                    "user.name=t", "commit", "-qm", "touch protected"],
+                   check=True)
+    head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                          capture_output=True, text=True,
+                          check=True).stdout.strip()
+    return repo, head
+
+
+def test_commit_derived_protected_path_refused(env, tmp_path):
+    """SLICE-1 AUDIT REGRESSION (000621, HIGH): a clean commit that ACTUALLY
+    changes tools/council/policy.py must be refused even when the request scope
+    is benign and omits the path — the boundary is the commit's real diff, not
+    the builder's prose."""
+    root, _r0, _h0, cfg0 = env
+    _ratify_v3(root, _r0, _h0, cfg0)
+    repo, head = _repo_touching_protected(tmp_path)
+    cfg = make_cfg(repo, root)
+    request = make_request(repo, head, RID, task_kind="source",
+                           scope=["refine structural source behavior"])
+    d = policy.evaluate_delegation(root, cfg, request, _verdict_event(head),
+                                   events.read_chain(root))
+    assert not d.auto_approve
     assert any("no_protocol_self_modification" in r for r in d.reasons)
+    # the benign scope alone would NOT have caught it (proves prose is not the
+    # boundary): the secondary scope signal passes here
+    assert not any("scope_declares_no_protected_path" in r for r in d.reasons)
+
+
+def test_end_to_end_commit_derived_protected_path_refused(env, tmp_path):
+    """The same reproduction through the real append boundary: the tokenless
+    CONDITIONS_AUTO_SATISFIED is refused because _verify_delegated_satisfaction
+    re-runs evaluate_delegation against the audited commit's real diff."""
+    root, _r0, _h0, cfg0 = env
+    _ratify_v3(root, _r0, _h0, cfg0)
+    repo, head = _repo_touching_protected(tmp_path)
+    cfg = make_cfg(repo, root)
+    drive_to_claimed(root, cfg, repo, head, request_id=RID, task_kind="source",
+                     scope=["refine structural source behavior"])
+    _append_conditional(root, cfg, repo, head)
+    with pytest.raises(CouncilError):
+        append(root, cfg, "CONDITIONS_AUTO_SATISFIED", "claude", RID, repo,
+               head, {"delegation_id": DELEG_ID, "condition_classes": ["A"]})
 
 
 def test_missing_forbidden_capabilities_refused(env):
