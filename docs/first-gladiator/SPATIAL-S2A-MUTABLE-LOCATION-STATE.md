@@ -1,11 +1,13 @@
-# Spatial S2A — Mutable exclusive-location state (design source, rev 4)
+# Spatial S2A — Mutable exclusive-location state (design source, rev 5)
 
 **Status:** design source for council review. No production code. Builds on the **immutable, untouched**
-integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 4 closes audit 000999:
-canonical in-transit fork semantics (the child inherits the parent's logical clock, preserving remaining
-travel time) + a general admission invariant relating `logical_step` to transit bounds. (Rev 3 closed
-audit 000993: unified entity lifecycle, actor rules, `ForkDecision` authorization, transit step semantics
-+ `env_tick`. Rev 2 closed audit 000987: fork materialization, provenance, canonical shapes.)
+integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 5 closes audit 001005:
+coincident transit arrivals are resolved **atomically** by the single clock-advancing `advance_step`
+transition (completing *every* body due at the reached step), replacing the per-body completer so shared
+`arrival_step`s never deadlock. (Rev 4 closed audit 000999: in-transit fork inherits the parent clock +
+the transit admission invariant. Rev 3 closed audit 000993: unified entity lifecycle, actor rules,
+`ForkDecision` authorization, transit step semantics. Rev 2 closed audit 000987: fork materialization,
+provenance, canonical shapes.)
 
 ## 1. Purpose and boundary
 S2A adds the **mutable world state** (*where every entity is*) as an explicit, replayable **event layer**
@@ -50,14 +52,21 @@ that record a step use the **resulting** step (N+1).
 | `spawn` | system (`null`) | `entity_id`,`entity_kind`,`location` | entity not `present`/`absent`/`removed` OR `absent` (never `removed`); location legal+in-world | entity `present` at `location` |
 | `despawn` | system | `entity_id`,`entity_kind` | entity `present` | entity `absent`, no placement |
 | `remove` | system | `entity_id`,`entity_kind` | entity `present`/`absent`, not `removed` | entity `removed` (terminal), no placement |
-| `env_tick` | system | *(none)* | — | placements/lifecycle unchanged; only `logical_step` advances |
+| `advance_step` | system | *(none)* | — | `logical_step` advances to `N+1`; **atomically** every `in_transit` body with `arrival_step == N+1` (the sorted-by-`agent_body_id` due set) lands `InRoom(destination)`; all other placements/lifecycle unchanged (a pure tick when no arrival is due) |
 | `move` | actor=`agent_body_id` | `agent_body_id`,`portal_instance_id`,`from_room_instance_id`,`to_room_instance_id` | body `present`,`InRoom(from)`; registered portal connects from→to in-world | `InRoom(to)` if `traversal_duration_steps==0`, else `InTransit(portal,from,to,start=N+1,arrival=N+1+duration)` |
-| `complete_transit` | system | `agent_body_id` | body `InTransit(…,arrival)` and `N+1 == arrival_step` | body `InRoom(destination)` |
 | `take` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id` | body `InRoom(r)`; object `present`,`InRoom(r)`,`portability`; if `exclusive_possession`, not `held_by` anyone | object `HeldBy(body)` |
 | `drop` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id` | object `HeldBy(body)`; body `InRoom(r)` | object `InRoom(r)` |
 | `give` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id`,`recipient_agent_body_id` | object `HeldBy(body)`; recipient `present`,`InRoom(r)`=body's room | object `HeldBy(recipient)` |
 | `put_inside` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id`,`container_object_instance_id` | object `HeldBy(body)`; container `container_capability`, `InRoom(body's room)`/`HeldBy(body)`; object≠container, container not transitively `Inside` object | object `Inside(container)` |
 | `take_out` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id`,`container_object_instance_id` | object `Inside(container)`; container `InRoom(body's room)`/`HeldBy(body)` | object `HeldBy(body)` |
+
+**Arrival resolution (the only transit completer):** transit arrivals are resolved **exclusively and
+atomically** by `advance_step` — reaching a logical step completes *every* body due at that step in one
+transition (so coincident arrivals never deadlock). Correspondingly, an **actor** action (or `spawn`/
+`despawn`/`remove`) that would advance the clock to `N+1` is **illegal if any `in_transit` body has
+`arrival_step == N+1`** — such a step's arrivals must be resolved by `advance_step` first. This guarantees
+every admitted state has a legal successor and keeps §5's transit invariant intact; the *policy* choosing
+which transition runs each step is deferred to S2B.
 
 **Actor rules (validated in §6):** a **system** action requires `actor_body_id == null`. An **actor**
 action requires `actor_body_id` = a registered, in-world `AgentBodyInstance` with lifecycle `present`, and
@@ -68,8 +77,10 @@ object cannot be `spawn`ed).
 **Capacity:** per room, count of **agent bodies** `InRoom` ≤ `RoomSpec.capacity` (when non-null); objects
 don't consume capacity. **Containment:** `Inside` is acyclic (re-checked each take/give/put_inside/take_out).
 **Transit:** `start_step < arrival_step`; distinct in-world endpoints the portal connects; a body crosses a
-duration-`d` portal via `move` (→`InTransit`, step `N+1`), then `d-1` `env_tick`s, then `complete_transit`
-at step `arrival_step` (total `d` steps). `d==0` lands directly `InRoom(dest)`.
+duration-`d>0` portal via `move` (→`InTransit(start=N+1, arrival=N+1+d)`), then `advance_step`s until the
+one reaching `arrival_step` atomically lands it (and any co-arriving bodies) `InRoom(dest)`. `d==0` lands
+directly `InRoom(dest)`. There is no per-body completion action; completion is a property of reaching the
+arrival step.
 
 ## 5. State admission validator (single-snapshot, runs BEFORE any fold)
 `admit_world_state(state)` fails closed unless: schema supported; `world_line_id` registered;
@@ -140,7 +151,7 @@ state (open/closed/locked) — documented follow-on. No pathfinding beyond one-p
 labels/training/weights/T0-B/M14-SC-8/society. No `tools/council` changes.
 
 ## 10. Threat model + required identity vectors
-**Identity vectors (byte-pinned):** every location tag; every §4 action/effect shape (incl. `env_tick`);
+**Identity vectors (byte-pinned):** every location tag; every §4 action/effect shape (incl. `advance_step`);
 a `WorldState`; a `LocationTransition`; a `ForkDecision`; a `ForkInitialization`.
 **Adversarial (each fails closed):** admission — duplicate `entity_id`/lifecycle rows, nonexistent/wrong-kind
 ids, cross-world nested refs, kind-illegal location, capacity overflow, exclusive double-hold, containment
@@ -153,9 +164,12 @@ pre, resurrection of a `removed` body OR object, transplanted `resulting_state_h
 historical snapshot of P whose hash/step do not match D) refused, foreign/stale/unregistered parent
 refused, two siblings distinct with no contamination; transit — byte-pin duration 0/1/>1 move+completion
 traces incl. early/late completion refusal, an admitted state with an `in_transit` body whose
-`logical_step < start_step` or `≥ arrival_step` refused, and **forking a mid-transit parent** (child
-inherits `logical_step = fork_logical_step` with remaining travel preserved and admits; a step-reset
-variant refused by the transit invariant); replay — identical bytes, order-independent storage.
+`logical_step < start_step` or `≥ arrival_step` refused, **coincident arrivals** (two bodies with the same
+`arrival_step` both landed atomically by one `advance_step`; an ordinary actor action that would strand a
+due arrival at its resulting step refused by the transit admission invariant, while `advance_step` always
+succeeds), and **forking a mid-transit parent** (child inherits `logical_step = fork_logical_step` with
+remaining travel preserved and admits; a step-reset variant refused by the transit invariant); replay —
+identical bytes, order-independent storage.
 
 ## 11. Compatibility
 Additive only; new files under `coliseum/textlab/spatial/`. No existing module / primary evidence /
