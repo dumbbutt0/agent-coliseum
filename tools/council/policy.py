@@ -161,16 +161,66 @@ def _amended_v3() -> dict:
     return v3
 
 
+# Version 4 (A/B/C/D governance, owner-ratified): ADDS a `governance` block to v3
+# (delegation stays ENABLED) — the additive next capability. The ladder is
+# purely forward-additive: v4 keeps delegation and adds governance; delegation
+# REVOCATION moves to the forward version 5 (still forward-only, never a rollback —
+# the delegation charter's binding intent; only the version number shifts because
+# governance was inserted). governance_v1 defines the A/B/C/D classes, the exactly-six
+# Class-D reserved list, the frozen Class-C gate set, and the codex-only quorum. It is
+# INERT until the owner ratifies v4; the routing/evaluator consult it only when the
+# effective policy is >= v4 with governance enabled.
+def _governance_v1() -> dict:
+    return {
+        "enabled": True,
+        "governance_id": "coliseum-governance-abcd-v1",
+        "governance_schema_version": "1",
+        # A: evaluate_delegation (the v3 envelope). B: codex build->audit, integrate
+        # only on a clean GO bound to the exact commit (classification != satisfaction).
+        # C: autonomous council, frozen Class-C evaluator. D: owner S/KEY token only.
+        "classes": ["A", "B", "C", "D"],
+        "unclassified_routes_to": "D",   # absent/invalid matter_class fails closed to D
+        "class_d_reserved": [
+            "external_publication_under_owner_identity",
+            "expenditure_beyond_authorized_budget",
+            "irreversible_destruction_of_evidence_or_infrastructure",
+            "legal_financial_privacy_or_personal_risk_acceptance",
+            "alteration_of_fundamental_mission",
+            "modification_of_constitutional_safety_controls",
+        ],
+        "class_c_gates": [
+            "preregistration_and_freshness",
+            "evidence_adequacy",
+            "reproducibility_replay",
+            "independent_replication_2plus",
+            "metric_validity",
+            "independent_auditor_approval",
+            "recorded_dissent_consensus",
+        ],
+        "required_auditors": ["codex"],   # class-C quorum; fable deferred (inactive)
+        "class_c_reconciliation_budget": 2,
+    }
+
+
 def _amended_v4() -> dict:
-    v4 = _amended_v3()
+    v4 = _amended_v3()               # delegation ENABLED carried forward
     v4["policy_version"] = 4
     v4["amends"] = 3
-    v4["owner_delegation"] = dict(_owner_delegation(), enabled=False)  # revoked
+    v4["governance"] = _governance_v1()
     return v4
 
 
-POLICY_VERSIONS = {1: DEFAULT_POLICY, 2: _amended_v2(),
-                   3: _amended_v3(), 4: _amended_v4()}
+def _amended_v5() -> dict:
+    # forward-only delegation REVOCATION target (delegation disabled; governance kept).
+    v5 = _amended_v4()
+    v5["policy_version"] = 5
+    v5["amends"] = 4
+    v5["owner_delegation"] = dict(_owner_delegation(), enabled=False)  # revoked
+    return v5
+
+
+POLICY_VERSIONS = {1: DEFAULT_POLICY, 2: _amended_v2(), 3: _amended_v3(),
+                   4: _amended_v4(), 5: _amended_v5()}
 
 
 _VOLATILE = ("created_utc", "amended_utc")
@@ -342,6 +392,28 @@ class PolicyDecision:
     policy_hash: str | None
     reasons: list = field(default_factory=list)  # every failed condition
     checked: list = field(default_factory=list)  # every condition evaluated
+
+
+GOVERNANCE_MATTER_CLASSES = ("A", "B", "C", "D")
+
+
+@dataclass
+class GovernanceRoute:
+    """The A/B/C/D routing decision for a matter under governance_v1. `matter_class`
+    is the EFFECTIVE class after fail-closed guards (deflation is caught: a request
+    that touches protected paths or must declare a reserved capability is forced to
+    D no matter what the auditor label says). `route` is the handler lane. `active`
+    is False when the effective policy has no governance enabled (dormant under
+    v1-v3)."""
+    active: bool
+    matter_class: str                 # effective class A/B/C/D
+    declared_class: str | None        # the auditor-emitted matter_class (or None)
+    route: str                        # delegation | codex_lifecycle | council | owner
+    policy_hash: str | None
+    reasons: list = field(default_factory=list)
+
+
+_ROUTE_OF = {"A": "delegation", "B": "codex_lifecycle", "C": "council", "D": "owner"}
 
 
 def write_initial_policy(root: str) -> str:
@@ -715,6 +787,67 @@ def evaluate_delegation(root: str, cfg: Config, request: dict,
 
     return PolicyDecision(auto_approve=not reasons, policy_hash=policy_hash,
                           reasons=reasons, checked=checked)
+
+
+# ----------------------------------------------------- A/B/C/D governance routing
+
+def governance_route(root: str, cfg: Config, request: dict, verdict_event: dict,
+                     chain: list) -> GovernanceRoute:
+    """Route a matter A/B/C/D under governance_v1 (owner-ratified v4+). The
+    auditor-emitted `matter_class` in the verdict payload is the routing primitive;
+    it is verdict_payload_hash-bound, so the builder cannot forge it. Fail-closed:
+    an absent/invalid class routes to D, and DEFLATION is caught — any matter whose
+    audited commit changes a protected path, or whose request omits a required
+    reserved-capability declaration, is forced to D regardless of the label (a non-D
+    label can never buy Class-A/B/C authority for a D-touching change). Dormant
+    (active=False, route=owner) whenever the effective policy has no governance
+    enabled (v1-v3). A pure, re-runnable function of (chain, request, verdict)."""
+    policy = policy_hash = None
+    try:
+        policy, policy_hash = load_policy(root)
+    except SchemaViolation as exc:
+        return GovernanceRoute(False, "D", None, "owner", None,
+                               [f"policy_installed: {exc}"])
+    _eff_hash, eff_version = effective_policy_pin(chain)
+    gov = policy.get("governance") or {}
+    active = (bool(gov.get("enabled")) and eff_version is not None
+              and eff_version >= 4 and is_code_defined_version(policy))
+    if not active:
+        return GovernanceRoute(False, "D", None, "owner", policy_hash,
+                               ["governance not active (requires an owner-ratified "
+                                "governance-enabled policy version)"])
+    reasons: list = []
+    verdict = verdict_event.get("payload", {}) or {}
+    declared = verdict.get("matter_class")
+    valid = declared in GOVERNANCE_MATTER_CLASSES
+    effective = declared if valid else (gov.get("unclassified_routes_to") or "D")
+    if not valid:
+        reasons.append(f"absent/invalid matter_class -> {effective} ({declared!r})")
+
+    # anti-deflation: a D-touching change can never be A/B/C. Verified from the EXACT
+    # audited commit's real diff (never request prose) + the reserved-capability
+    # declaration; any failure to verify fails closed to D.
+    protected = tuple(policy["protected_paths"])
+    try:
+        changed = git_state.changed_paths(request["repository"],
+                                          request["target_commit"], cfg.repo_roots)
+        touched = [p for p in changed if any(pr in p for pr in protected)]
+        if touched:
+            effective = "D"
+            reasons.append(f"audited commit changes protected paths -> D: {touched}")
+    except Exception as exc:
+        effective = "D"
+        reasons.append(f"cannot verify the audited commit's changed paths "
+                       f"(fail-closed -> D): {exc}")
+    forbidden = set(request.get("forbidden_actions", []))
+    missing = [c for c in policy["auto_approval"]["forbidden_capabilities"]
+               if c not in forbidden]
+    if missing:
+        effective = "D"
+        reasons.append(f"undeclared reserved capabilities -> D: {missing}")
+
+    return GovernanceRoute(True, effective, (declared if valid else None),
+                           _ROUTE_OF[effective], policy_hash, reasons)
 
 
 # ------------------------------------------------------------ society milestone

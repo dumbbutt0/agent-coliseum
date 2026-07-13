@@ -54,7 +54,7 @@ authority**, not a per-verdict approval service.
 | Envelope escape / out-of-scope request | The `OwnerDelegationProfile` enumerates authorized task kinds/capabilities/paths; anything outside → fail closed. |
 | Cross-request delegation reuse | The auto-satisfy event binds `request_id` + `target_commit` + `delegation_hash`; a delegation grant is not transferable between requests/commits (mirrors token binding). |
 | Commit swap after audit | Reuses the existing `verdict_commit_exact` + `head_is_target` + clean-tree guards; a changed commit invalidates authorization. |
-| Expired / revoked / suspended delegation | `evaluate_delegation` checks start/expiration + budget + `STOP`/`MANUAL` (immediate suspension) + the active policy version (a v3→v4 owner-tokened forward-only `POLICY_AMENDED` disables delegation, §5); any → fail closed to the owner. Revocation is never a v3→v2 rollback (impossible under monotonic `effective_policy_pin`) and never an agent-creatable marker. |
+| Expired / revoked / suspended delegation | `evaluate_delegation` checks start/expiration + budget + `STOP`/`MANUAL` (immediate suspension) + the active policy version (a forward-only owner-tokened `POLICY_AMENDED` to a delegation-disabled version disables delegation, §5; ladder note §revocation); any → fail closed to the owner. Revocation is never a v3→v2 rollback (impossible under monotonic `effective_policy_pin`) and never an agent-creatable marker. |
 | Budget evasion | A code-defined delegation task/compute budget + fail-closed `cond`; exhaustion → owner gate. |
 | Protocol self-modification | `no_protocol_self_modification` (unchanged) forces council-authority changes to the owner. |
 | Hunger-Games / weights escalation | Explicit Class-C; never delegated. |
@@ -81,10 +81,13 @@ A content-addressed object embedded in `POLICY_VERSIONS[3]`, bound into every au
   720-aggregate-compute-minute envelope; `expiration`: N days OR the next owner `STATUS_CHANGED`/`POLICY_AMENDED`
   (whichever first), re-granted by re-ratification.
 - **`revocation` (owner-authenticated, monotonic — corrected).** Permanent revocation is a **forward-only,
-  owner-tokened `POLICY_AMENDED` from v3 to a new code-defined delegation-DISABLED version v4** (v4 = the policy
-  with the `OwnerDelegationProfile` removed/disabled). It is **never** a v3→v2 rollback: `effective_policy_pin`
-  is strictly monotonic (`policy_version == current+1`, root-anchored, `policy.py:202-220`), so rollback is
-  impossible by construction and must not be claimed. Only the owner S/KEY token can emit this `POLICY_AMENDED`
+  owner-tokened `POLICY_AMENDED` to a code-defined delegation-DISABLED version** (the policy with
+  `OwnerDelegationProfile` disabled). *(Ladder note: the A/B/C/D governance amendment took **v4** — v4 = v3 +
+  governance, delegation still enabled — so the delegation-disabled revocation target is now the forward
+  version **v5**; the version number shifted when governance was inserted, but the mechanism is unchanged.)*
+  It is **never** a rollback to a lower version: `effective_policy_pin` is strictly monotonic
+  (`policy_version == current+1`, root-anchored, `policy.py`), so rollback is impossible by construction and
+  must not be claimed. Only the owner S/KEY token can emit this `POLICY_AMENDED`
   (`schemas.py:123,136`), so no agent can forge revocation. **Immediate emergency SUSPENSION** (no token, not
   the authenticated revocation) reuses the existing `STOP` file (halts every transition) and `MANUAL` marker
   (disables auto-approval, hence the delegated path); `evaluate_delegation` fails closed on both via

@@ -732,6 +732,17 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
             raise SchemaViolation(
                 "condition_classes must align 1:1 with conditions "
                 f"({len(classes)} vs {len(verdict['conditions'])})")
+    # A/B/C/D governance extension: an OPTIONAL codex-emitted WHOLE-MATTER
+    # classification, distinct from the per-condition `condition_classes`. When
+    # present it is exactly one of A/B/C/D; it lives inside the verdict payload so it
+    # is covered by verdict_payload_hash below (the routing authority
+    # policy.governance_route rests on this CODEX-authored, hash-bound field — the
+    # builder cannot forge or alter it). Present on any governed verdict, including a
+    # plain GO with no conditions.
+    matter_class = verdict.get("matter_class")
+    if matter_class is not None and matter_class not in ("A", "B", "C", "D"):
+        raise SchemaViolation(
+            f"matter_class must be one of 'A'/'B'/'C'/'D' (got {matter_class!r})")
     want = compute_verdict_payload_hash(verdict)
     if verdict["verdict_payload_hash"] != want:
         raise SchemaViolation("verdict_payload_hash does not match content")
