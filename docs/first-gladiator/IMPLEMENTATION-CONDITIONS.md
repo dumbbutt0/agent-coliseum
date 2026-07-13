@@ -18,22 +18,43 @@
 | Trained Behavioral-Agency Program Rev. 3 | `first-gladiator-training-annex-001` | `000577` | `000581` | `000584` | `a138aa3f` |
 | Scenario Robustness & Mutation Track | `first-gladiator-scenario-mutation-annex-001` | `000579` | `000582` | `000585` | `a138aa3f` |
 
-## Carried conditions (from the on-chain verdicts)
+## Carried conditions — every authoritative condition, per verdict
 
-- **G-ADOPT (all three, C1).** Adoption binds only the pinned documentation source at its hash; it authorizes
-  **no** implementation, schema/registry/runtime change, environment execution, training/weights, registration,
-  M0–M15/METRICS/policy change, external mutation-provider integration, or publication claim.
-- **G-ENV (training-annex `000577` C2) → binds Phase 9 (environment implementation).** Any future environment
-  implementation request must explicitly resolve the version-dispatched `agent_regime_id` /
-  `environment_regime_id` / `comparison_regime_id` axis construction and the `generation_recipe` /
-  `held_constant_hash` / `changed_dimension_hash` payload details; it **may not independently alter
-  `agent_regime_id`**, and all historical `agent_regime_id` identities must remain **byte-identical**.
-- **G-MUT (scenario `000579` C1/C2) → binds Phase 10 (scenario-mutation implementation).** Before mutation
-  implementation, resolve: `generation_recipe` own domain separator + schema version + mode-specific
-  non-applicable sentinels + (for local Ollama) inference/runtime version, tokenizer/chat-template behavior,
-  context/truncation, and stop configuration; and define exact canonical typed payloads for `held_constant_hash`
-  and `changed_dimension_hash`. Plus the standing P4RS3LT0NGV3 licensing/supply-chain review and the
-  no-copy/vendor / no-OpenRouter-for-hidden / untrusted-content / resource-isolation controls.
+The authoritative source is each verdict event's immutable `conditions[]`. All six are enumerated below with
+their exact source and status (CLOSED operational caveat vs OPEN implementation gate). The C1 conditions of the
+three sources are **not** identical and are not collapsed into a single "adoption" label.
+
+**Butterfly Rev. 6 — event `000569` (2 conditions):**
+- **`000569` C1 — CLOSED (operational caveat).** Treat the annex's stale draft-provenance statements (nothing
+  committed/routed; "validated at 86bc3b0") as **non-authoritative**; the council chain + audited commit are the
+  authority. No forward implementation gate; the exact Rev. 6 file was preserved (not edited) during routing.
+- **`000569` C2 — CLOSED.** Cross-check the training annex's hidden-suite rotation lifecycle against Butterfly
+  Rev. 6 D12–D13 before claiming cross-document alignment. Addressed during the separate training-annex routing
+  (Rev. 3 §17 was aligned to the D12–D13 governed lifecycle; its audit `000577` raised no mismatch) and closed at
+  its integration (`000584`). No open gate.
+
+**Trained Behavioral-Agency Program Rev. 3 — event `000577` (2 conditions):**
+- **`000577` C1 — STANDING adoption boundary.** Adoption binds only the complete Rev. 3 documentation source at
+  its pinned hash and only at a future owner SC gate; it authorizes **no** implementation, schema/registry/runtime
+  change, environment execution, training or weight change, registration, M0–M15/METRICS/policy change, external
+  mutation-provider integration, or publication claim. (This is the design-source-only rule; the analogous
+  boundary applies to each adopted source, but the text here is `000577` C1 specifically.)
+- **`000577` C2 — OPEN → binds Phase 9 (environment implementation).** Any future environment implementation
+  request must explicitly resolve the version-dispatched `agent_regime_id` / `environment_regime_id` /
+  `comparison_regime_id` axis construction and the `generation_recipe` / `held_constant` / `changed_dimension`
+  payload details; it **may not independently alter `agent_regime_id`**, and all historical `agent_regime_id`
+  identities must remain **byte-identical**.
+
+**Scenario Robustness & Mutation Track — event `000579` (2 conditions):**
+- **`000579` C1 — OPEN → binds Phase 10 (scenario-mutation implementation).** At implementation, give
+  `generation_recipe` its own domain separator and schema version, use mode-specific non-applicable sentinels,
+  and (for local Ollama) bind inference/runtime version, tokenizer and chat-template behavior, context/truncation
+  settings, and stop configuration unless already completely bound in `sampler_config`.
+- **`000579` C2 — OPEN → binds Phase 10.** At implementation, define exact canonical typed payloads for
+  `held_constant_hash` and `changed_dimension_hash` so the commitment that only the registered dimension changed
+  is complete and not partly validator-dependent.
+- (Standing, from the companion's own body, not a `000579` condition: the P4RS3LT0NGV3 licensing/supply-chain
+  review and the no-copy/vendor / no-OpenRouter-for-hidden / untrusted-content / resource-isolation controls.)
 
 ## Phase gates (roadmap-order requirements, not yet satisfied)
 
