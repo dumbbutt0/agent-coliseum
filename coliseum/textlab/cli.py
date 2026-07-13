@@ -151,14 +151,17 @@ def _load_held_out(registry_path):
 
 
 def cmd_dataset_export(args):
-    """T0-A: emit a provenance-complete, non-pooled dataset descriptor + card from validated evidence.
-    Structural only — no normative labels, no partitioning, no training."""
+    """T0-A: emit a provenance-complete, non-pooled dataset descriptor + card from validated evidence,
+    with an optional deterministic, dataset-version-bound group-aware partition (§8).
+    Structural only — no normative labels, no training."""
     from .dataset_export import build_dataset, dataset_from_manifest, dataset_card
     from . import reports
     held_ids, held_hashes = _load_held_out(args.registry)
     common = dict(mode=args.mode, interaction_mode=args.interaction,
                   held_out_scenarios=held_ids, held_out_hashes=held_hashes,
-                  verify=args.verify, config_dir=args.config_dir)
+                  verify=args.verify, config_dir=args.config_dir,
+                  partition=args.partition,
+                  registry_path=args.scenario_registry if args.partition else None)
     if args.manifest:
         desc = dataset_from_manifest(args.manifest, args.out_root, **common)
     else:
@@ -225,6 +228,12 @@ def main(argv=None):
                    choices=["deterministic", "stochastic", "variants", "full-grid"])
     s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
                    help="which experimental mode to export (modes never pool)")
+    s.add_argument("--partition", action="store_true",
+                   help="fold a deterministic, dataset-version-bound group-aware "
+                        "split (§8) into the descriptor + commitment")
+    s.add_argument("--scenario-registry", default="configs/registry/scenarios.yaml",
+                   help="scenario registry supplying the §8 sibling fields "
+                        "(family / control_of) for group-aware partitioning")
 
     args = p.parse_args(argv)
     args.fn(args)

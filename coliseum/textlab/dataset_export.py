@@ -1,10 +1,10 @@
 """T0-A audited-trajectory substrate — dataset export (structural; no labels, no training).
 
-This is the first bounded slice of the training-annex T0-A "evidence substrate": it turns already-
-validated evidence into a provenance-complete, non-pooled, content-addressed DATASET DESCRIPTOR plus a
-descriptive DATASET CARD. It introduces NO new normative labels (that is T0-B), NO group-aware
-partitioning (a later slice), and NO training. Every admission / retry-collapse / effective-unit /
-byte-gate / hash primitive is reused unchanged:
+This is the T0-A "evidence substrate": it turns already-validated evidence into a provenance-complete,
+non-pooled, content-addressed DATASET DESCRIPTOR plus a descriptive DATASET CARD, with an optional
+deterministic, dataset-version-bound GROUP-AWARE partition (§8, coliseum/textlab/partition.py) folded
+into the commitment. It introduces NO new normative labels (that is T0-B) and NO training. Every
+admission / retry-collapse / effective-unit / byte-gate / hash primitive is reused unchanged:
 
   - admission + retry collapse + effective-unit counting  -> metrics.aggregate (metrics.py)
   - row<->evidence manifest validation + dedup            -> sweep.manifest_load
@@ -22,6 +22,8 @@ import os
 from .schema import canonical_json, config_hash
 from .metrics import aggregate
 from .sweep import manifest_load, verify_run_replay
+from .partition import (DEFAULT_SPLITS, load_scenario_siblings,
+                        partition_manifest)
 
 DATASET_SCHEMA_VERSION = "1"
 DATASET_COMMITMENT_DOMAIN = "dataset:commitment:v1"
@@ -41,12 +43,20 @@ def _held_out_offenders(run_dirs, held_ids, held_hashes):
 def build_dataset(run_dirs, *, mode="deterministic",
                   interaction_mode="independent_vignettes",
                   held_out_scenarios=None, held_out_hashes=None,
-                  verify=False, config_dir="configs/scenarios"):
+                  verify=False, config_dir="configs/scenarios",
+                  partition=False, registry_path=None, splits=DEFAULT_SPLITS):
     """Build a canonical, non-pooled dataset descriptor from a set of run dirs.
 
     Reuses metrics.aggregate for admission + retry-collapse + effective-unit counting; refuses if any
     included run is a held-out scenario (by id OR scenario_hash); optionally byte-gates every run via
-    verify_run_replay before inclusion. NO labels, NO partitioning, NO training.
+    verify_run_replay before inclusion. NO labels, NO training.
+
+    When `partition=True`, a deterministic, dataset-version-bound GROUP-AWARE split
+    (§8) is computed over the units' scenarios from `registry_path` and folded into
+    the descriptor (and therefore the commitment); the leakage lint refuses any
+    sibling straddle. Each unit gets its scenario's `split`. A retry/alternate
+    rendering inherits its scenario's split (the split is keyed on the scenario's
+    partition group, never on a run id).
     """
     run_dirs = sorted(run_dirs)
     if not run_dirs:
@@ -93,6 +103,22 @@ def build_dataset(run_dirs, *, mode="deterministic",
             "metrics": cell["metrics"],
         })
 
+    # group-aware partition (§8): deterministic, dataset-version-bound, folded into
+    # the commitment. A unit's split is its scenario's group split — so every retry
+    # / alternate rendering of a scenario inherits the same split (no crossing via a
+    # new row identity), and no sibling family/twin straddles a split (linted).
+    partition_block = None
+    if partition:
+        if not registry_path:
+            raise ValueError("partition=True requires registry_path")
+        siblings = load_scenario_siblings(registry_path)
+        scenario_ids = {u["scenario_id"] for u in units}
+        partition_block = partition_manifest(
+            scenario_ids, siblings, splits=splits,
+            dataset_schema_version=DATASET_SCHEMA_VERSION)
+        for u in units:
+            u["split"] = partition_block["assignment"][u["scenario_id"]]
+
     descriptor = {
         "dataset_schema_version": DATASET_SCHEMA_VERSION,
         "metrics_version": agg["metrics_version"],
@@ -109,6 +135,7 @@ def build_dataset(run_dirs, *, mode="deterministic",
             "contamination_found": False,
         },
         "replay_verification": replay_verification,
+        "partition": partition_block,
     }
     descriptor["dataset_commitment"] = dataset_commitment(descriptor)
     return descriptor
@@ -150,20 +177,48 @@ def dataset_card(descriptor):
          f"{len(hoa['checked_hashes'])} hash(es), contamination_found={hoa['contamination_found']}"),
         f"- replay verification: {'yes' if descriptor['replay_verification'] else 'not run'}",
         f"- **dataset commitment**: `{descriptor['dataset_commitment']}`",
+    ]
+    part = descriptor.get("partition")
+    if part:
+        sizes = ", ".join(f"{name}={n}" for name, n in
+                          sorted(part["split_sizes"].items()))
+        lines += [
+            "",
+            "## Group-aware partition (§8)",
+            "",
+            f"- partition scheme version: `{part['partition_scheme_version']}`",
+            f"- groups (co-assignment unit = registry family): "
+            f"**{part['group_count']}**",
+            f"- split sizes (scenarios): {sizes}",
+            f"- leakage lint: **{part['leakage_lint']}** "
+            "(no family or control-twin straddles a split)",
+            "",
+            "| partition group | family | split | members |",
+            "|---|---|---|---|",
+        ]
+        for g in part["groups"]:
+            lines.append(f"| `{g['partition_group_id'][:12]}…` | `{g['family']}` | "
+                         f"`{g['split']}` | {len(g['members'])} |")
+    partition_note = ("a deterministic, dataset-version-bound group-aware split "
+                      "(§8) whose leakage lint refuses any sibling straddle"
+                      if part else "no group-aware partitioning")
+    lines += [
         "",
         "## Effective units",
         "",
-        "| cell | scenario | effective_n | raw_attempts |",
-        "|---|---|---|---|",
+        "| cell | scenario | split | effective_n | raw_attempts |",
+        "|---|---|---|---|---|",
     ]
     for u in descriptor["units"]:
         lines.append(f"| `{u['cell_key']}` | `{u['scenario_id']}` | "
+                     f"`{u.get('split', '—')}` | "
                      f"{u['effective_n']} | {u['raw_attempt_n']} |")
     lines += [
         "",
-        "*Structural export (T0-A): no normative labels, no group-aware partitioning, no training. "
-        "Every unit is retry-collapsed and effective-n counted through the audited metrics pipeline; "
-        "held-out scenarios are refused by id AND scenario_hash.*",
+        f"*Structural export (T0-A): no normative labels, {partition_note}, no "
+        "training. Every unit is retry-collapsed and effective-n counted through "
+        "the audited metrics pipeline; held-out scenarios are refused by id AND "
+        "scenario_hash.*",
         "",
     ]
     return "\n".join(lines)
