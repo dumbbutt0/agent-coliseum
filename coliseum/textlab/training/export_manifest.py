@@ -45,34 +45,88 @@ def _sha256_file(path: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def _recompute_source_evidence(run_dir: str) -> SourceEvidenceBinding:
-    """Rebuild the SourceEvidenceBinding directly from run_dir's exact bytes — the
-    ground-truth identity the supplied projection must match."""
-    with open(os.path.join(run_dir, "run.json"), "rb") as fh:
-        run_json = json.loads(fh.read())
-    return SourceEvidenceBinding(
-        run_id=run_json["run_id"],
-        run_json_content_hash=_sha256_file(os.path.join(run_dir, "run.json")),
-        decisions_jsonl_content_hash=_sha256_file(
-            os.path.join(run_dir, "decisions.jsonl")))
+_PROJECTION_SCALAR_KEYS = ("source_evidence", "behavior_policy_spec",
+                           "trajectory_manifest")
+_PROJECTION_LIST_KEYS = ("decision_records", "actor_decision_records",
+                         "actor_observations", "privileged_observations",
+                         "legal_action_sets")
 
 
-def _assert_projection_binds_run_dir(projection: dict, run_dir: str) -> str:
-    """Fail closed unless ``projection`` was genuinely derived from ``run_dir``: the
-    projection's SourceEvidenceBinding must equal the binding recomputed from
-    run_dir's exact run.json + decisions.jsonl bytes. Prevents a forged export that
-    binds run A's records/source-evidence to run B's scenario/partition/commitment.
-    Returns the bound source run_id."""
-    supplied = projection.get("source_evidence")
-    if supplied is None:
-        raise ContentRecordError("projection is missing its source_evidence binding")
-    truth = _recompute_source_evidence(run_dir)
-    if supplied.id != truth.id:
+def assert_projection_coherent(projection: dict) -> None:
+    """Fail closed unless ``projection`` is an internally-consistent DAG rooted at its
+    SourceEvidenceBinding — no independently-swappable record. Requires: all lists
+    present and equal in length; the TrajectoryManifest rooted at source_evidence and
+    listing exactly the decision-record ids in order; and, per position, the privileged
+    DecisionRecord and the actor ActorDecisionRecord referencing the SAME behavior
+    policy, actor/privileged observations, legal-action set, and sequence position as
+    the projection's own records. Prevents a chimera (e.g. a transplanted
+    source_evidence) from riding alongside unrelated included records."""
+    for k in _PROJECTION_SCALAR_KEYS + _PROJECTION_LIST_KEYS:
+        if k not in projection:
+            raise ContentRecordError(f"projection is missing '{k}'")
+    se = projection["source_evidence"]
+    policy = projection["behavior_policy_spec"]
+    manifest = projection["trajectory_manifest"]
+    decisions = projection["decision_records"]
+    n = len(decisions)
+    for k in _PROJECTION_LIST_KEYS:
+        if len(projection[k]) != n:
+            raise ContentRecordError(
+                f"projection list '{k}' has length {len(projection[k])}, expected {n}")
+    if n == 0:
+        raise ContentRecordError("projection has no decisions")
+    # the manifest must be rooted at THIS source evidence and list THESE decisions.
+    if manifest.content["run_identity"] != se.id:
         raise ContentRecordError(
-            "projection is not derived from run_dir (source-evidence mismatch): the "
-            "supplied projection's run.json/decisions.jsonl identity does not match "
-            "run_dir's exact bytes — a cross-run export binding is refused")
-    return truth.content["run_id"]
+            "trajectory_manifest.run_identity does not equal source_evidence.id "
+            "(the manifest is not rooted at this run's evidence)")
+    if manifest.content["ordered_decision_ids"] != [d.id for d in decisions]:
+        raise ContentRecordError(
+            "trajectory_manifest.ordered_decision_ids do not match the projection's "
+            "decision_records (in order)")
+    for i in range(n):
+        dr = decisions[i].content
+        adr = projection["actor_decision_records"][i].content
+        actor_id = projection["actor_observations"][i].id
+        priv_id = projection["privileged_observations"][i].id
+        legal_id = projection["legal_action_sets"][i].id
+        if dr["sequence_position"] != i or adr["sequence_position"] != i:
+            raise ContentRecordError(f"record at position {i} has a mismatched sequence_position")
+        if (dr["behavior_policy_spec_hash"] != policy.id
+                or adr["behavior_policy_spec_hash"] != policy.id):
+            raise ContentRecordError(f"position {i} references a foreign behavior_policy_spec")
+        if dr["actor_observation_hash"] != actor_id or adr["actor_observation_hash"] != actor_id:
+            raise ContentRecordError(f"position {i} references a foreign actor observation")
+        if dr["privileged_observation_hash"] != priv_id:
+            raise ContentRecordError(f"position {i} references a foreign privileged observation")
+        if dr["legal_action_set_hash"] != legal_id or adr["legal_action_set_hash"] != legal_id:
+            raise ContentRecordError(f"position {i} references a foreign legal_action_set")
+
+
+def _assert_projection_matches_run_dir(projection: dict, run_dir: str) -> str:
+    """Fail closed unless ``projection`` is EXACTLY the projection of ``run_dir``.
+
+    The projection is re-derived from run_dir's authenticated bytes and every record
+    id (scalar and per-position) must match. This defeats not only a direct cross-run
+    call but any partial transplant — swapping in another run's authentic
+    source_evidence, trajectory manifest, or a single decision record all diverge from
+    the re-derived truth. Returns the bound source run_id."""
+    # local import avoids an import cycle at module load.
+    from coliseum.textlab.training.trajectory_projection import project_trajectory
+    truth = project_trajectory(run_dir)
+    # internal coherence first (precise error), then exact identity to the truth.
+    assert_projection_coherent(projection)
+    for k in _PROJECTION_SCALAR_KEYS:
+        if k not in projection or projection[k].id != truth[k].id:
+            raise ContentRecordError(
+                f"projection '{k}' does not match the projection re-derived from "
+                "run_dir — a forged/transplanted export binding is refused")
+    for k in _PROJECTION_LIST_KEYS:
+        if [r.id for r in projection[k]] != [r.id for r in truth[k]]:
+            raise ContentRecordError(
+                f"projection list '{k}' does not match the projection re-derived from "
+                "run_dir — a forged/transplanted export binding is refused")
+    return truth["source_evidence"].content["run_id"]
 
 
 def _ordered_records(projection: dict, view_kind: str) -> list:
@@ -146,9 +200,11 @@ def build_training_export(projection: dict, *, view_kind: str, run_dir: str,
             f"view_kind must be explicitly one of {VIEW_KINDS}, got {view_kind!r} "
             "(an export may not omit its view)")
 
-    # BIND: the supplied projection must be the projection of THIS run_dir (exact
-    # source bytes). Refuses a forged cross-run export before any record is built.
-    bound_run_id = _assert_projection_binds_run_dir(projection, run_dir)
+    # BIND: the supplied projection must be EXACTLY the projection of THIS run_dir
+    # (every record re-derived from the authenticated bytes must match). Refuses a
+    # forged cross-run export — including a partial source_evidence transplant —
+    # before any record is built.
+    bound_run_id = _assert_projection_matches_run_dir(projection, run_dir)
 
     # governed run-level export: partition REQUIRED (missing registry_path fails
     # closed inside build_dataset), held-out refusal + §8 group-aware split +

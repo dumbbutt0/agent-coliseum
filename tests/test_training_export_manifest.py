@@ -14,6 +14,7 @@ import pytest
 from coliseum.textlab._content_record import ContentRecordError
 from coliseum.textlab.runner import run_scenario
 from coliseum.textlab.training.export_manifest import (DatasetExportManifest,
+                                                       assert_projection_coherent,
                                                        build_training_export)
 from coliseum.textlab.training.observation import assert_no_privileged_leak
 from coliseum.textlab.training.trajectory_projection import project_trajectory
@@ -92,7 +93,9 @@ def test_actor_export_catches_leak_in_actor_safe_record(projection):
 
     bad = dict(proj)
     bad["actor_observations"] = [_Leaky()] + list(proj["actor_observations"][1:])
-    with pytest.raises(ContentRecordError, match="privileged"):
+    # a foreign/leaky record no longer matches the run-derived projection, so the
+    # binding check refuses it before it can reach the export (defense in depth).
+    with pytest.raises(ContentRecordError):
         build_training_export(bad, view_kind="actor", run_dir=run_dir,
                               registry_path=REGISTRY)
 
@@ -165,7 +168,7 @@ def test_cross_run_projection_refused_different_scenario(projection, tmp_path):
     other_scen = os.path.join(ROOT, "configs", "scenarios", "hidden_objective.yaml")
     run_b = run_scenario(other_scen, "scripted:merciful", 2,
                          out_root=str(tmp_path / "b")).run_dir
-    with pytest.raises(ContentRecordError, match="not derived from run_dir"):
+    with pytest.raises(ContentRecordError, match="re-derived from run_dir"):
         build_training_export(proj_a, view_kind="actor", run_dir=run_b,
                               registry_path=REGISTRY)
 
@@ -176,7 +179,7 @@ def test_cross_run_projection_refused_same_scenario_different_run(projection, tm
     proj_a, _ = projection
     run_c = run_scenario(SCENARIO, "scripted:merciful", 8,
                          out_root=str(tmp_path / "c")).run_dir
-    with pytest.raises(ContentRecordError, match="not derived from run_dir"):
+    with pytest.raises(ContentRecordError, match="re-derived from run_dir"):
         build_training_export(proj_a, view_kind="actor", run_dir=run_c,
                               registry_path=REGISTRY)
 
@@ -186,6 +189,63 @@ def test_same_run_export_succeeds(projection):
     pair exports cleanly and binds the correct scenario."""
     manifest, _ = _export(projection, "actor")
     assert manifest.content["scenario_id"] == "corrupt_king"
+
+
+def test_source_evidence_transplant_chimera_refused(projection, tmp_path):
+    """The auditor's chimera: replace ONLY projection A's source_evidence with run B's
+    authentic source_evidence and export against run B. The remaining run-A records no
+    longer root that evidence, so the export is refused before a manifest is built."""
+    proj_a, _ = projection
+    other_scen = os.path.join(ROOT, "configs", "scenarios", "hidden_objective.yaml")
+    run_b = run_scenario(other_scen, "scripted:merciful", 2,
+                         out_root=str(tmp_path / "b")).run_dir
+    proj_b = project_trajectory(run_b)
+    chimera = dict(proj_a)
+    chimera["source_evidence"] = proj_b["source_evidence"]  # authentic, but foreign
+    with pytest.raises(ContentRecordError):
+        build_training_export(chimera, view_kind="actor", run_dir=run_b,
+                              registry_path=REGISTRY)
+
+
+def test_swapped_decision_record_refused(projection, tmp_path):
+    """Transplanting a genuinely foreign decision record (from a different scenario)
+    breaks the manifest's ordered ids and is refused."""
+    proj_a, run_a = projection
+    other_scen = os.path.join(ROOT, "configs", "scenarios", "hidden_objective.yaml")
+    run_b = run_scenario(other_scen, "scripted:merciful", 2,
+                         out_root=str(tmp_path / "b")).run_dir
+    proj_b = project_trajectory(run_b)
+    assert proj_b["decision_records"][0].id != proj_a["decision_records"][0].id
+    swapped = dict(proj_a)
+    swapped["decision_records"] = ([proj_b["decision_records"][0]]
+                                   + list(proj_a["decision_records"][1:]))
+    with pytest.raises(ContentRecordError):
+        build_training_export(swapped, view_kind="actor", run_dir=run_a,
+                              registry_path=REGISTRY)
+
+
+def test_assert_projection_coherent_accepts_genuine(projection):
+    proj, _ = projection
+    assert_projection_coherent(proj)  # must not raise
+
+
+def test_assert_projection_coherent_rejects_manifest_root_mismatch(projection, tmp_path):
+    proj_a, _ = projection
+    run_b = run_scenario(SCENARIO, "scripted:merciful", 8,
+                         out_root=str(tmp_path / "b")).run_dir
+    proj_b = project_trajectory(run_b)
+    chimera = dict(proj_a)
+    chimera["source_evidence"] = proj_b["source_evidence"]
+    with pytest.raises(ContentRecordError, match="run_identity"):
+        assert_projection_coherent(chimera)
+
+
+def test_assert_projection_coherent_rejects_length_mismatch(projection):
+    proj, _ = projection
+    bad = dict(proj)
+    bad["actor_observations"] = list(proj["actor_observations"][:-1])
+    with pytest.raises(ContentRecordError, match="length"):
+        assert_projection_coherent(bad)
 
 
 # ------------------------------------------------- manifest record invariants
