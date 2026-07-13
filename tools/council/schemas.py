@@ -88,6 +88,13 @@ EVENT_TYPES = (
     "PREREGISTRATION",
     "COUNCIL_DISSENT",
     "COUNCIL_RESOLVED",
+    # G4 durable acceptance continuation: MATTER_ACCEPTED (claude, TOKENLESS) is the
+    # exactly-once, chain-anchored record that a resolved Class-C matter's downstream
+    # `accepted` continuation was applied. Admitted ONLY when
+    # policy.evaluate_matter_accepted passes at the append boundary (re-validated in
+    # events.append_event) — authorized-under-governance + accept resolution + bound
+    # resolved_event_id + no prior record. INERT until owner v4; idempotent on resume.
+    "MATTER_ACCEPTED",
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
@@ -144,6 +151,10 @@ SENDER_ALLOWED = {
     "PREREGISTRATION": frozenset({"claude"}),
     "COUNCIL_DISSENT": frozenset({"codex"}),
     "COUNCIL_RESOLVED": frozenset({"claude"}),
+    # claude-sender + TOKENLESS: authority is a re-validated evaluate_matter_accepted
+    # pass (authorized-under-governance + accept + bound resolution + exactly-once),
+    # NOT a token — deliberately absent from HUMAN_TOKEN_REQUIRED_EVENT_TYPES.
+    "MATTER_ACCEPTED": frozenset({"claude"}),
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
@@ -855,7 +866,7 @@ COUNCIL_RESOLUTION_DOMAIN = "council:council_resolution:v1"
 CLASS_C_FRESHNESS_MODES = ("sealed_inventory", "post_prereg_generation")
 CLASS_C_MATTER_PREFIX = "classc-"   # reserved matter-id namespace (never a source req)
 CLASS_C_PAYLOAD_EVENT_TYPES = frozenset(
-    {"PREREGISTRATION", "COUNCIL_RESOLVED", "COUNCIL_DISSENT"})
+    {"PREREGISTRATION", "COUNCIL_RESOLVED", "COUNCIL_DISSENT", "MATTER_ACCEPTED"})
 
 
 def compute_preregistration_hash(payload: dict) -> str:
@@ -931,6 +942,14 @@ def validate_class_c_event_payload(event: dict) -> None:
         _req_str(p, "dissent", "COUNCIL_DISSENT")
         if not isinstance(p.get("reconciled"), bool):
             raise SchemaViolation("COUNCIL_DISSENT: reconciled must be a bool")
+    elif etype == "MATTER_ACCEPTED":
+        # SHAPE only: the AUTHORITY (authorized-under-governance + accept resolution +
+        # bound resolved_event_id + exactly-once) is re-validated from the chain by
+        # policy.evaluate_matter_accepted at the append boundary. subject_ref and
+        # result_content_hash are project-opaque strings the generic layer stores but
+        # never interprets (no claim-state semantics leak into tools/council).
+        for f in ("resolved_event_id", "subject_ref", "result_content_hash"):
+            _req_str(p, f, "MATTER_ACCEPTED")
 
 
 def validate_verdict_event_payload(event: dict) -> None:

@@ -1215,6 +1215,120 @@ def acceptance_authorization(root: str, cfg: Config,
                                    policy_hash, reasons)
 
 
+# ------------------------------------------------- G4 durable acceptance continuation
+
+MATTER_ACCEPTED_RESOLUTION = "accept"
+
+
+@dataclass
+class ContinuationStatus:
+    """The GENERIC resumability oracle for a Class-C matter's downstream `accepted`
+    continuation (governance G4). It reports whether the matter is authorized to
+    continue AND whether that continuation has ALREADY been durably recorded on the
+    chain (a MATTER_ACCEPTED). A project driver reads this to decide, idempotently:
+    apply-and-record (authorized, not yet recorded), re-project only (already
+    recorded), or refuse (not authorized). It performs NO project mutation and
+    encodes no project subject semantics — subject_ref/result_content_hash are
+    opaque strings the generic layer stores but never interprets."""
+    authorized: bool                 # a valid COUNCIL_RESOLVED exists + governance active
+    resolution: str | None
+    resolved_event_id: str | None
+    is_accept: bool                  # resolution is exactly the accept verdict
+    already_accepted: bool           # a MATTER_ACCEPTED for this matter is on-chain
+    accepted_event_id: str | None
+    subject_ref: str | None          # opaque; the recorded MATTER_ACCEPTED subject
+    result_content_hash: str | None  # opaque; the recorded post-state hash (if any)
+    policy_hash: str | None
+    reasons: list = field(default_factory=list)
+
+
+def continuation_status(root: str, cfg: Config,
+                        matter_id: str) -> ContinuationStatus:
+    """SELF-AUTHENTICATING, fail-closed resumability oracle. Reuses
+    acceptance_authorization (which re-reads + hash-verifies the chain FROM ROOT and
+    requires governance active on the owner-ratified pin — INERT under v3), then scans
+    the SAME verified chain for a prior MATTER_ACCEPTED for the matter. Never trusts a
+    caller-supplied chain; any read/verify error fails closed to not-authorized. The
+    generic core never mutates a project registry."""
+    auth = acceptance_authorization(root, cfg, matter_id)
+    accepted_ev = None
+    if auth.authorized:
+        # the same append boundary that admitted MATTER_ACCEPTED verified the chain;
+        # its presence on the (re-verified) chain is the authority. Read it back for
+        # the driver's idempotency/resume decision.
+        try:
+            chain = events_mod.read_chain(root, verify=True)
+        except Exception as exc:   # already authorized implies readable, but stay closed
+            return ContinuationStatus(False, None, None, False, False, None, None,
+                                      None, auth.policy_hash,
+                                      [f"chain unreadable on re-read: {exc}"])
+        for e in chain:
+            if e.get("event_type") == "MATTER_ACCEPTED" \
+                    and e.get("request_id") == matter_id \
+                    and e.get("sender") == "claude":
+                accepted_ev = e   # last wins (the boundary forbids a second anyway)
+    is_accept = auth.authorized and auth.resolution == MATTER_ACCEPTED_RESOLUTION
+    ap = (accepted_ev or {}).get("payload") or {}
+    return ContinuationStatus(
+        authorized=auth.authorized, resolution=auth.resolution,
+        resolved_event_id=auth.resolved_event_id, is_accept=is_accept,
+        already_accepted=accepted_ev is not None,
+        accepted_event_id=(accepted_ev or {}).get("event_id"),
+        subject_ref=ap.get("subject_ref"),
+        result_content_hash=ap.get("result_content_hash"),
+        policy_hash=auth.policy_hash, reasons=list(auth.reasons))
+
+
+@dataclass
+class MatterAcceptedDecision:
+    admit: bool
+    reasons: list = field(default_factory=list)
+
+
+def evaluate_matter_accepted(root: str, cfg: Config,
+                             event: dict) -> MatterAcceptedDecision:
+    """Append-boundary authority for a MATTER_ACCEPTED (claude-sender, TOKENLESS): the
+    durable, exactly-once record that a resolved Class-C matter's `accepted`
+    continuation was applied. SELF-AUTHENTICATING and fail-closed. Admits ONLY when:
+      (a) acceptance_authorization authorizes the matter under active governance
+          (INERT under v3 -> refused);
+      (b) the resolution is exactly the accept verdict;
+      (c) the payload's resolved_event_id binds to THAT COUNCIL_RESOLVED (no stale or
+          cross-matter binding);
+      (d) NO prior MATTER_ACCEPTED exists for the matter on the verified chain
+          (idempotency: exactly-once — a re-run after a crash cannot double-record).
+    The candidate event is NOT yet on the chain when this runs. subject_ref /
+    result_content_hash are project-opaque and NOT interpreted here."""
+    reasons: list = []
+    matter_id = event.get("request_id")
+    p = event.get("payload") or {}
+    auth = acceptance_authorization(root, cfg, matter_id)
+    if not auth.authorized:
+        return MatterAcceptedDecision(
+            False, ["not authorized by governance: " + "; ".join(auth.reasons)])
+    if auth.resolution != MATTER_ACCEPTED_RESOLUTION:
+        return MatterAcceptedDecision(
+            False, [f"matter resolution is {auth.resolution!r}, not "
+                    f"{MATTER_ACCEPTED_RESOLUTION!r}"])
+    if p.get("resolved_event_id") != auth.resolved_event_id:
+        return MatterAcceptedDecision(
+            False, [f"payload.resolved_event_id {p.get('resolved_event_id')!r} does "
+                    f"not bind the authorizing COUNCIL_RESOLVED "
+                    f"{auth.resolved_event_id!r}"])
+    try:
+        chain = events_mod.read_chain(root, verify=True)
+    except Exception as exc:
+        return MatterAcceptedDecision(False, [f"chain unreadable: {exc}"])
+    for e in chain:
+        if e.get("event_type") == "MATTER_ACCEPTED" \
+                and e.get("request_id") == matter_id \
+                and e.get("sender") == "claude":
+            return MatterAcceptedDecision(
+                False, [f"matter already has a MATTER_ACCEPTED "
+                        f"({e.get('event_id')}) — exactly-once forbids a second"])
+    return MatterAcceptedDecision(True, reasons)
+
+
 # ------------------------------------------------------------ society milestone
 
 def milestone_status(chain: list, policy: dict) -> tuple:

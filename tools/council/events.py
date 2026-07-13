@@ -182,6 +182,13 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         # boundary (mirrors CONDITIONS_AUTO_SATISFIED).
         if event_type == "COUNCIL_RESOLVED":
             _verify_class_c_resolution(root, cfg, chain, event)
+        # governance G4: a MATTER_ACCEPTED is a claude-sender, TOKENLESS durable record
+        # of a resolved matter's `accepted` continuation. Its authority is a
+        # re-validated evaluate_matter_accepted pass (authorized-under-governance +
+        # accept resolution + bound resolved_event_id + exactly-once), never its
+        # presence. Fail-closed at the boundary (mirrors COUNCIL_RESOLVED).
+        if event_type == "MATTER_ACCEPTED":
+            _verify_matter_accepted(root, cfg, chain, event)
         # H1: burn the human one-time token (if this event type requires
         # one) durably BEFORE the line lands — a crash here wastes a
         # token, it never leaves a spendable one behind an appended event
@@ -290,6 +297,21 @@ def _verify_class_c_resolution(root: str, cfg: Config, chain: list,
     if not decision.auto_approve:
         raise CouncilError(
             "council resolution refused by the Class-C protocol: "
+            + "; ".join(decision.reasons))
+
+
+def _verify_matter_accepted(root: str, cfg: Config, chain: list,
+                            event: dict) -> None:
+    """Refuse a MATTER_ACCEPTED unless `policy.evaluate_matter_accepted` admits it
+    right now against the self-verified chain from root — authorized-under-governance
+    + accept resolution + a resolved_event_id that binds the authorizing
+    COUNCIL_RESOLVED + no prior MATTER_ACCEPTED for the matter (exactly-once). Fail-
+    closed: INERT under v3, and a crash-resumed re-run cannot double-record."""
+    from tools.council import policy   # lazy: policy imports events
+    decision = policy.evaluate_matter_accepted(root, cfg, event)
+    if not decision.admit:
+        raise CouncilError(
+            "matter-accepted continuation refused by governance: "
             + "; ".join(decision.reasons))
 
 

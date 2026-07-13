@@ -95,7 +95,12 @@ STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
                               # append boundary (policy.evaluate_class_c), never in
                               # the source-request FSM.
                               "PREREGISTRATION", "COUNCIL_DISSENT",
-                              "COUNCIL_RESOLVED"})
+                              "COUNCIL_RESOLVED",
+                              # G4: the durable acceptance-continuation record is
+                              # keyed by matter_id and carries NO source-request
+                              # authority; exactly-once + authority are enforced at
+                              # the append boundary (policy.evaluate_matter_accepted).
+                              "MATTER_ACCEPTED"})
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",
