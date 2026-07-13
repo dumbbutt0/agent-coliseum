@@ -21,9 +21,14 @@ No labels, no training, no weight surface — this is the governed DATA export r
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+
 from coliseum.textlab._content_record import ContentRecord, ContentRecordError
 from coliseum.textlab.dataset_export import DEFAULT_SPLITS, build_dataset
 from coliseum.textlab.training.observation import assert_no_privileged_leak
+from coliseum.textlab.training.trajectory import SourceEvidenceBinding
 
 DATASET_EXPORT_MANIFEST_SCHEMA_VERSION = "1"
 VIEW_KINDS = ("actor", "privileged")
@@ -33,6 +38,41 @@ _ACTOR_SAFE_KEYS = ("source_evidence", "behavior_policy_spec", "trajectory_manif
                     "actor_observations", "legal_action_sets", "actor_decision_records")
 # projection keys that carry the privileged view — NEVER in an actor export.
 _PRIVILEGED_KEYS = ("privileged_observations", "decision_records")
+
+
+def _sha256_file(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def _recompute_source_evidence(run_dir: str) -> SourceEvidenceBinding:
+    """Rebuild the SourceEvidenceBinding directly from run_dir's exact bytes — the
+    ground-truth identity the supplied projection must match."""
+    with open(os.path.join(run_dir, "run.json"), "rb") as fh:
+        run_json = json.loads(fh.read())
+    return SourceEvidenceBinding(
+        run_id=run_json["run_id"],
+        run_json_content_hash=_sha256_file(os.path.join(run_dir, "run.json")),
+        decisions_jsonl_content_hash=_sha256_file(
+            os.path.join(run_dir, "decisions.jsonl")))
+
+
+def _assert_projection_binds_run_dir(projection: dict, run_dir: str) -> str:
+    """Fail closed unless ``projection`` was genuinely derived from ``run_dir``: the
+    projection's SourceEvidenceBinding must equal the binding recomputed from
+    run_dir's exact run.json + decisions.jsonl bytes. Prevents a forged export that
+    binds run A's records/source-evidence to run B's scenario/partition/commitment.
+    Returns the bound source run_id."""
+    supplied = projection.get("source_evidence")
+    if supplied is None:
+        raise ContentRecordError("projection is missing its source_evidence binding")
+    truth = _recompute_source_evidence(run_dir)
+    if supplied.id != truth.id:
+        raise ContentRecordError(
+            "projection is not derived from run_dir (source-evidence mismatch): the "
+            "supplied projection's run.json/decisions.jsonl identity does not match "
+            "run_dir's exact bytes — a cross-run export binding is refused")
+    return truth.content["run_id"]
 
 
 def _ordered_records(projection: dict, view_kind: str) -> list:
@@ -106,6 +146,10 @@ def build_training_export(projection: dict, *, view_kind: str, run_dir: str,
             f"view_kind must be explicitly one of {VIEW_KINDS}, got {view_kind!r} "
             "(an export may not omit its view)")
 
+    # BIND: the supplied projection must be the projection of THIS run_dir (exact
+    # source bytes). Refuses a forged cross-run export before any record is built.
+    bound_run_id = _assert_projection_binds_run_dir(projection, run_dir)
+
     # governed run-level export: partition REQUIRED (missing registry_path fails
     # closed inside build_dataset), held-out refusal + §8 group-aware split +
     # training-admission gate + deterministic dataset_commitment.
@@ -115,6 +159,12 @@ def build_training_export(projection: dict, *, view_kind: str, run_dir: str,
         training_admission=True, verify=verify, config_dir=config_dir, splits=splits)
 
     units = descriptor["units"]
+    # the dataset descriptor must describe the SAME run the projection is bound to.
+    descriptor_run_ids = {rid for u in units for rid in u.get("run_ids", [])}
+    if bound_run_id not in descriptor_run_ids:
+        raise ContentRecordError(
+            f"bound source run_id {bound_run_id!r} is absent from the dataset "
+            f"descriptor's units {sorted(descriptor_run_ids)} — export refused")
     scenario_ids = {u["scenario_id"] for u in units}
     splits_seen = {u["split"] for u in units}
     if len(scenario_ids) != 1:

@@ -156,6 +156,38 @@ def test_held_out_scenario_refused_for_privileged_too(projection):
         _export(projection, "privileged", held_out_scenarios=["corrupt_king"])
 
 
+# ------------------------------------- projection<->run_dir binding (forgery)
+def test_cross_run_projection_refused_different_scenario(projection, tmp_path):
+    """A corrupt_king projection may not be exported against a hidden_objective
+    run_dir — the manifest would otherwise attest mutually unrelated source records
+    and dataset provenance."""
+    proj_a, _ = projection
+    other_scen = os.path.join(ROOT, "configs", "scenarios", "hidden_objective.yaml")
+    run_b = run_scenario(other_scen, "scripted:merciful", 2,
+                         out_root=str(tmp_path / "b")).run_dir
+    with pytest.raises(ContentRecordError, match="not derived from run_dir"):
+        build_training_export(proj_a, view_kind="actor", run_dir=run_b,
+                              registry_path=REGISTRY)
+
+
+def test_cross_run_projection_refused_same_scenario_different_run(projection, tmp_path):
+    """Even the same scenario at a different seed is a distinct run: its bytes differ,
+    so crossing the projection with it is refused."""
+    proj_a, _ = projection
+    run_c = run_scenario(SCENARIO, "scripted:merciful", 8,
+                         out_root=str(tmp_path / "c")).run_dir
+    with pytest.raises(ContentRecordError, match="not derived from run_dir"):
+        build_training_export(proj_a, view_kind="actor", run_dir=run_c,
+                              registry_path=REGISTRY)
+
+
+def test_same_run_export_succeeds(projection):
+    """The positive control for the binding check: the genuine projection<->run_dir
+    pair exports cleanly and binds the correct scenario."""
+    manifest, _ = _export(projection, "actor")
+    assert manifest.content["scenario_id"] == "corrupt_king"
+
+
 # ------------------------------------------------- manifest record invariants
 def test_manifest_rejects_duplicate_included_ids():
     with pytest.raises(ContentRecordError):
