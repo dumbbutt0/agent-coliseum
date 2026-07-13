@@ -136,8 +136,13 @@ class Intervention:
     mutate a definition after it is created, so its identity is stable for life.
     """
 
+    # NOTE: __slots__ restricts WHICH attributes exist but does NOT make them
+    # read-only. Post-construction immutability is enforced by the guarded
+    # __setattr__/__delattr__ below (a construction freeze), so no consumer —
+    # including one holding a registry-returned object — can reassign the private
+    # identity storage (e.g. `iv._spec_json = ...`) after admission (audit 000820).
     __slots__ = ("_intervention_id", "_cls", "_kind", "_schema_version",
-                 "_spec_json")
+                 "_spec_json", "_frozen")
 
     def __init__(self, intervention_id: str, cls: str, kind: str,
                  canonical_spec: dict,
@@ -165,6 +170,19 @@ class Intervention:
         self._schema_version = schema_version
         # store the canonical JSON string: the immutable identity substrate
         self._spec_json = canonical_json(detached)
+        # seal: every attribute is now read-only for the object's lifetime
+        self._frozen = True
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_frozen", False):
+            raise InterventionError(
+                f"Intervention is immutable after construction; cannot set "
+                f"{name!r} (identity is content-addressed and fixed at creation)")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name):
+        raise InterventionError("Intervention is immutable; cannot delete "
+                                f"{name!r}")
 
     @property
     def intervention_id(self) -> str:

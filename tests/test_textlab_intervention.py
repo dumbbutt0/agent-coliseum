@@ -190,9 +190,28 @@ def test_get_result_cannot_mutate_registry_state():
     got.canonical_spec["c"] = 9
     assert intervention_spec_hash(reg.get("iv-immut")) == admitted
     assert reg.get("iv-immut").canonical_spec == {"a": {"b": 1}}
-    # the definition exposes no setter for its scalar identity fields
-    with pytest.raises(AttributeError):
-        got.intervention_id = "hijacked"
+
+
+def test_registered_object_identity_attrs_are_frozen():
+    # audit 000820: __slots__ alone is not read-only. Every public AND private
+    # identity-bearing attribute must reject assignment after admission, and the
+    # stored spec hash must be unchanged; re-registration cannot bless a mutation.
+    iv = Intervention("iv-frozen", "policy", "constitution", {"n": 1})
+    reg = InterventionRegistry()
+    admitted = reg.register(iv)
+    got = reg.get("iv-frozen")
+    for attr, val in [("_spec_json", '{"n":2}'), ("_intervention_id", "hijack"),
+                      ("_cls", "state"), ("_kind", "other"),
+                      ("_schema_version", "9"), ("_frozen", False),
+                      ("intervention_id", "hijack"), ("canonical_spec", {})]:
+        with pytest.raises((InterventionError, AttributeError)):
+            setattr(got, attr, val)
+    with pytest.raises(InterventionError):
+        del got._spec_json
+    # nothing above took effect: identity is intact
+    assert intervention_spec_hash(reg.get("iv-frozen")) == admitted
+    assert reg.get("iv-frozen").canonical_spec == {"n": 1}
+    assert reg.register(reg.get("iv-frozen")) == admitted  # still idempotent, no drift
 
 
 # --------------------------- audit 000814 blocker 2: injective typed input
