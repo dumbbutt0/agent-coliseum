@@ -37,15 +37,16 @@ class BehaviorPolicySpec(ContentRecord):
             "comparison_regime_id": comparison_regime_id,
             "agent_regime_id": agent_regime_id,
             "exploration_mechanism": exploration_mechanism,
-            # explicit availability wrappers — unavailable for historical runs.
+            # explicit availability wrappers — unavailable for historical runs; an
+            # *available* value must be non-empty (no blank-placeholder identity).
             "tokenizer_identity": validate_availability(
                 tokenizer_identity if tokenizer_identity is not None else unavailable(),
-                "tokenizer_identity"),
+                "tokenizer_identity", nonempty=True),
             "action_score": validate_availability(
                 action_score if action_score is not None else unavailable(),
-                "action_score"),
+                "action_score", nonempty=True),
             "memory_state_ref": validate_availability(
                 memory_state_ref if memory_state_ref is not None else unavailable(),
-                "memory_state_ref"),
+                "memory_state_ref", nonempty=True),
         }
         super().__init__(preimage)

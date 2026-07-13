@@ -14,7 +14,11 @@ from __future__ import annotations
 from coliseum.textlab._content_record import (ContentRecordError,
                                               validate_json_payload)
 
-AVAILABILITY_STATUSES = ("available", "unavailable")
+#: the integrated support-field status domain (profile §4.1). ``unavailable`` = we
+#: do not have this (e.g. a historical run never recorded it); ``not_applicable`` =
+#: this field has no meaning for this producer. Both carry NO value.
+AVAILABILITY_STATUSES = ("available", "unavailable", "not_applicable")
+_VALUELESS = ("unavailable", "not_applicable")
 
 
 def available(value) -> dict:
@@ -28,11 +32,19 @@ def unavailable() -> dict:
     return {"status": "unavailable"}
 
 
-def validate_availability(field, where: str = "field") -> dict:
+def not_applicable() -> dict:
+    """An explicit not-applicable field — the field has no meaning here."""
+    return {"status": "not_applicable"}
+
+
+def validate_availability(field, where: str = "field",
+                          nonempty: bool = False) -> dict:
     """Fail closed unless ``field`` is a well-formed availability wrapper: a dict
     whose ``status`` is one of AVAILABILITY_STATUSES, with ``value`` present iff
-    available and absent iff unavailable. Rejects bare values / empty strings /
-    fabricated placeholders."""
+    ``available`` and absent for ``unavailable``/``not_applicable``. Rejects bare
+    values / fabricated placeholders. When ``nonempty`` is set, an *available*
+    value may not be an empty string / list / dict (so a blank string can never
+    masquerade as a known identity — the empty-placeholder hole)."""
     if not isinstance(field, dict):
         raise ContentRecordError(
             f"{where} must be an availability dict {{'status': ...}}, got "
@@ -47,9 +59,15 @@ def validate_availability(field, where: str = "field") -> dict:
         if set(field) - {"status", "value"}:
             raise ContentRecordError(f"{where}: unexpected keys {sorted(set(field) - {'status', 'value'})}")
         validate_json_payload(field["value"], f"{where}.value")
-    else:  # unavailable
+        if nonempty:
+            v = field["value"]
+            if (isinstance(v, (str, list, dict)) and len(v) == 0):
+                raise ContentRecordError(
+                    f"{where}: an available value may not be empty — use "
+                    "unavailable()/not_applicable() rather than a blank placeholder")
+    else:  # unavailable / not_applicable -> no value
         if set(field) - {"status"}:
             raise ContentRecordError(
-                f"{where}: an unavailable field must carry no value "
+                f"{where}: a {status} field must carry no value "
                 f"(got {sorted(set(field) - {'status'})}) — never fabricate one")
     return field

@@ -17,8 +17,11 @@ class LegalActionSet(ContentRecord):
     ID_FIELD = "legal_action_set_id"
 
     def __init__(self, ordered_action_ids: list, mask: list | None = None):
-        if not isinstance(ordered_action_ids, list) or len(ordered_action_ids) < 1:
-            raise ContentRecordError("ordered_action_ids must be a non-empty list")
+        if not isinstance(ordered_action_ids, list) or len(ordered_action_ids) < 2:
+            # bound to DecisionPoint.available_actions, which enforces >= 2.
+            raise ContentRecordError(
+                "ordered_action_ids must have at least two actions "
+                "(bound to DecisionPoint.available_actions, cardinality >= 2)")
         if any(not isinstance(a, str) or not a for a in ordered_action_ids):
             raise ContentRecordError("action ids must be non-empty strings")
         if len(set(ordered_action_ids)) != len(ordered_action_ids):

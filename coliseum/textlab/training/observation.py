@@ -13,6 +13,30 @@ from coliseum.textlab._content_record import ContentRecord, ContentRecordError
 OBSERVATION_SCHEMA_VERSION = "1"
 VIEW_KINDS = ("actor", "privileged")
 
+#: field names that carry privileged (non-actor-observable) ground truth. An
+#: actor-view artifact may NEVER contain any of these, at any depth. Extend this
+#: registry as new privileged carriers are introduced.
+PRIVILEGED_FIELD_NAMES = frozenset({
+    "facts", "hidden_effects", "state_after", "hidden_research_objective",
+})
+
+
+def assert_no_privileged_leak(content, where: str = "actor content") -> None:
+    """Fail closed if any registered privileged field name appears anywhere in an
+    actor-view payload (direct or nested). This is a structural backstop so an
+    actor artifact can never be content-addressed with privileged data even if a
+    caller bypasses ``project_by_allowlist``."""
+    if isinstance(content, dict):
+        for k, v in content.items():
+            if k in PRIVILEGED_FIELD_NAMES:
+                raise ContentRecordError(
+                    f"{where} contains privileged field {k!r} — actor observations "
+                    "must be built by an explicit allowlist, never carry privileged data")
+            assert_no_privileged_leak(v, f"{where}.{k}")
+    elif isinstance(content, list):
+        for i, v in enumerate(content):
+            assert_no_privileged_leak(v, f"{where}[{i}]")
+
 
 class _ActorObservationArtifact(ContentRecord):
     __slots__ = ()
@@ -41,11 +65,23 @@ def observation_artifact(view_kind: str, content: dict) -> ContentRecord:
             f"view_kind must be one of {VIEW_KINDS}, got {view_kind!r}")
     if not isinstance(content, dict):
         raise ContentRecordError("observation content must be a dict")
+    if view_kind == "actor":
+        # fail closed: an actor artifact may never carry a registered privileged
+        # field, whether or not the caller used project_by_allowlist.
+        assert_no_privileged_leak(content)
     return _BY_VIEW[view_kind]({
         "schema_version": OBSERVATION_SCHEMA_VERSION,
         "view_kind": view_kind,
         "content": content,
     })
+
+
+def actor_observation_artifact(source_content: dict, allowlist) -> ContentRecord:
+    """The blessed actor construction path: project ``source_content`` through an
+    explicit ``allowlist`` (never copy-minus-secrets) and build the actor artifact.
+    The result is guaranteed leak-free (only allowlisted keys are read, and the
+    factory re-checks for privileged fields)."""
+    return observation_artifact("actor", project_by_allowlist(source_content, allowlist))
 
 
 def project_by_allowlist(source: dict, allowlist) -> dict:

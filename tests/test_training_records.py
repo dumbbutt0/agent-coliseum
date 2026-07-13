@@ -11,12 +11,13 @@ import pytest
 
 from coliseum.textlab._content_record import ContentRecordError
 from coliseum.textlab.training.actions import LegalActionSet
-from coliseum.textlab.training.availability import (available, unavailable,
+from coliseum.textlab.training.availability import (available, not_applicable,
+                                                    unavailable,
                                                     validate_availability)
 from coliseum.textlab.training.decision_record import DecisionRecord
-from coliseum.textlab.training.observation import (VIEW_KINDS,
-                                                   observation_artifact,
-                                                   project_by_allowlist)
+from coliseum.textlab.training.observation import (
+    VIEW_KINDS, actor_observation_artifact, assert_no_privileged_leak,
+    observation_artifact, project_by_allowlist)
 from coliseum.textlab.training.policy import BehaviorPolicySpec
 from coliseum.textlab.training.termination import (TERMINATION_KINDS,
                                                    validate_termination_kind)
@@ -26,15 +27,24 @@ from coliseum.textlab.training.termination import (TERMINATION_KINDS,
 def test_availability_wrappers():
     assert validate_availability(available(5)) == {"status": "available", "value": 5}
     assert validate_availability(unavailable()) == {"status": "unavailable"}
+    assert validate_availability(not_applicable()) == {"status": "not_applicable"}
 
 
 @pytest.mark.parametrize("bad", [
     5, "x", {}, {"status": "maybe"}, {"status": "available"},
     {"status": "unavailable", "value": 1}, {"status": "available", "value": 1, "x": 2},
+    {"status": "not_applicable", "value": 1},
 ])
 def test_availability_rejects_malformed(bad):
     with pytest.raises(ContentRecordError):
         validate_availability(bad)
+
+
+def test_availability_nonempty_rejects_blank():
+    validate_availability(available("tok@abc"), nonempty=True)          # ok
+    for blank in ("", [], {}):
+        with pytest.raises(ContentRecordError):
+            validate_availability(available(blank), nonempty=True)
 
 
 # ------------------------------------------------------------- BehaviorPolicySpec
@@ -70,6 +80,14 @@ def test_policy_spec_rejects_bare_unavailable_and_empty_regime():
         _bps(comparison_regime_id="")
 
 
+def test_policy_spec_rejects_empty_available_identity():
+    # audit 000886: an available tokenizer identity may not be a blank placeholder.
+    with pytest.raises(ContentRecordError):
+        _bps(tokenizer_identity=available(""))
+    assert _bps(tokenizer_identity=available("tok@abc"))          # non-empty ok
+    assert _bps(action_score=not_applicable())                    # not_applicable ok
+
+
 # ------------------------------------------------------------- LegalActionSet
 def test_legal_action_set_order_and_mask():
     las = LegalActionSet(["execute", "refuse", "stall"])
@@ -83,9 +101,11 @@ def test_legal_action_set_order_and_mask():
 
 
 @pytest.mark.parametrize("args", [
-    ([],), (["a", "a"],), ([""],), (["a"], [True, True]), (["a"], ["yes"]),
+    ([],), (["only_action"],), (["a", "a"],), (["", "b"],),
+    (["a", "b"], [True]), (["a", "b"], ["yes", "no"]),
 ])
 def test_legal_action_set_rejects_bad(args):
+    # audit 000886: a singleton universe is rejected (bound to >= 2 actions).
     with pytest.raises(ContentRecordError):
         LegalActionSet(*args)
 
@@ -113,6 +133,27 @@ def test_project_by_allowlist_selects_only_allowed_keys():
     actor = project_by_allowlist(privileged, ["narrative", "available_actions"])
     assert actor == {"narrative": "n"}         # facts + standing NEVER copied
     assert "facts" not in actor and "standing" not in actor
+
+
+def test_actor_factory_fails_closed_on_privileged_fields():
+    # audit 000886: the actor factory itself must reject privileged content, not
+    # merely rely on voluntary use of the allowlist projector.
+    for leaky in ({"narrative": "n", "facts": {"harm": "none"}},
+                  {"narrative": "n", "hidden_effects": {"x": 1}},
+                  {"nested": {"state_after": {"standing": 6}}}):
+        with pytest.raises(ContentRecordError):
+            observation_artifact("actor", leaky)
+        with pytest.raises(ContentRecordError):
+            assert_no_privileged_leak(leaky)
+    # the privileged view legitimately carries facts
+    assert observation_artifact("privileged", {"narrative": "n", "facts": {"harm": "none"}})
+
+
+def test_actor_observation_artifact_via_allowlist_is_leak_free():
+    privileged = {"narrative": "n", "facts": {"harm": "none"}, "standing": 5}
+    art = actor_observation_artifact(privileged, ["narrative"])
+    assert art.domain == "trs.observation.actor.v1"
+    assert art.content["content"] == {"narrative": "n"}
 
 
 # ------------------------------------------------------------- termination
@@ -155,7 +196,7 @@ def test_decision_record_selected_action_must_be_legal():
 
 
 def test_decision_record_rejects_bad_shape():
-    las = LegalActionSet(["execute"])
+    las = LegalActionSet(["execute", "refuse"])
     with pytest.raises(ContentRecordError):
         DecisionRecord(0, None, "unknown_kind",
                        {"high_level_intent": None, "symbolic_action": "execute",
