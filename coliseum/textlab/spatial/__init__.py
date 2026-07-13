@@ -9,13 +9,20 @@ construction-frozen spec records + a collision-refusing registry + fail-closed
 version dispatch. World-line, instances, scheduler, perception, and the trace are
 later slices.
 """
+from coliseum.textlab.spatial.instance import (AgentBodyInstance, ObjectInstance,
+                                               PortalInstance, RoomInstance,
+                                               assert_same_world_line)
 from coliseum.textlab.spatial.world import (SPATIAL_SCHEMA_VERSION,
                                             AgentBodySpec, ObjectSpec,
                                             PerceptionRegime, PortalSpec, RoomSpec,
                                             SpatialWorldSpec, is_supported_version)
+from coliseum.textlab.spatial.world_line import WorldLine
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
     "PerceptionRegime", "RoomSpec", "PortalSpec", "ObjectSpec", "AgentBodySpec",
     "SpatialWorldSpec",
+    "WorldLine",
+    "RoomInstance", "PortalInstance", "ObjectInstance", "AgentBodyInstance",
+    "assert_same_world_line",
 ]

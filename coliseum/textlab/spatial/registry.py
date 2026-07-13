@@ -29,7 +29,27 @@ _SCALAR_REFERENCES = {
     "spatial.world_spec.v1": (
         ("perception_regime_id", "spatial.perception_regime.v1"),
     ),
+    # instances reference their spec (correct type) + a registered world-line.
+    "spatial.room_instance.v1": (
+        ("room_spec_id", "spatial.room_spec.v1"),
+        ("world_line_id", "spatial.world_line.v1"),
+    ),
+    "spatial.portal_instance.v1": (
+        ("portal_spec_id", "spatial.portal_spec.v1"),
+        ("world_line_id", "spatial.world_line.v1"),
+    ),
+    "spatial.object_instance.v1": (
+        ("object_spec_id", "spatial.object_spec.v1"),
+        ("world_line_id", "spatial.world_line.v1"),
+    ),
+    "spatial.agent_body_instance.v1": (
+        ("agent_body_id", "spatial.agent_body_spec.v1"),
+        ("world_line_id", "spatial.world_line.v1"),
+    ),
 }
+# world-line is polymorphic (root vs forked share a domain): its reference is chosen
+# by which key set is present, so it is validated by _check_world_line, not the map.
+_WORLD_LINE_DOMAIN = "spatial.world_line.v1"
 # list reference fields: content key -> the domain every referenced id must have.
 _LIST_REFERENCES = {
     "spatial.world_spec.v1": (
@@ -66,6 +86,16 @@ class SpatialSpecRegistry:
                 f"{field} references a {actual!r}, expected {expected_domain!r} "
                 "(wrong spec type)")
 
+    def _check_world_line(self, content: dict) -> None:
+        """A world-line's reference depends on its kind (root vs forked); validate the
+        one that applies (construction order: parent/world spec must pre-exist)."""
+        if "spatial_world_spec_id" in content:            # root
+            self._check_reference(content["spatial_world_spec_id"],
+                                  "spatial.world_spec.v1", "spatial_world_spec_id")
+        elif "parent_world_line_id" in content:           # forked child
+            self._check_reference(content["parent_world_line_id"],
+                                  _WORLD_LINE_DOMAIN, "parent_world_line_id")
+
     def register(self, record: "ContentRecord") -> str:
         if not isinstance(record, ContentRecord):
             raise ContentRecordError("not a ContentRecord")
@@ -88,6 +118,8 @@ class SpatialSpecRegistry:
             raise ContentRecordError(
                 f"unsupported spatial_schema_version {version!r} — refused (unknown "
                 "versions fail closed)")
+        if domain == _WORLD_LINE_DOMAIN:                 # polymorphic root/forked
+            self._check_world_line(content)
         for field, expected in _SCALAR_REFERENCES.get(domain, ()):  # construction order
             self._check_reference(content[field], expected, field)
         for field, expected in _LIST_REFERENCES.get(domain, ()):
