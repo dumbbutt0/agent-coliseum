@@ -1,11 +1,11 @@
 """A/B/C/D governance machinery — slice G1: the routing core (matter_class +
 governance_route + governance_v1 policy version). INERT until the owner ratifies
-v4; dormant under v1-v3. Every test proves a fail-closed boundary: the routing
-matter_class is DERIVED from the verified chain (the codex verdict, hash-bound —
-Claude cannot forge it); an absent/invalid/unverifiable class routes to D;
-DEFLATION is caught (a D-touching change or an implicated Class-D predicate is
-forced to D); and governance is active ONLY on the installed policy that equals
-the owner-ratified pin."""
+v4; dormant under v1-v3. Every test proves a fail-closed boundary. governance_route
+is SELF-AUTHENTICATING: it re-reads and hash-verifies the chain from root and
+obtains the request through publish.verified_request (audit 000708) — it trusts NO
+caller argument. The routing matter_class is the codex verdict in the verified chain
+(hash-bound — Claude cannot forge it); an absent/invalid/unverifiable class, a
+protected-path change, or any implicated Class-D predicate forces D."""
 import json
 import os
 import subprocess
@@ -15,14 +15,12 @@ import pytest
 from tests.council_util import (_inject_test_bindings, append, drive_to_claimed,
                                 make_cfg, make_repo, make_request, make_root,
                                 make_verdict)
-from tools.council import checkpoint, events, policy, storage
+from tools.council import checkpoint, events, policy, publish, storage
 from tools.council.schemas import compute_verdict_payload_hash
 
 RID = "gov-req-001"
 CONTROL_RID = "council-control"
 
-# the six governance Class-D predicates a governed request must forbid, + the four
-# legacy experiment capabilities.
 _D6 = list(policy.POLICY_VERSIONS[4]["governance"]["class_d_reserved"])
 _LEGACY = ["destructive_tools", "cloud_apis", "website_automation", "weight_training"]
 _FULL_FORBIDDEN = _D6 + _LEGACY
@@ -40,7 +38,6 @@ def _amend(root, repo, head, cfg, target):
            {"policy_hash": new_hash, "prev_policy_hash": prev_hash,
             "policy_version": target, "policy_diff": diff, "impl_commit": head,
             "policy_file": storage.POLICY_FILE})
-    return new_hash
 
 
 @pytest.fixture()
@@ -63,8 +60,6 @@ def _ratify(root, repo, head, cfg, upto):
 
 
 def _publish_and_go(root, cfg, repo, head, matter_class, **req_ov):
-    """Publish + claim a source request, then append a codex AUDIT_GO carrying the
-    given matter_class into the chain. Returns the published request."""
     fields = dict(task_kind="source", forbidden_actions=list(_FULL_FORBIDDEN))
     fields.update(req_ov)
     ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID, **fields)
@@ -78,8 +73,8 @@ def _publish_and_go(root, cfg, repo, head, matter_class, **req_ov):
     return ctx["request"]
 
 
-def _route(root, cfg, request):
-    return policy.governance_route(root, cfg, request, events.read_chain(root))
+def _route(root, cfg):
+    return policy.governance_route(root, cfg, RID)
 
 
 # ------------------------------------------------------------ version ladder
@@ -102,15 +97,15 @@ def test_ladder_is_additive_and_code_defined():
 # ------------------------------------------------------------- dormant (v1-v3)
 
 def test_governance_dormant_before_ratification(env):
-    root, repo, head, cfg = env                    # pinned at v1
-    d = _route(root, cfg, make_request(repo, head, RID, task_kind="source"))
+    root, _repo, _head, cfg = env                    # pinned at v1
+    d = _route(root, cfg)
     assert not d.active and d.route == "owner"
 
 
 def test_governance_dormant_under_v3(env):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 3)
-    d = _route(root, cfg, make_request(repo, head, RID, task_kind="source"))
+    d = _route(root, cfg)
     assert not d.active and d.route == "owner"
 
 
@@ -121,8 +116,8 @@ def test_governance_dormant_under_v3(env):
 def test_routes_by_chain_matter_class(env, cls, route):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    request = _publish_and_go(root, cfg, repo, head, cls)
-    d = _route(root, cfg, request)
+    _publish_and_go(root, cfg, repo, head, cls)
+    d = _route(root, cfg)
     assert d.active and d.matter_class == cls and d.route == route
     assert d.declared_class == cls
 
@@ -132,43 +127,64 @@ def test_routes_by_chain_matter_class(env, cls, route):
 def test_absent_matter_class_routes_to_d(env):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    request = _publish_and_go(root, cfg, repo, head, None)
-    d = _route(root, cfg, request)
+    _publish_and_go(root, cfg, repo, head, None)
+    d = _route(root, cfg)
     assert d.active and d.matter_class == "D" and d.route == "owner"
     assert d.declared_class is None
 
 
 def test_no_codex_verdict_routes_to_d(env):
-    # governance active but no codex verdict in the chain for the request -> D
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    request = make_request(repo, head, RID, task_kind="source",
-                           forbidden_actions=list(_FULL_FORBIDDEN))
-    d = _route(root, cfg, request)
+    # publish + claim but NO verdict yet
+    drive_to_claimed(root, cfg, repo, head, request_id=RID, task_kind="source",
+                     forbidden_actions=list(_FULL_FORBIDDEN))
+    d = _route(root, cfg)
     assert d.active and d.matter_class == "D"
     assert any("no codex source verdict" in r for r in d.reasons)
 
 
-# ------------------------------- F1: verdict must be codex-authored + chain-bound
-
-def test_forged_non_codex_verdict_is_not_authoritative(env):
-    """A claude-sender verdict in the chain is not an authoritative classification —
-    the router only trusts a codex source verdict (audit 000700 F1)."""
+def test_unpublished_request_routes_to_d(env):
+    # governance active but no verified (published) request -> D
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID,
-                           task_kind="source",
-                           forbidden_actions=list(_FULL_FORBIDDEN))
-    # a real codex GO exists...
-    payload = make_verdict(head, RID, verdict="GO"); payload["matter_class"] = "A"
-    payload["schema_version"] = "source-verdict.v2"
-    _inject_test_bindings(root, payload, RID, head, False)
-    payload["verdict_payload_hash"] = compute_verdict_payload_hash(payload)
-    append(root, cfg, "AUDIT_GO", "codex", RID, repo, head, payload)
-    d = _route(root, cfg, ctx["request"])
-    assert d.matter_class == "A"        # the codex verdict is authoritative
-    # (a claude-sender verdict cannot even be appended — SENDER_ALLOWED — so the
-    # only class the router can ever read is the codex-authored, hash-bound one)
+    d = _route(root, cfg)
+    assert d.active and d.matter_class == "D"
+    assert any("not verifiable" in r for r in d.reasons)
+
+
+# ------------------------- F1 (000708): chain provenance established from root
+
+def test_codex_verdict_is_authoritative(env):
+    root, repo, head, cfg = env
+    _ratify(root, repo, head, cfg, 4)
+    _publish_and_go(root, cfg, repo, head, "A")
+    d = _route(root, cfg)
+    # the router read the chain from root and used the codex-authored, hash-bound
+    # verdict — a claude-sender verdict can't even be appended (SENDER_ALLOWED), so
+    # the only class the router can read is the codex one.
+    assert d.matter_class == "A" and d.declared_class == "A"
+
+
+# ------------------- F2 (000708): request bound to the published payload hash
+
+def test_post_publication_request_mutation_forced_to_d(env):
+    """A correct all-six-declared request routes A; mutating the request file after
+    publication (stale hash) makes verified_request fail -> forced D (audit 000708)."""
+    root, repo, head, cfg = env
+    _ratify(root, repo, head, cfg, 4)
+    _publish_and_go(root, cfg, repo, head, "A")
+    assert _route(root, cfg).matter_class == "A"          # authentic -> A
+    # tamper the claimed request file: drop a Class-D predicate, leave a stale hash
+    path = os.path.join(root, "requests", "claimed", RID + ".json")
+    req = json.load(open(path, encoding="utf-8"))
+    req["forbidden_actions"] = [p for p in req["forbidden_actions"]
+                                if p != "alteration_of_fundamental_mission"]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(req, fh)
+    d = _route(root, cfg)
+    assert d.matter_class == "D"
+    assert any("not verifiable" in r for r in d.reasons)
 
 
 # --------------------------------- F2/anti-deflation: Class-D predicates
@@ -176,12 +192,10 @@ def test_forged_non_codex_verdict_is_not_authoritative(env):
 def test_undeclared_class_d_predicate_forced_to_d(env):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    # omit one of the six governance Class-D predicates from forbidden_actions
     partial = [p for p in _FULL_FORBIDDEN
                if p != "external_publication_under_owner_identity"]
-    request = _publish_and_go(root, cfg, repo, head, "A",
-                              forbidden_actions=partial)
-    d = _route(root, cfg, request)
+    _publish_and_go(root, cfg, repo, head, "A", forbidden_actions=partial)
+    d = _route(root, cfg)
     assert d.matter_class == "D"
     assert any("Class-D predicate" in r for r in d.reasons)
 
@@ -189,10 +203,10 @@ def test_undeclared_class_d_predicate_forced_to_d(env):
 def test_implicated_class_d_predicate_in_allowed_forced_to_d(env):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    request = _publish_and_go(
+    _publish_and_go(
         root, cfg, repo, head, "B",
         allowed_actions=["read source", "expenditure_beyond_authorized_budget"])
-    d = _route(root, cfg, request)
+    d = _route(root, cfg)
     assert d.matter_class == "D"
     assert any("Class-D predicate" in r for r in d.reasons)
 
@@ -201,8 +215,8 @@ def test_undeclared_legacy_capability_forced_to_d(env):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
     partial = [p for p in _FULL_FORBIDDEN if p != "weight_training"]
-    request = _publish_and_go(root, cfg, repo, head, "A", forbidden_actions=partial)
-    d = _route(root, cfg, request)
+    _publish_and_go(root, cfg, repo, head, "A", forbidden_actions=partial)
+    d = _route(root, cfg)
     assert d.matter_class == "D"
 
 
@@ -232,8 +246,8 @@ def test_protected_path_change_forced_to_d_despite_label(env, tmp_path):
     _ratify(root, _r0, _h0, cfg0, 4)
     repo, head = _repo_touching_protected(tmp_path)
     cfg = make_cfg(repo, root)
-    request = _publish_and_go(root, cfg, repo, head, "A", scope=["benign refactor"])
-    d = policy.governance_route(root, cfg, request, events.read_chain(root))
+    _publish_and_go(root, cfg, repo, head, "A", scope=["benign refactor"])
+    d = policy.governance_route(root, cfg, RID)
     assert d.matter_class == "D" and d.route == "owner"
     assert any("protected paths" in r for r in d.reasons)
 
@@ -241,19 +255,13 @@ def test_protected_path_change_forced_to_d_despite_label(env, tmp_path):
 # ----------------------------- F3: active only on the effective owner-ratified pin
 
 def test_installed_policy_must_equal_effective_pin(env):
-    """Pinned at v4 but the installed FILE hand-swapped to code-defined v5 -> the
-    installed policy != the pinned policy, so governance is inactive (audit 000700
-    F3), never active on the wrong policy."""
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 4)
-    # overwrite the installed file with a DIFFERENT code-defined version (v5)
     path = storage.policy_path(root)
     os.chmod(path, 0o644)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(dict(policy.POLICY_VERSIONS[5], created_utc="x"), fh)
-    request = make_request(repo, head, RID, task_kind="source",
-                           forbidden_actions=list(_FULL_FORBIDDEN))
-    d = policy.governance_route(root, cfg, request, events.read_chain(root))
+    d = policy.governance_route(root, cfg, RID)
     assert not d.active and d.route == "owner"
 
 

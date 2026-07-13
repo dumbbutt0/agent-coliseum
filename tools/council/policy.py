@@ -794,15 +794,13 @@ def evaluate_delegation(root: str, cfg: Config, request: dict,
 _SOURCE_VERDICT_EVENTS = ("AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS", "AUDIT_BLOCKED")
 
 
-def _authoritative_matter_class(request: dict, chain: list):
-    """Derive the routing matter_class from the VERIFIED chain, never a caller
-    argument (audit 000700 F1): the LAST codex source verdict for this request that
-    is schema/payload-hash valid, target-commit bound, and enum-valid. Returns
-    (matter_class|None, reason|None) — None class means fail-closed to D."""
+def _authoritative_matter_class(chain: list, rid: str, target: str):
+    """The routing matter_class from the VERIFIED chain (read from root by the
+    caller): the LAST codex source verdict for this request that is schema +
+    payload-hash valid and target-commit bound. Returns (matter_class|None,
+    reason|None) — None means fail-closed to D."""
     from tools.council.schemas import (compute_verdict_payload_hash,
                                        validate_verdict, CouncilError)
-    rid = request.get("request_id")
-    target = request.get("target_commit")
     verdict_event = None
     for e in chain:
         if e.get("request_id") == rid \
@@ -828,27 +826,32 @@ def _authoritative_matter_class(request: dict, chain: list):
     return mc, None
 
 
-def governance_route(root: str, cfg: Config, request: dict,
-                     chain: list) -> GovernanceRoute:
-    """Route a matter A/B/C/D under governance_v1 (owner-ratified v4+). The
-    authoritative matter_class is DERIVED from the verified chain (the last codex
-    source verdict for the exact request/commit that passes schema + payload-hash
-    validation) — never a caller-supplied argument (audit 000700 F1). Fail-closed:
-    an absent/invalid/unverifiable class routes to D, and DEFLATION is caught — any
-    matter whose audited commit changes a protected path (real diff), whose request
-    omits the hash-bound declaration forbidding ALL SIX governance Class-D predicates
-    (or implicates one in its allowed actions), or omits a legacy reserved capability,
-    is forced to D regardless of the label. Governance is active ONLY when the
-    installed policy equals the effective owner-ratified pin (hash AND version) and is
-    a code-defined governance-enabled version >= 4 (audit 000700 F3); otherwise
-    dormant (active=False, route=owner). A pure, re-runnable function of (chain,
-    request)."""
+def governance_route(root: str, cfg: Config, request_id: str) -> GovernanceRoute:
+    """Route a matter A/B/C/D under governance_v1 (owner-ratified v4+). SELF-
+    AUTHENTICATING — it trusts NO caller argument (audit 000708): it re-reads and
+    hash-verifies the chain from root, and obtains the request through
+    publish.verified_request (which binds the file to the publication event's pinned
+    request_payload_hash, so a post-publication mutation fails). The authoritative
+    matter_class is the last codex source verdict in the verified chain for the exact
+    request/commit. Fail-closed: an unverifiable chain/request, an absent/invalid
+    class, a protected-path real-diff, or any implicated/undeclared Class-D predicate
+    (all six governance predicates + the legacy capabilities) forces D. Active ONLY
+    when the installed policy equals the effective owner-ratified governance-enabled
+    pin >= v4 (hash AND version); otherwise dormant (active=False, route=owner).
+    A pure, re-runnable function of (root, request_id)."""
     policy = policy_hash = None
     try:
         policy, policy_hash = load_policy(root)
     except SchemaViolation as exc:
         return GovernanceRoute(False, "D", None, "owner", None,
                                [f"policy_installed: {exc}"])
+    # F1 (000708): establish chain provenance from root — never a caller argument.
+    report = events_mod.verify_chain(root)
+    if not report.healthy:
+        return GovernanceRoute(False, "D", None, "owner", policy_hash,
+                               [f"chain not healthy -> D: "
+                                f"{report.error or 'torn/incomplete suffix'}"])
+    chain = events_mod.read_chain(root, verify=True)
     eff_hash, eff_version = effective_policy_pin(chain)
     try:
         code_defined = is_code_defined_version(policy)
@@ -856,8 +859,7 @@ def governance_route(root: str, cfg: Config, request: dict,
         code_defined = False
     gov = policy.get("governance") or {}
     # F3: bind the INSTALLED policy to the effective owner-ratified pin (hash AND
-    # version), mirroring evaluate/evaluate_delegation — a pin/install mismatch is
-    # inactive, never active on the wrong policy.
+    # version), mirroring evaluate/evaluate_delegation.
     active = (eff_version is not None and eff_version >= 4
               and (eff_hash is None or eff_hash == policy_hash)
               and code_defined and policy_version_of(policy) == eff_version
@@ -867,19 +869,32 @@ def governance_route(root: str, cfg: Config, request: dict,
                                ["governance not active (requires the installed policy "
                                 "to equal the owner-ratified governance-enabled pin "
                                 ">= v4)"])
+    # F2 (000708): the AUTHORITATIVE, hash-verified request — repository, commit,
+    # forbidden_actions, allowed_actions all bound to the publication event; a
+    # post-publication mutation (stale or recomputed hash) fails here -> D.
+    from tools.council import publish
+    try:
+        request, failures, repo, commit = publish.verified_request(
+            root, cfg, request_id)
+    except Exception as exc:   # missing/unreadable request file -> fail closed
+        return GovernanceRoute(True, "D", None, "owner", policy_hash,
+                               [f"request not verifiable -> D: {exc}"])
+    if failures:
+        return GovernanceRoute(True, "D", None, "owner", policy_hash,
+                               ["request not verifiable -> D: " + "; ".join(failures)])
+
     reasons: list = []
-    declared, why = _authoritative_matter_class(request, chain)
+    declared, why = _authoritative_matter_class(chain, request_id, commit)
     effective = declared if declared is not None \
         else (gov.get("unclassified_routes_to") or "D")
     if declared is None:
         reasons.append(f"matter_class not authenticated from chain -> {effective}: {why}")
 
     # anti-deflation guard 1: a D-touching change can never be A/B/C — verified from
-    # the EXACT audited commit's real diff, fail-closed on any verification failure.
+    # the pinned commit's real diff, fail-closed on any verification failure.
     protected = tuple(policy["protected_paths"])
     try:
-        changed = git_state.changed_paths(request["repository"],
-                                          request["target_commit"], cfg.repo_roots)
+        changed = git_state.changed_paths(repo, commit, cfg.repo_roots)
         touched = [p for p in changed if any(pr in p for pr in protected)]
         if touched:
             effective = "D"
@@ -888,9 +903,9 @@ def governance_route(root: str, cfg: Config, request: dict,
         effective = "D"
         reasons.append(f"cannot verify the audited commit's changed paths "
                        f"(fail-closed -> D): {exc}")
-    # anti-deflation guard 2 (F2): the request must carry the hash-bound declaration
-    # forbidding EVERY one of the six governance Class-D predicates, and may not
-    # implicate any in its allowed_actions — plus the legacy experiment capabilities.
+    # anti-deflation guard 2: the verified request must forbid EVERY one of the six
+    # governance Class-D predicates and implicate none in its allowed_actions — plus
+    # the legacy experiment capabilities.
     forbidden = set(request.get("forbidden_actions", []))
     allowed = set(request.get("allowed_actions", []))
     reserved_d = list(gov.get("class_d_reserved") or [])
