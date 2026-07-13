@@ -16,6 +16,7 @@ import sys
 from .graph_export import write_graphs
 from .metrics import aggregate, write_aggregate, write_run_metrics
 from .runner import run_scenario
+from .schema import canonical_json
 
 
 def _run_dir(run_id: str, out_root: str) -> str:
@@ -139,6 +140,42 @@ def cmd_compare(args):
                   f"(pairs={d['matched_pairs']}{un})")
 
 
+def _load_held_out(registry_path):
+    """Held-out (scenarios, scenario_hashes) from the experiments registry, or (None, None)."""
+    if not registry_path or not os.path.exists(registry_path):
+        return None, None
+    from .registry import load_experiments_registry
+    raw = load_experiments_registry(registry_path)
+    ho = raw.get("held_out", {}) if isinstance(raw, dict) else {}
+    return ho.get("scenarios") or None, ho.get("scenario_hashes") or None
+
+
+def cmd_dataset_export(args):
+    """T0-A: emit a provenance-complete, non-pooled dataset descriptor + card from validated evidence.
+    Structural only — no normative labels, no partitioning, no training."""
+    from .dataset_export import build_dataset, dataset_from_manifest, dataset_card
+    from . import reports
+    held_ids, held_hashes = _load_held_out(args.registry)
+    common = dict(mode=args.mode, interaction_mode=args.interaction,
+                  held_out_scenarios=held_ids, held_out_hashes=held_hashes,
+                  verify=args.verify, config_dir=args.config_dir)
+    if args.manifest:
+        desc = dataset_from_manifest(args.manifest, args.out_root, **common)
+    else:
+        dirs = _all_run_dirs(args.out_root)
+        if not dirs:
+            sys.exit("no runs found")
+        desc = build_dataset(dirs, **common)
+    os.makedirs(args.derived_root, exist_ok=True)
+    desc_path = os.path.join(args.derived_root, "dataset.t0a.json")
+    with open(desc_path, "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(desc) + "\n")
+    card_path = reports.write(dataset_card(desc), "dataset-card.t0a.md", args.repo_root)
+    print("wrote", desc_path)
+    print("wrote", card_path)
+    print(f"effective_units {desc['effective_unit_count']} commitment {desc['dataset_commitment'][:16]}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="coliseum-lab", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -146,6 +183,7 @@ def main(argv=None):
     p.add_argument("--config-dir", default="configs/scenarios")
     p.add_argument("--derived-root", default="derived/textlab/metrics")
     p.add_argument("--graphs-root", default="derived/textlab/graphs")
+    p.add_argument("--repo-root", default=".")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     interaction_choices = ["independent_vignettes", "sequential_history"]
@@ -176,6 +214,17 @@ def main(argv=None):
                    help="include non-admitted runs (labeled; not for claims)")
     s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
                    help="which experimental mode to aggregate (modes never pool)")
+    s = sub.add_parser("dataset-export"); s.set_defaults(fn=cmd_dataset_export)
+    s.add_argument("--manifest", default=None,
+                   help="evidence manifest to export (default: all runs under --out-root)")
+    s.add_argument("--registry", default="configs/registry/experiments.yaml",
+                   help="experiments registry for the held-out attestation (by id AND hash)")
+    s.add_argument("--verify", action="store_true",
+                   help="byte-gate every run via replay before inclusion")
+    s.add_argument("--mode", default="deterministic",
+                   choices=["deterministic", "stochastic", "variants", "full-grid"])
+    s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
+                   help="which experimental mode to export (modes never pool)")
 
     args = p.parse_args(argv)
     args.fn(args)
