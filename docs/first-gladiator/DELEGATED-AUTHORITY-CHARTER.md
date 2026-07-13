@@ -85,14 +85,19 @@ A content-addressed object embedded in `POLICY_VERSIONS[3]`, bound into every au
   with the `OwnerDelegationProfile` removed/disabled). It is **never** a v3→v2 rollback: `effective_policy_pin`
   is strictly monotonic (`policy_version == current+1`, root-anchored, `policy.py:202-220`), so rollback is
   impossible by construction and must not be claimed. Only the owner S/KEY token can emit this `POLICY_AMENDED`
-  (`schemas.py:123,136`), so no agent can forge revocation. **Immediate emergency suspension** (no token) reuses
-  the existing **owner/root-controlled `STOP` file** (halts every transition) and **`MANUAL` marker** (disables
-  auto-approval, hence the delegated path); `evaluate_delegation` already fails closed on both via
-  `emergency_stop_clear` / `auto_approval_enabled` (§9). These markers are created only outside the agent's
-  write scope (owner action; the identity root is root-anchored to `/etc/coliseum`) — the agent never creates
-  them, and the enforcement slice includes an adversarial test proving a claude-authored revocation /
-  policy-amendment is rejected by `validate_sender` + the human-token requirement, and that a present
-  `STOP`/`MANUAL` marker forces the delegated satisfaction path closed.
+  (`schemas.py:123,136`), so no agent can forge revocation. **Immediate emergency SUSPENSION** (no token, not
+  the authenticated revocation) reuses the existing `STOP` file (halts every transition) and `MANUAL` marker
+  (disables auto-approval, hence the delegated path); `evaluate_delegation` fails closed on both via
+  `emergency_stop_clear` / `auto_approval_enabled` (§9). **Accurate semantics (audit LOW):** `STOP`/`MANUAL` are
+  **repository-local presence markers in the agent-writable council root — fail-closed suspension inputs, not
+  owner-authenticated.** Their presence can only **DENY** delegated authority, never grant it — so they are safe
+  as a kill-switch even without provenance (an agent could at most suspend, never authorize). They are **not**
+  relied on as owner-authenticated revocation; the authenticated, un-forgeable revocation is the owner-tokened
+  v3→v4 amendment above. The enforcement slice includes an adversarial test proving (a) a claude-authored
+  `POLICY_AMENDED`/revocation is rejected by `validate_sender` + the human-token requirement, and (b) a present
+  `STOP`/`MANUAL` marker forces the delegated satisfaction path closed. If owner-**authenticated** emergency
+  revocation (beyond fail-closed suspension) is later required, the implementation slice adds separately-audited
+  provenance enforcement for these markers.
 - `immutable_audit_requirements`: every auto-satisfied integration is a normal chain event, re-derivable by
   replay; nothing is trusted from event presence.
 
@@ -167,10 +172,11 @@ transition (`CHANGE_INTEGRATED` / `POLICY_VALIDATION_REQUIRED`) until **all** re
 
 Reuse: `STOP` file (halts all), `MANUAL` marker (disables auto-approval, hence the delegated path),
 `control.json` pause, 720-aggregate-compute-minute ceiling, 3-consecutive-failure auto-halt, `bounded_loops`
-(≤5 cycles / ≤2 retries) — all owner/root-controlled and already checked fail-closed by the delegation
-evaluator. New (code-defined + fail-closed): a delegation task/compute budget. **Revocation** is the
-owner-tokened forward-only `POLICY_AMENDED` v3→v4 (§5), not a marker an agent could create. **Always stop
-automatically** for:
+(≤5 cycles / ≤2 retries) — **repository-local presence/pause inputs checked fail-closed by the delegation
+evaluator; their presence can only DENY delegated authority, never grant it, and they are not
+owner-authenticated** (§5). New (code-defined + fail-closed): a delegation task/compute budget. **Authenticated
+revocation** is the owner-tokened forward-only `POLICY_AMENDED` v3→v4 (§5), which no agent can create. **Always
+stop automatically** for:
 delegation expiration/revocation · chain-verify failure · auditor-identity failure · unaudited-commit mismatch
 · protected-path change outside scope · unexpected schema migration · hidden-data boundary failure · external
 network/tool request outside scope · untrusted content escaping isolation · budget exhaustion · critical
