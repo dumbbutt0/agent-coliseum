@@ -138,8 +138,10 @@ def _amended_v2() -> dict:
 # work only, Codex-only, Class-A conditions only. It changes NOTHING else, so the
 # existing experiment auto-approval is unaffected. Delegation is INERT until the
 # owner ratifies this version (the effective pin must be v3); under v1/v2 the pin
-# check in `evaluate_delegation` fails closed. Version 4 is the forward-only,
-# owner-tokened REVOCATION target: v3 with delegation disabled (never a rollback).
+# check in `evaluate_delegation` fails closed. The forward-additive ladder is:
+# v3 = delegation, v4 = governance activation (delegation RETAINED, see _amended_v4),
+# v5 = delegation revocation (delegation disabled; governance kept) — each a
+# monotonic forward POLICY_AMENDED, never a rollback.
 def _owner_delegation() -> dict:
     return {
         "enabled": True,

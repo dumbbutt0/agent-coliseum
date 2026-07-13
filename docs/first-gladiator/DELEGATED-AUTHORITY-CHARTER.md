@@ -96,7 +96,7 @@ A content-addressed object embedded in `POLICY_VERSIONS[3]`, bound into every au
   owner-authenticated.** Their presence can only **DENY** delegated authority, never grant it — so they are safe
   as a kill-switch even without provenance (an agent could at most suspend, never authorize). They are **not**
   relied on as owner-authenticated revocation; the authenticated, un-forgeable revocation is the owner-tokened
-  v3→v4 amendment above. The enforcement slice includes an adversarial test proving (a) a claude-authored
+  forward amendment to the delegation-disabled version (v5) above. The enforcement slice includes an adversarial test proving (a) a claude-authored
   `POLICY_AMENDED`/revocation is rejected by `validate_sender` + the human-token requirement, and (b) a present
   `STOP`/`MANUAL` marker forces the delegated satisfaction path closed. If owner-**authenticated** emergency
   revocation (beyond fail-closed suspension) is later required, the implementation slice adds separately-audited
@@ -145,8 +145,8 @@ permitted). It reuses **every** `policy.evaluate` guard — `policy_installed`/`
 `identity_chain_valid`, `milestone_not_reached`, `working_tree_clean` + `head_is_target`, `verdict_commit_exact`
 — **plus** delegation-specific checks: verdict is `AUDIT_GO_WITH_CONDITIONS` from `codex`; the request is an
 authorized structural `source` task within `authorized_paths`; every condition classifies **Class A**;
-`no_protocol_self_modification`; the pinned policy version is the delegation-ENABLED v3 (a v4 disable version or
-any non-v3 pin ⇒ no delegation); delegation not expired; `STOP`/`MANUAL` absent; budget within bound;
+`no_protocol_self_modification`; the pinned policy version has delegation ENABLED (v3 or the delegation-retaining
+governance v4; the v5 delegation-disabled pin ⇒ no delegation); delegation not expired; `STOP`/`MANUAL` absent; budget within bound;
 `delegation_hash` matches the pinned profile. Any non-empty `reasons` ⇒ fall back to the owner gate.
 
 ## 10. State-machine gate extension (one place)
@@ -178,7 +178,7 @@ Reuse: `STOP` file (halts all), `MANUAL` marker (disables auto-approval, hence t
 (≤5 cycles / ≤2 retries) — **repository-local presence/pause inputs checked fail-closed by the delegation
 evaluator; their presence can only DENY delegated authority, never grant it, and they are not
 owner-authenticated** (§5). New (code-defined + fail-closed): a delegation task/compute budget. **Authenticated
-revocation** is the owner-tokened forward-only `POLICY_AMENDED` v3→v4 (§5), which no agent can create. **Always
+revocation** is the owner-tokened forward-only `POLICY_AMENDED` to the delegation-disabled version v5 (§5), which no agent can create. **Always
 stop automatically** for:
 delegation expiration/revocation · chain-verify failure · auditor-identity failure · unaudited-commit mismatch
 · protected-path change outside scope · unexpected schema migration · hidden-data boundary failure · external
@@ -199,9 +199,9 @@ Claude cannot self-approve (append an `AUDIT_*`/self CONDITIONS_AUTO_SATISFIED w
 cannot expand authority through conditions (a Class-C condition never auto-satisfies) · Fable cannot convert
 methodological advice into policy authority · an uncovered condition cannot auto-satisfy · a substituted
 `condition_hash` fails closed · a request cannot reuse another request's delegation (binding mismatch) · a
-changed commit invalidates authorization · expired delegation / a `STOP`/`MANUAL` marker / a v4-disable pin all
+changed commit invalidates authorization · expired delegation / a `STOP`/`MANUAL` marker / the v5 delegation-disabled pin all
 fail closed · **an agent cannot forge revocation** (a claude-authored `POLICY_AMENDED` or revocation is rejected
-by `validate_sender` + the human-token requirement; only an owner-tokened forward-only v3→v4 amendment disables
+by `validate_sender` + the human-token requirement; only an owner-tokened forward-only amendment to the v5 delegation-disabled version disables
 delegation) · budget exhaustion fails closed · Hunger-Games/weights remain owner-gated · the human
 `CONDITIONS_SATISFIED` + S/KEY path is byte-unchanged · `evaluate_delegation` is a pure re-runnable function
 (auto-satisfaction never trusted from event presence).
@@ -225,8 +225,9 @@ disagreement · Hunger-Games readiness · revocation / emergency intervention.
 ## 17. Implementation order (bounded, each Codex-audited)
 
 1. This design source → Codex audit → integrate.
-2. Slice 1 (enforcement): `POLICY_VERSIONS[3]` (delegation-enabled) **and `POLICY_VERSIONS[4]`
-   (delegation-disabled, the forward-only revocation target)** + `evaluate_delegation` +
+2. Slice 1 (enforcement): `POLICY_VERSIONS[3]` (delegation-enabled) **and the forward-only
+   delegation-disabled revocation target — now `POLICY_VERSIONS[5]`, since v4 became governance activation
+   with delegation retained (see the governance machinery)** + `evaluate_delegation` +
    `CONDITIONS_AUTO_SATISFIED` + state-machine gate + `claude_watch` branch + delegation budget + the §14
    adversarial suite (incl. the un-forgeable-revocation regression) → Codex audit → integrate.
 3. Owner ratification: `amend-policy --target-version 3` → one `POLICY_AMENDED`.
