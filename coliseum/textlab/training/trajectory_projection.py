@@ -71,26 +71,82 @@ def _load_run_json(run_dir: str) -> dict:
         return json.loads(fh.read())
 
 
-def _load_decision_nodes(run_dir: str) -> list:
-    """Return the ordered ``decision_node`` records (outcome/memory_update rows are
-    skipped; they are captured inside the privileged observation, not as decisions)."""
-    nodes = []
+def _load_decision_stream(run_dir: str) -> list:
+    """Return every ordered record in decisions.jsonl (decision_node, outcome,
+    memory_update, ...) — the full stream, so structure can be validated."""
+    recs = []
     with open(os.path.join(run_dir, "decisions.jsonl"), "rb") as fh:
         for raw in fh.read().splitlines():
-            if not raw.strip():
-                continue
-            rec = json.loads(raw)
-            if rec.get("kind") == "decision_node":
-                nodes.append(rec)
+            if raw.strip():
+                recs.append(json.loads(raw))
+    return recs
+
+
+def _validate_source_decision_sequence(nodes: list) -> None:
+    """Fail closed on a corrupt source decision sequence BEFORE any record is built:
+    the decision_node ``timestep``s must be a contiguous 0-based increasing sequence
+    (no gap, no duplicate, no reorder) and the ``dp_id``s must be unique. A duplicated
+    or dropped-in-the-middle or reordered decision is refused rather than silently
+    renumbered into an apparently clean trajectory."""
+    if not nodes:
+        raise ContentRecordError("run has no decision_node records to project")
+    timesteps, dp_ids = [], []
+    for node in nodes:
+        data = node.get("data", {})
+        ts = data.get("timestep")
+        if not isinstance(ts, int) or isinstance(ts, bool):
+            raise ContentRecordError("decision_node is missing an integer timestep")
+        timesteps.append(ts)
+        dp = data.get("dp_id")
+        if not isinstance(dp, str) or not dp:
+            raise ContentRecordError("decision_node is missing a dp_id")
+        dp_ids.append(dp)
+    if timesteps != list(range(len(timesteps))):
+        raise ContentRecordError(
+            "source decision timesteps are not a contiguous 0-based increasing "
+            f"sequence (got {timesteps}): a gapped / duplicated / reordered decision "
+            "stream is refused, not renumbered")
+    if len(set(dp_ids)) != len(dp_ids):
+        raise ContentRecordError(
+            f"source decision dp_ids are not unique (got {dp_ids}): a duplicated "
+            "decision point is refused")
+
+
+def _decision_nodes(recs: list) -> list:
+    """Validate the decision stream's structure and return the ordered decision_node
+    records. Every decision_node must be IMMEDIATELY resolved by an outcome row — a
+    decision_node injected at EOF (or unresolved) is refused. Ordering/identity of the
+    decision points is then validated by :func:`_validate_source_decision_sequence`."""
+    for i, rec in enumerate(recs):
+        if rec.get("kind") == "decision_node":
+            nxt = recs[i + 1] if i + 1 < len(recs) else None
+            if nxt is None or nxt.get("kind") != "outcome":
+                raise ContentRecordError(
+                    "malformed decision stream: a decision_node is not immediately "
+                    "resolved by an outcome row (truncated or injected decision)")
+    nodes = [r for r in recs if r.get("kind") == "decision_node"]
+    _validate_source_decision_sequence(nodes)
     return nodes
 
 
-def _interaction_mode(run_json: dict) -> str:
-    mode = run_json.get("interaction_mode")
-    if not mode:
-        mode = (run_json.get("behavioral_config", {})
-                .get("interaction", {}).get("mode"))
-    return mode
+def _resolve_interaction_mode(run_json: dict) -> str:
+    """Return the run's interaction mode ONLY when the two recorded mode fields
+    agree. The top-level ``interaction_mode`` and the regime-bound
+    ``behavioral_config.interaction.mode`` must both be present and identical; any
+    conflict is refused (a contradictory run must not be silently coded with
+    independent-vignette episode/termination semantics)."""
+    top = run_json.get("interaction_mode")
+    bc = (run_json.get("behavioral_config", {})
+          .get("interaction", {}).get("mode"))
+    if not isinstance(top, str) or not top:
+        raise ContentRecordError("top-level interaction_mode is missing")
+    if not isinstance(bc, str) or not bc:
+        raise ContentRecordError("behavioral_config.interaction.mode is missing")
+    if top != bc:
+        raise ContentRecordError(
+            f"interaction mode conflict: top-level {top!r} != "
+            f"behavioral_config.interaction.mode {bc!r} — a contradictory run is refused")
+    return top
 
 
 def _privileged_observation_content(data: dict) -> dict:
@@ -145,12 +201,16 @@ def project_trajectory(run_dir: str) -> dict:
         raise ContentRecordError(
             f"run status is {status!r}, not 'completed': this slice codes only a "
             "naturally-terminating run and will not mis-code an incomplete/failed run")
-    mode = _interaction_mode(run_json)
+    # both recorded mode fields must agree AND name a supported mode.
+    mode = _resolve_interaction_mode(run_json)
     if mode not in _SUPPORTED_INTERACTION_MODES:
         raise ContentRecordError(
             f"interaction mode {mode!r} is not supported by this projector "
             f"(supported: {sorted(_SUPPORTED_INTERACTION_MODES)}) — refused rather "
             "than silently mis-representing episode structure")
+
+    # load + STRUCTURALLY VALIDATE the source decision stream before building anything.
+    nodes = _decision_nodes(_load_decision_stream(run_dir))
 
     # provenance anchor: the exact source bytes.
     source_evidence = SourceEvidenceBinding(
@@ -162,10 +222,6 @@ def project_trajectory(run_dir: str) -> dict:
 
     # the policy is constant across the run; re-derive + cross-check its regime ids.
     policy = project_behavior_policy_spec(run_json)
-
-    nodes = _load_decision_nodes(run_dir)
-    if not nodes:
-        raise ContentRecordError("run has no decision_node records to project")
 
     decisions = []      # DecisionRecord
     actor_decisions = []  # ActorDecisionRecord
@@ -200,6 +256,17 @@ def project_trajectory(run_dir: str) -> dict:
         decisions.append(decision)
         actor_decisions.append(actor_decision)
 
+    # derived-side guard (belt-and-suspenders on top of source validation): the
+    # constructed decisions must carry contiguous 0-based positions and, in
+    # independent_vignettes, null prev links — else refuse rather than emit a manifest.
+    positions = [d.content["sequence_position"] for d in decisions]
+    if positions != list(range(len(decisions))):
+        raise ContentRecordError(
+            f"derived sequence positions are not contiguous 0-based (got {positions})")
+    if any(d.content["prev_decision_hash"] is not None for d in decisions):
+        raise ContentRecordError(
+            "independent_vignettes decisions must have null prev_decision_hash")
+
     manifest = TrajectoryManifest(
         run_identity=source_evidence.id,
         ordered_decision_ids=[d.id for d in decisions],
@@ -209,6 +276,11 @@ def project_trajectory(run_dir: str) -> dict:
             "episode_starts": list(range(len(decisions))),
         },
     )
+    # the manifest's own integrity report must be clean (unique ids + valid boundaries).
+    integrity = manifest.sequence_integrity()
+    if integrity["duplicates"] or not integrity["episode_boundaries_valid"]:
+        raise ContentRecordError(
+            f"constructed manifest failed its own integrity check: {integrity}")
     return {
         "source_evidence": source_evidence,
         "behavior_policy_spec": policy,

@@ -24,6 +24,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 
 import pytest
 
@@ -46,6 +47,47 @@ def run_dir(tmp_path):
     return res.run_dir
 
 
+def _stream(run_dir):
+    with open(os.path.join(run_dir, "decisions.jsonl")) as fh:
+        return [json.loads(l) for l in fh if l.strip()]
+
+
+def _triples(stream):
+    """Group the record stream into per-decision blocks (a decision_node and the
+    outcome/memory rows that follow it up to the next decision_node)."""
+    blocks, cur = [], []
+    for rec in stream:
+        if rec.get("kind") == "decision_node" and cur:
+            blocks.append(cur)
+            cur = []
+        cur.append(rec)
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+def _write_run(tmp_path, name, src_run_dir, *, stream=None, run_json=None):
+    """Write a run dir with a (possibly tampered) decision stream / run.json,
+    copying the scenario snapshot from the source run."""
+    d = str(tmp_path / name)
+    os.makedirs(d)
+    if run_json is None:
+        run_json = json.load(open(os.path.join(src_run_dir, "run.json")))
+    with open(os.path.join(d, "run.json"), "w") as fh:
+        json.dump(run_json, fh)
+    if stream is None:
+        shutil.copy(os.path.join(src_run_dir, "decisions.jsonl"),
+                    os.path.join(d, "decisions.jsonl"))
+    else:
+        with open(os.path.join(d, "decisions.jsonl"), "w") as fh:
+            for rec in stream:
+                fh.write(json.dumps(rec) + "\n")
+    snap = os.path.join(src_run_dir, "scenario.snapshot.json")
+    if os.path.exists(snap):
+        shutil.copy(snap, os.path.join(d, "scenario.snapshot.json"))
+    return d
+
+
 # --------------------------------------------------------------- happy path
 def test_projects_full_record_set(run_dir):
     r = project_trajectory(run_dir)
@@ -58,8 +100,8 @@ def test_projects_full_record_set(run_dir):
     m = r["trajectory_manifest"].content
     assert m["ordered_decision_ids"] == [d.id for d in r["decision_records"]]
     assert m["run_identity"] == r["source_evidence"].id
-    assert r["trajectory_manifest"].sequence_integrity() == {"length": 3,
-                                                             "duplicates": False}
+    assert r["trajectory_manifest"].sequence_integrity() == {
+        "length": 3, "duplicates": False, "episode_boundaries_valid": True}
     assert m["episode_boundaries"]["interaction_mode"] == "independent_vignettes"
     assert m["episode_boundaries"]["episode_starts"] == [0, 1, 2]
 
@@ -220,6 +262,99 @@ def test_unsupported_interaction_mode_refused(run_dir, tmp_path):
     import shutil
     shutil.copy(os.path.join(run_dir, "decisions.jsonl"),
                 os.path.join(d, "decisions.jsonl"))
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+# -------------------------------------- sequence-integrity fail-closed (blocker 1)
+def test_duplicate_decision_triple_refused(run_dir, tmp_path):
+    """Appending a duplicate of the first decision block (node+outcome+memory) must
+    be refused — not silently renumbered into a clean 4-decision trajectory."""
+    stream = _stream(run_dir)
+    blocks = _triples(stream)
+    tampered = stream + blocks[0]  # duplicate the first block verbatim
+    d = _write_run(tmp_path, "dup", run_dir, stream=tampered)
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_bare_duplicate_decision_node_refused(run_dir, tmp_path):
+    """Appending only a bare decision_node (unresolved by an outcome) — the auditor's
+    exact probe — must be refused."""
+    stream = _stream(run_dir)
+    first_node = next(r for r in stream if r.get("kind") == "decision_node")
+    d = _write_run(tmp_path, "barenode", run_dir, stream=stream + [first_node])
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_gapped_decision_sequence_refused(run_dir, tmp_path):
+    """Dropping a MIDDLE decision block leaves a timestep gap ([0,2]) and must be
+    refused rather than projected as a clean 2-decision trajectory."""
+    blocks = _triples(_stream(run_dir))
+    assert len(blocks) == 3
+    tampered = [rec for rec in (blocks[0] + blocks[2])]  # skip the middle decision
+    d = _write_run(tmp_path, "gap", run_dir, stream=tampered)
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_reordered_decisions_refused(run_dir, tmp_path):
+    """Swapping the first two decision blocks makes the file-order timesteps
+    non-ascending ([1,0,2]) and must be refused."""
+    blocks = _triples(_stream(run_dir))
+    tampered = blocks[1] + blocks[0] + blocks[2]
+    d = _write_run(tmp_path, "reorder", run_dir, stream=tampered)
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_trailing_truncation_is_tamper_evident(run_dir, tmp_path):
+    """Dropping the LAST decision block yields a structurally clean 2-decision
+    sequence (timesteps [0,1]); it still projects, but the provenance anchor makes it
+    tamper-evident — its run_identity differs from the untouched run's."""
+    full = project_trajectory(run_dir)
+    blocks = _triples(_stream(run_dir))
+    truncated = blocks[0] + blocks[1]
+    d = _write_run(tmp_path, "trunc", run_dir, stream=truncated)
+    r = project_trajectory(d)
+    assert len(r["decision_records"]) == 2                 # structurally clean
+    assert (r["trajectory_manifest"].content["run_identity"]
+            != full["trajectory_manifest"].content["run_identity"])  # provenance-caught
+
+
+def test_manifest_integrity_reports_boundaries(run_dir):
+    r = project_trajectory(run_dir)
+    integ = r["trajectory_manifest"].sequence_integrity()
+    assert integ == {"length": 3, "duplicates": False,
+                     "episode_boundaries_valid": True}
+
+
+# ------------------------------------ interaction-mode conflict fail-closed (blocker 2)
+def test_mode_conflict_top_supported_bc_unsupported_refused(run_dir, tmp_path):
+    """Top-level independent_vignettes but behavioral_config says sequential_history
+    (regime-consistent): the conflict must be refused, not coded as independent."""
+    run_json = json.load(open(os.path.join(run_dir, "run.json")))
+    run_json["behavioral_config"]["interaction"]["mode"] = "sequential_history"
+    d = _write_run(tmp_path, "conflictA", run_dir, run_json=run_json)
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_mode_conflict_top_unsupported_bc_supported_refused(run_dir, tmp_path):
+    """The other direction: top-level sequential_history, behavioral_config
+    independent_vignettes — also refused."""
+    run_json = json.load(open(os.path.join(run_dir, "run.json")))
+    run_json["interaction_mode"] = "sequential_history"
+    d = _write_run(tmp_path, "conflictB", run_dir, run_json=run_json)
+    with pytest.raises(ContentRecordError):
+        project_trajectory(d)
+
+
+def test_missing_mode_field_refused(run_dir, tmp_path):
+    run_json = json.load(open(os.path.join(run_dir, "run.json")))
+    del run_json["interaction_mode"]
+    d = _write_run(tmp_path, "nomode", run_dir, run_json=run_json)
     with pytest.raises(ContentRecordError):
         project_trajectory(d)
 

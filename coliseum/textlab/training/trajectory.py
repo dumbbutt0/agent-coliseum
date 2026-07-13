@@ -81,9 +81,24 @@ class TrajectoryManifest(ContentRecord):
         })
 
     def sequence_integrity(self) -> dict:
-        """Report structural integrity of the ordered decision sequence: detect
-        duplicate ids (positions), and the count. (Gap/broken-ref detection across
-        the full DecisionRecord set is a projector-level check; this validates the
-        manifest's own ordered list.)"""
+        """Report structural integrity of what the manifest itself owns: the ordered
+        decision-id list and the episode boundaries. Reports duplicate decision ids
+        and whether ``episode_boundaries.episode_starts`` is a well-formed, in-range,
+        strictly-ascending, gap-free-from-zero start list. (Cross-record reference
+        validation over the full DecisionRecord set is a projector-level check —
+        the manifest does not hold the referenced records.)"""
         ids = self.content["ordered_decision_ids"]
-        return {"length": len(ids), "duplicates": len(ids) != len(set(ids))}
+        eb = self.content["episode_boundaries"]
+        starts = eb.get("episode_starts") if isinstance(eb, dict) else None
+        boundaries_valid = (
+            isinstance(starts, list)
+            and all(isinstance(s, int) and not isinstance(s, bool) for s in starts)
+            and len(set(starts)) == len(starts)          # no duplicate episode starts
+            and sorted(starts) == starts                  # ascending
+            and all(0 <= s < len(ids) for s in starts)    # in range
+            and (len(ids) == 0 or (starts and starts[0] == 0)))  # first episode at 0
+        return {
+            "length": len(ids),
+            "duplicates": len(ids) != len(set(ids)),
+            "episode_boundaries_valid": bool(boundaries_valid),
+        }
