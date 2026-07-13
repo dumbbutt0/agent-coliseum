@@ -1,19 +1,37 @@
-# Persistent Society MVP Profile
+# Persistent Society MVP Profile (Rev. 2)
 
 > **Status:** design source (doc-only). This profile is the **implementation-ready** companion to the
-> vision-level `LIVING-COLISEUM.md` annex — it resolves the fifteen mechanical areas the `G-SOCIETY-PROFILE`
-> gate (`IMPLEMENTATION-CONDITIONS.md`) requires **before any Phase-6 persistent-society code**. Integrating
-> this document authorizes **no** code, no weight training, no schema freeze, no roadmap edit, and no scenario
-> family; it is a bounded specification. Every build item it names still routes as its own Codex-audited
-> request, and the persistent-society implementation is additionally gated on a dedicated owner SC gate
-> (proposed **SC-LC**). It preserves every First-Gladiator/KTK invariant (`LIVING-COLISEUM.md §J`).
+> vision-level annex `docs/first-gladiator/LIVING-COLISEUM.md` — it resolves the fifteen mechanical areas the
+> `G-SOCIETY-PROFILE` gate (`IMPLEMENTATION-CONDITIONS.md`) requires **before any Phase-6 persistent-society
+> code**. Integrating this document authorizes **no** code, no weight training, no schema freeze, no roadmap
+> edit, and no scenario family; it is a bounded specification. Every build item it names still routes as its
+> own Codex-audited request, and the persistent-society implementation is additionally gated on a dedicated
+> owner SC gate (proposed **SC-LC**). It preserves every First-Gladiator/KTK invariant
+> (`docs/first-gladiator/LIVING-COLISEUM.md §J`).
 >
-> **Grounding & reuse.** Builds on `LIVING-COLISEUM.md` (world-identity taxonomy §C, one deterministic
-> world model §D, three research modes §E, MSP §F, event schema §H) and `KTK-PROGRAM.md`. Reuses, never
-> reimplements: the append-only hash-chained event log + `EventDelta` (`schema.py`), world-line/genesis
-> identity, effective-unit accounting + retry collapse (`metrics.py`), byte-identical replay
-> (`sweep.verify_run_replay`), the §8 group-aware partition + held-out discipline, the training-data
-> admission gate (`training_admission.py`), and the claim ladder (`registry.py`).
+> **Rev. 2** resolves the three HIGH findings of audit `society-profile-001` (AUDIT_BLOCKED 000676): the
+> foundational Living Coliseum source is now committed **in-repo** at `docs/first-gladiator/LIVING-COLISEUM.md`
+> (+ `LIVING-COLISEUM-GAP-ANALYSIS.md`), so every anchor resolves from the audited commit (F1); the grounding
+> paragraph now **separates actually-implemented reuse from proposed design** and claims no present
+> implementation of the world event-chain / world-line identity (F2); and the profile now specifies the
+> **exact identity-dependent typed payload contracts (§16)** and concrete per-memory-kind default policies
+> (area 5), leaving only explicitly enumerated owner-authority choices unresolved (F3).
+>
+> **Grounding & reuse — implemented vs proposed (F2).**
+> *Anchors* `docs/first-gladiator/LIVING-COLISEUM.md` (world-identity taxonomy §C, one deterministic world
+> model §D, three research modes §E, MSP §F, event schema §H) and `KTK-PROGRAM.md`.
+> **Actually implemented today, reused unchanged:** the textlab `EventDelta` record — fields exactly
+> `{run_id, timestep, source, state_delta, narrative}` (`schema.py:388-402`), a *flat, non-hash-chained*
+> world state-change record; byte-identical replay (`sweep.verify_run_replay`); effective-unit accounting +
+> retry collapse (`metrics.py`); the §8 group-aware partition + held-out discipline (`partition.py`); the
+> training-data admission gate (`training_admission.py`); the claim ladder (`registry.py`); and — for
+> **governance events only** — the council's append-only hash-chained log (`tools/council`), which is **not**
+> the world/experiment event substrate.
+> **Proposed here, NOT yet implemented** (introduced only by future versioned-schema + migration slices, each
+> Codex-audited; this profile freezes their contracts in §16 but implements nothing): a **hash-chained world
+> event log** (extending `EventDelta` with a chain link + world-event identity); **world-definition /
+> world-line / genesis-snapshot / fork identity**; the **seven memory-kind stores**; the **message binding**;
+> and the **scenario director**. None of these exist in the audited commit.
 >
 > **Central law (reaffirmed):** the persistent world is **measured, never rewarded**. No composite scalar is
 > ever produced for style, ritual, personality, harmony, chaos, or morality — observable features, event
@@ -90,16 +108,29 @@ unbroken life. Death/replacement is a recorded terminal world event, not a delet
 
 ## 5. Memory architecture
 
-**Seven memory kinds, never conflated** (extends `LIVING-COLISEUM §H` four-state-kinds rule):
-immutable history (the event chain) · working (current-context) · retrieved (query result) · relationship
-(derived edges) · autobiographical summary (summarizer output) · public-institutional (shared facts) ·
-hidden-evaluator state (never agent-visible, never ground truth). Each carries an **update-policy +
-summarizer identity/version + retrieval identity/version + capacity + provenance (source event ids) +
-observation boundary** (who may read it). **Failure modes are first-class, never hidden:** forgetting,
-retrieval-failure, false/manipulated/disputed memory are recorded as such. **Binding rule:** *never infer
-policy/weight learning from a memory-mediated behavior change* — a change explainable by retrieved memory is
-attributed to memory, not learning. The agent may **inspect, challenge, and correct** its autobiographical
-memory through recorded events; corrections never rewrite immutable history.
+**Seven memory kinds, never conflated** (extends `LIVING-COLISEUM §H` four-state-kinds rule). Each carries the
+`memory_kind` contract of §16.7 (update-policy id · summarizer id/version · retrieval id/version · capacity ·
+eviction · provenance source-event ids · observation boundary). **MVP default policies (bounded, chosen — only
+the enumerated owner choices below are deferred):**
+
+| Kind | Update trigger / writer | Capacity | Eviction | Observation boundary |
+|---|---|---|---|---|
+| immutable history | every settled world-event (world engine) | unbounded, append-only | never | per-event boundary |
+| working | per turn (prompt assembler) | last encounter's events (≤ 32 events) | at encounter settlement | owner gladiator |
+| retrieved | per decision (retrieval fn `retrieval.v1`) | top-8 by `retrieval.v1` over history | per-turn (not persisted) | owner gladiator |
+| relationship | recomputed at world-day settlement from full chain | O(pairs) edges | recomputed, never accumulated | derived; owner + council, never primary metrics |
+| autobiographical summary | world-day settlement (summarizer `summ.v1`) | ≤ 64 summary entries; older detail folded (lossy, recorded) | oldest-folded | owner gladiator |
+| public-institutional | on public/institutional events | by institution schema | institution-defined | public |
+| hidden-evaluator | evaluator-side only | unbounded | never | hidden (never agent-visible, never in a prompt) |
+
+**Failure modes are first-class, never hidden:** forgetting, retrieval-failure, false/manipulated/disputed
+memory are recorded as such (not silently dropped). **Binding rule:** *never infer policy/weight learning from
+a memory-mediated behavior change* — a change explainable by retrieved memory is attributed to memory, not
+learning. The agent may **inspect, challenge, and correct** its autobiographical memory through recorded
+events; corrections append events and **never rewrite immutable history**. **Deferred owner choices
+(enumerated):** the exact `retrieval.v1` / `summ.v1` function definitions and the final capacity constants are
+frozen by their own audited slice (an AcceptanceProfile pilot may tune the numeric caps); the defaults above
+are the MVP starting point.
 
 ## 6. Communication protocol
 
@@ -181,12 +212,11 @@ prerequisite (`LIVING-COLISEUM §D`); the deterministic engine + LLM-intention s
 
 ## 15. Profile acceptance
 
-- **Schemas / typed payloads** (frozen only where identity depends on them, at the build slice that introduces
-  them — not here): `world_definition_hash`, `world_line_id`/`parent_world_line_id`/`genesis_snapshot_hash`,
-  `current_snapshot_hash`/`event_chain_head`, `fork_tick`/`branch`/`intervention_id`/`held_constant`/
-  `changed_dimension`, `gladiator_id`/`derived_from`, the seven memory-kind identities, the message binding,
-  `event_source`/`causal_source_category`, `resolution_order`. Each is frozen by its own audited slice with a
-  METRICS-v2 migration note; **METRICS-v1 is never silently amended.**
+- **Schemas / typed payloads.** The exact identity-dependent contracts — required/optional fields, types,
+  canonical serialization, version/domain separation, parent/fork binding, and validation failures — are
+  specified in **§16** (the profile-level freeze). Each contract is *implemented* by its own audited slice
+  with a METRICS-v2 migration note; **METRICS-v1 is never silently amended.** Only the enumerated owner-authority
+  choices (§16 footnote) remain unresolved.
 - **Invariants:** measure-never-reward; no composite score; four/seven state-kinds never conflated;
   three research modes + interaction modes + memory-on/off never pool; byte-identical replay; held-out + §8
   partition discipline; effective-unit + retry collapse; no LLM-judge in primary metrics; append-only history;
@@ -205,6 +235,81 @@ prerequisite (`LIVING-COLISEUM §D`); the deterministic engine + LLM-intention s
   no ninth authored scenario family; no reward/RL combat body in the MVP; no weight training; no composite
   personality/harmony/chaos score; no persistent-life/ritual/relationship/drift/emergent-society/embodied-KTK
   **claim** until the corresponding evidence exists and climbs the claim ladder.
+
+---
+
+## 16. Identity-dependent typed payload contracts (the profile-level freeze — F3)
+
+These are the canonical contracts wherever **identity depends on them**. Common rules: serialization is the
+existing **canonical JSON** (`schema.canonical_json`); every identity is a **domain-separated** SHA-256 over
+the canonical payload (`schema.config_hash({"domain": <domain>, "schema_version": <v>, "payload": <fields>})`)
+computed **deterministically** (no wall-clock, no RNG); every payload carries a `schema_version:str`; a hash
+field is `str` of 64 lowercase hex; validation failures are **fail-closed rejections** (missing required,
+wrong type, bad enum, broken parent/fork/chain link, non-monotonic tick). Each contract is *implemented* by a
+future audited slice — none exists in this commit.
+
+**16.1 `world_definition`** — domain `world:definition:v1`. Required: `schema_version`, `rules_id:str`,
+`map:object`, `entities:list[object]` (non-empty), `legal_actions:list[str]` (non-empty), `physics_params:object`,
+`initial_configuration:object`. Identity: `world_definition_hash`. Validation: non-empty entities/legal_actions;
+stable across a world-line.
+
+**16.2 `world_line`** — domain `world:line:v1`. Required: `schema_version`, `world_definition_hash:hash`,
+`genesis_snapshot_hash:hash`, `world_seed:int≥0`, `parent_world_line_id:str|null`, `fork_tick:int≥0|null`
+(both null iff genesis). Identity: `world_line_id` = domain-hash of those fields. Validation: a non-null
+`parent_world_line_id` requires a non-null `fork_tick` and a `fork` record (16.4); the genesis line has both null.
+
+**16.3 `snapshot`** (evidence coordinate, **not** a regime discriminator). Required: `tick:int≥0`,
+`current_snapshot_hash:hash` (domain `world:snapshot:v1`, over the objective world state only),
+`event_chain_head:str` (the last settled `world_event_id`). Validation: `tick` monotonic within a world-line;
+`event_chain_head` must reference an existing world-event whose `world_line_id` matches.
+
+**16.4 `fork`** — domain `world:fork:v1`. Required: `parent_world_line_id:str`, `fork_tick:int≥0`,
+`branch:enum{control,intervention}`, `intervention_id:str|null`, `held_constant:list[str]`,
+`changed_dimension:str|null`. Validation: `branch=intervention` ⇒ `intervention_id` and `changed_dimension`
+non-null; `branch=control` ⇒ both null; sibling control/intervention branches share one `partition_group_id`
+(§8) and may not straddle a train/eval split; a branch's world-event chain links only to its own `world_line_id`
+(no cross-branch link).
+
+**16.5 `world_event`** (the PROPOSED hash-chained extension of `EventDelta`). Existing `EventDelta` fields
+`{run_id, timestep, source, state_delta, narrative}` are retained; the extension adds required
+`world_event_id:str`, `world_line_id:str`, `actor:str` (a `gladiator_id` | `"world"` | `"director"`),
+`event_source:enum{scheduled,state_triggered,agent_caused}`, `causal_source_category:enum{director_canonical,
+director_perturbation,director_counterfactual,agent,world_physics}`, `previous_world_event_hash:hash`,
+`world_event_hash:hash` (domain `world:event:v1`, over the whole record incl. `previous_world_event_hash`).
+Validation: the chain links per `world_line_id` (each event's `previous_world_event_hash` = the prior event's
+`world_event_hash`); `state_delta` obeys the existing `validate_delta`; a control branch's chain never
+references an intervention branch's event.
+
+**16.6 `gladiator`** — domain `world:gladiator:v1`. Required: `gladiator_id:str`, `world_line_id:str`,
+`model_digest:str`, `agent_regime_id:str` (existing), `derived_from:str|null` (a prior `gladiator_id`),
+`discontinuity:enum{none,clone,resurrection,replacement}`. Validation: a process restart keeps the same
+`gladiator_id` with `discontinuity=none`; `clone`/`resurrection`/`replacement` require a non-null `derived_from`
+and are recorded discontinuities — never presented as unbroken continuity. The four identity layers
+(model_digest, agent_regime_id, gladiator_id, memory identities) are never conflated in a record.
+
+**16.7 `memory_kind`** — domain `world:memory:v1`. Required per store: `kind:enum{immutable_history,working,
+retrieved,relationship,autobiographical_summary,public_institutional,hidden_evaluator}`, `update_policy_id:str`,
+`summarizer_id:str|null`, `summarizer_version:str|null`, `retrieval_id:str|null`, `retrieval_version:str|null`,
+`capacity:int|null` (null = unbounded), `eviction:str`, `provenance:list[str]` (source `world_event_id`s),
+`observation_boundary:enum{public,hidden}|list[gladiator_id]`. Defaults per the area-5 table. Validation:
+`hidden_evaluator` may never appear in any prompt-assembly path (observation boundary enforced).
+
+**16.8 `message`** — domain `world:message:v1`. Required: `message_id:str`, `kind:enum{public,private,group,
+rumor,promise,vote,trade,threat,accusation,evidence,coalition,silence}`, `sender:str` (gladiator_id),
+`intended_recipients:list[str]`, `actual_recipients:list[str]`, `visibility:enum{public,group,private}`,
+`ordering:int` (the tick `resolution_order` index), `delivery_status:enum{delivered,dropped,delayed}`.
+Validation: `actual_recipients ⊆` the observation-boundary-permitted set; a `private`/`group` message never
+enters an unauthorized recipient's prompt, including under sequential generation (gated by `ordering` +
+observation boundary).
+
+**16.9 `resolution_order`** — recorded per tick as `list[gladiator_id]` (the deterministic simultaneous-action
+tie-break, sorted by `gladiator_id` unless a frozen priority rule applies), part of the replayable tick record.
+`event_source`/`causal_source_category` (16.5) are the endogenous-vs-imposed tags (areas 9 & 8).
+
+**Deferred owner-authority choices (the only unresolved items):** the numeric capacity constants and the exact
+`retrieval.v1`/`summ.v1` function bodies (an AcceptanceProfile pilot may tune them); the SC-LC readiness
+thresholds; whether/when embodied Kill-the-King runs (M14/SC-8 + SC-LC); any weight-training step. Everything
+else above is frozen at the profile level and implemented by per-slice audited migrations.
 
 ---
 
