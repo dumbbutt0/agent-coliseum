@@ -140,8 +140,9 @@ actor-safe references**: the `actor_observation_hash`, the `legal_action_set` ha
 of the prior decision, not the privileged record), `termination_kind`, and the four-layer action split. It
 carries a **removed-references set** naming what was stripped (`privileged_observation_hash`, world-instance)
 so the omission is explicit, not silent. The `ActorDecisionRecord` has its **own** domain-separated identity
-(`_domain: "actor_decision"`) computed from actor-only content (self-excluded per §3); its id and every
-reference in it is recomputable with the privileged record and privileged observation **physically absent**
+(`_domain: "trs.actor_decision.v1"`, exact keys per Appendix A) computed from actor-only content
+(self-excluded per §3); its id and every reference in it is recomputable with the privileged record and
+privileged observation **physically absent**
 (the actor-only reconstruction guarantee). `assert_no_privileged_leak` runs over the actor projection and
 fails closed if any privileged reference (direct or transitively resolvable) is present. A privileged
 reference must never be resolvable from an actor export.
@@ -178,9 +179,9 @@ this fixed order, each self-excluded from its own preimage (§3):
 2. `fork_id = config_hash({_domain: "trs.counterfactual_fork.v1", schema_version, source_trajectory_id,
    source_fork_decision_hash, source_env_identity, source_policy_identity, changed_dimension,
    unchanged_comparison_dims, branch_world_line_id})` — references the already-built `branch_world_line_id`.
-3. The CounterfactualFork record's own id (if distinct from `fork_id`) is `config_hash` of its content with
-   its id field absent. Nothing references a not-yet-built id; `fork_id`, `world_line_id`, and the resulting
-   branch identity form a strict order, never a cycle.
+3. `fork_id` **is** the CounterfactualFork record's identity — there is no separate record id. Nothing
+   references a not-yet-built id; `fork_id`, `world_line_id`, and the resulting branch identity form a strict
+   order, never a cycle.
 
 ### 4.8 LabelRecord — governed annotations (structural only; **gated**)
 Owns (structural slots only): `label_schema_version`, `label_id`, `label_kind`, `label_value`,

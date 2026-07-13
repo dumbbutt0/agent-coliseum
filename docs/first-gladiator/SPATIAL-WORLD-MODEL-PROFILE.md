@@ -129,12 +129,14 @@ objects in its current room; sees portals attached to its room and only the port
 does not see entities in unrelated rooms; a held object is visible per object + holder rules; hidden objects
 are excluded unless a deterministic reveal condition holds; adjacent-room hearing is off by default (or
 narrowly versioned). Each observation carries: observer identity; `world_line_id`; logical step; perception
-regime; visible room identity; visible entity identities; and the observable state projection. Its
-`observation_hash = config_hash({_domain: "trs.observation." + view_kind + ".v1", schema_version,
-view_kind, observer_identity, world_line_id, logical_step, perception_regime, visible_room_identity,
-visible_entity_identities, observable_state_projection})` (literal domains + exact keys in Appendix A) —
-self-excluded from its own preimage (§3/§4), with `view_kind` in the domain so the actor and privileged
-artifacts of the same emission can never alias.
+regime; visible room identity; visible entity identities; and the observable state projection. It is an
+`ObservationArtifact` and uses the **single canonical** identity shape of `TRAINING-READINESS-SUBSTRATE-PROFILE.md`
+Appendix A: `observation_hash = config_hash({_domain: "trs.observation." + view_kind + ".v1", schema_version,
+view_kind, content})`, where for a spatial producer `content` is the canonical dict `{observer_identity,
+world_line_id, logical_step, perception_regime, visible_room_identity, visible_entity_identities,
+observable_state_projection}` — self-excluded (§3/§4), with `view_kind` in the domain so the actor and
+privileged artifacts of the same emission can never alias. Every producer (spatial or vignette) uses this
+same `{schema_version, view_kind, content}` preimage; only the `content` payload differs.
 Authoritative hidden fields are never included in the actor preimage. The renderer emits the **actor**
 `ObservationArtifact` (this projection); a separate **privileged** `ObservationArtifact` carries world truth
 under `view_kind = privileged`.
@@ -234,8 +236,16 @@ same id from the same content. `spatial_schema_version` is the frozen `SPATIAL_S
 | `agent_body_id` | `spatial.agent_body_instance.v1` | `spatial_schema_version`, `agent_body_spec_id`, `world_line_id`, `deterministic_logical_instance_key` |
 | `world_line_id` (root) | `spatial.world_line.v1` | `spatial_schema_version`, `spatial_world_spec_id`, `initial_state_key` |
 | `world_line_id` (forked) | `spatial.world_line.v1` | `spatial_schema_version`, `parent_world_line_id`, `source_fork_decision_hash`, `changed_dimension`, `unchanged_comparison_dims` |
-| `observation_hash` (per view) | `trs.observation.actor.v1` / `trs.observation.privileged.v1` | `schema_version`, `view_kind`, `observer_identity`, `world_line_id`, `logical_step`, `perception_regime`, `visible_room_identity`, `visible_entity_identities`, `observable_state_projection` |
+| `observation_hash` (per view) | `trs.observation.actor.v1` / `trs.observation.privileged.v1` | `schema_version`, `view_kind`, `content` — the **single canonical** ObservationArtifact shape (TRS Appendix A). For a spatial producer, `content` = `{observer_identity, world_line_id, logical_step, perception_regime, visible_room_identity, visible_entity_identities, observable_state_projection}` |
 
-The spatial trace record ids (`SPATIAL_WORLD_INITIALIZED` … `SPATIAL_WORLD_COMPLETED`, §12) bind the fields
-listed in §12 under the literal `_domain` `spatial.trace.<event_name>.v1`, self-excluded, with pre/post-state
-and action/observation hashes referenced (not recomputed).
+**Spatial trace record ids — one exact preimage per event.** The literal `_domain` is exactly one of:
+`spatial.trace.spatial_world_initialized.v1`, `spatial.trace.entity_instantiated.v1`,
+`spatial.trace.action_proposed.v1`, `spatial.trace.action_applied.v1`, `spatial.trace.action_refused.v1`,
+`spatial.trace.location_changed.v1`, `spatial.trace.portal_state_changed.v1`,
+`spatial.trace.object_state_changed.v1`, `spatial.trace.observation_emitted.v1`,
+`spatial.trace.spatial_world_completed.v1`. Every trace id uses the **same** exhaustive key set (all keys
+always present; a key that does not apply to an event holds the literal `null`, never omitted), self-excluded:
+`trace_schema_version`, `spatial_schema_version`, `world_line_id`, `scenario_id`, `experiment_id`,
+`logical_step`, `ordering_key`, `actor` (null except `action_*`/`*_changed`/`observation_emitted`),
+`pre_state_hash`, `post_state_hash`, `action_hash` (null except `action_*` and `*_changed`),
+`observation_hash` (null except `observation_emitted`). All referenced hashes are referenced, never recomputed.
