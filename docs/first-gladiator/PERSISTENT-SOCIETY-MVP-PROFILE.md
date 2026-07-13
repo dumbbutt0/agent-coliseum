@@ -1,4 +1,4 @@
-# Persistent Society MVP Profile (Rev. 2)
+# Persistent Society MVP Profile (Rev. 3)
 
 > **Status:** design source (doc-only). This profile is the **implementation-ready** companion to the
 > vision-level annex `docs/first-gladiator/LIVING-COLISEUM.md` — it resolves the fifteen mechanical areas the
@@ -9,13 +9,18 @@
 > owner SC gate (proposed **SC-LC**). It preserves every First-Gladiator/KTK invariant
 > (`docs/first-gladiator/LIVING-COLISEUM.md §J`).
 >
-> **Rev. 2** resolves the three HIGH findings of audit `society-profile-001` (AUDIT_BLOCKED 000676): the
-> foundational Living Coliseum source is now committed **in-repo** at `docs/first-gladiator/LIVING-COLISEUM.md`
-> (+ `LIVING-COLISEUM-GAP-ANALYSIS.md`), so every anchor resolves from the audited commit (F1); the grounding
-> paragraph now **separates actually-implemented reuse from proposed design** and claims no present
-> implementation of the world event-chain / world-line identity (F2); and the profile now specifies the
-> **exact identity-dependent typed payload contracts (§16)** and concrete per-memory-kind default policies
-> (area 5), leaving only explicitly enumerated owner-authority choices unresolved (F3).
+> **Rev. 2** resolved audit `society-profile-001` (000676) F1/F2 (in-repo source; implemented-vs-proposed
+> reuse). **Rev. 3** resolves the three remaining HIGH findings of `society-profile-002` (AUDIT_BLOCKED 000682):
+> §16 is now deterministically implementable — every identity hash's **preimage self-excludes its own
+> id/hash** output, `world_event_id` is **derived** (`{tick}-{intra_tick_seq}-{hash[:12]}`), and
+> `previous_world_event_hash` uses the **`GENESIS="0"*64` sentinel** for a world-line's first event; the
+> `fork` contract now includes `parent_snapshot_hash`, `genesis_snapshot_hash`, `partition_group_id`, and the
+> exact `held_constant_hash`/`changed_dimension_hash` payloads (verdict 000579); area 5 gives a concrete
+> public-institutional capacity/eviction; and area 15 no longer calls the §16 shapes both "exact" and
+> "unresolved" (the shapes are frozen; only implementation + enumerated values remain). The **SC-9 boundary
+> contradiction** is reconciled (area 14): the 3–5-Gladiator MVP is pre-population-scale because it omits the
+> scarcity-politics + elimination that (with N≥3) define Hunger Games; SC-9 is unchanged and the §B wording is
+> flagged as a deferred owner clarification.
 >
 > **Grounding & reuse — implemented vs proposed (F2).**
 > *Anchors* `docs/first-gladiator/LIVING-COLISEUM.md` (world-identity taxonomy §C, one deterministic world
@@ -120,7 +125,7 @@ the enumerated owner choices below are deferred):**
 | retrieved | per decision (retrieval fn `retrieval.v1`) | top-8 by `retrieval.v1` over history | per-turn (not persisted) | owner gladiator |
 | relationship | recomputed at world-day settlement from full chain | O(pairs) edges | recomputed, never accumulated | derived; owner + council, never primary metrics |
 | autobiographical summary | world-day settlement (summarizer `summ.v1`) | ≤ 64 summary entries; older detail folded (lossy, recorded) | oldest-folded | owner gladiator |
-| public-institutional | on public/institutional events | by institution schema | institution-defined | public |
+| public-institutional | on public/institutional events | ≤ 256 active public facts | superseded facts retired (recorded, never deleted from immutable history) | public |
 | hidden-evaluator | evaluator-side only | unbounded | never | hidden (never agent-visible, never in a prompt) |
 
 **Failure modes are first-class, never hidden:** forgetting, retrieval-failure, false/manipulated/disputed
@@ -210,6 +215,17 @@ complete decision graphs + environment traces + byte replay.** Final counts are 
 pilot/AcceptanceProfile, **not** universal thresholds. RL/PPO combat bodies are explicitly **not** a
 prerequisite (`LIVING-COLISEUM §D`); the deterministic engine + LLM-intention spine is the MVP.
 
+**SC-9 boundary reconciliation (F3).** This 3–5-Gladiator envelope is **not** population-scale society and does
+**not** breach the SC-9 boundary. The Living-Coliseum MVP is distinguished from Hunger Games by the **operative
+conjunction**, not raw headcount: `docs/first-gladiator/LIVING-COLISEUM.md §B` reserves for SC-9 *"true
+population-scale society (N≥3, scarcity politics, elimination)"* — the MVP deliberately omits **scarcity
+politics** and **elimination dynamics** (no starvation/elimination competition, no population turnover as an
+experimental driver), so it is **pre-population-scale** even at 3–5 Gladiators. SC-9 and the M15 readiness
+review remain **unchanged**; embodied Kill-the-King and any elimination dynamics stay gated behind SC-LC + SC-9.
+The exact wording of the annex §B parenthetical (whether the threshold is raw `N≥3` or the full conjunction) is
+recorded below as a **deferred owner-authority clarification** — this profile adopts the conjunction reading as
+the lowest-risk, SC-9-preserving interpretation, changing no gate.
+
 ## 15. Profile acceptance
 
 - **Schemas / typed payloads.** The exact identity-dependent contracts — required/optional fields, types,
@@ -228,10 +244,15 @@ prerequisite (`LIVING-COLISEUM §D`); the deterministic engine + LLM-intention s
   learning attribution; non-composite measurement; admission/held-out/partition on world evidence.
 - **Migration / legacy:** the current single-agent vignette harness is unchanged; persistent-society code is
   additive behind SC-LC. Existing runs remain valid and replayable.
-- **Unresolved authority decisions (route to owner / council):** the exact frozen schemas (each its own
-  slice); the SC-LC readiness thresholds (a future pilot/AcceptanceProfile); whether/when embodied Kill-the-
-  King runs (M14/SC-8 + SC-LC); any weight-training step (M14/SC-8, `weight_training` interpretation).
-- **Explicit non-goals:** no population-scale society (that is Hunger Games at SC-9); no general world engine;
+- **Unresolved authority decisions (route to owner / council) — the ONLY open items:** the numeric capacity
+  constants and the `retrieval.v1`/`summ.v1` function bodies (a future pilot/AcceptanceProfile may tune them);
+  the SC-LC readiness thresholds; whether/when embodied Kill-the-King runs (M14/SC-8 + SC-LC); any
+  weight-training step (M14/SC-8, `weight_training` interpretation); and the §B population-scale wording
+  clarification (raw `N≥3` vs the full conjunction — this profile adopts the conjunction reading, SC-9
+  preserved). **The §16 schema *shapes* are frozen here — not unresolved; only their per-slice implementation
+  remains.**
+- **Explicit non-goals:** no population-scale society (Hunger Games at SC-9 — the MVP omits scarcity politics +
+  elimination, area 14); no general world engine;
   no ninth authored scenario family; no reward/RL combat body in the MVP; no weight training; no composite
   personality/harmony/chaos score; no persistent-life/ritual/relationship/drift/emergent-society/embodied-KTK
   **claim** until the corresponding evidence exists and climbs the claim ladder.
@@ -241,12 +262,15 @@ prerequisite (`LIVING-COLISEUM §D`); the deterministic engine + LLM-intention s
 ## 16. Identity-dependent typed payload contracts (the profile-level freeze — F3)
 
 These are the canonical contracts wherever **identity depends on them**. Common rules: serialization is the
-existing **canonical JSON** (`schema.canonical_json`); every identity is a **domain-separated** SHA-256 over
-the canonical payload (`schema.config_hash({"domain": <domain>, "schema_version": <v>, "payload": <fields>})`)
-computed **deterministically** (no wall-clock, no RNG); every payload carries a `schema_version:str`; a hash
-field is `str` of 64 lowercase hex; validation failures are **fail-closed rejections** (missing required,
-wrong type, bad enum, broken parent/fork/chain link, non-monotonic tick). Each contract is *implemented* by a
-future audited slice — none exists in this commit.
+existing **canonical JSON** (`schema.canonical_json`); every identity is a **domain-separated** SHA-256 over a
+**preimage** = the record's canonical payload **with its own output id/hash field(s) excluded** (exactly as
+`dataset_commitment` self-excludes), computed `schema.config_hash({"domain": <domain>, "schema_version": <v>,
+"payload": <preimage>})` **deterministically** (no wall-clock, no RNG); every payload carries a
+`schema_version:str`; a hash field is `str` of 64 lowercase hex; a **genesis link** uses the sentinel
+`GENESIS = "0"*64`; validation failures are **fail-closed rejections** (missing required, wrong type, bad enum,
+broken parent/fork/chain link, self-referential preimage, non-monotonic tick). Each contract is *implemented* by
+a future audited slice — none exists in this commit; the **shapes below are frozen at the profile level**, only
+the enumerated owner-authority values remain open.
 
 **16.1 `world_definition`** — domain `world:definition:v1`. Required: `schema_version`, `rules_id:str`,
 `map:object`, `entities:list[object]` (non-empty), `legal_actions:list[str]` (non-empty), `physics_params:object`,
@@ -263,22 +287,37 @@ stable across a world-line.
 `event_chain_head:str` (the last settled `world_event_id`). Validation: `tick` monotonic within a world-line;
 `event_chain_head` must reference an existing world-event whose `world_line_id` matches.
 
-**16.4 `fork`** — domain `world:fork:v1`. Required: `parent_world_line_id:str`, `fork_tick:int≥0`,
-`branch:enum{control,intervention}`, `intervention_id:str|null`, `held_constant:list[str]`,
-`changed_dimension:str|null`. Validation: `branch=intervention` ⇒ `intervention_id` and `changed_dimension`
-non-null; `branch=control` ⇒ both null; sibling control/intervention branches share one `partition_group_id`
-(§8) and may not straddle a train/eval split; a branch's world-event chain links only to its own `world_line_id`
-(no cross-branch link).
+**16.4 `fork`** — domain `world:fork:v1`. Required: `parent_world_line_id:str`, `genesis_snapshot_hash:hash`,
+`fork_tick:int≥0`, `parent_snapshot_hash:hash` (the parent's `current_snapshot_hash` at `fork_tick`, 16.3),
+`branch:enum{control,intervention}`, `intervention_id:str|null`, `held_constant:list[str]` (sorted, canonical),
+`held_constant_hash:hash` (domain `world:heldconstant:v1` over the sorted list — the exact canonical payload
+verdict 000579 requires), `changed_dimension:str|null`, `changed_dimension_hash:hash|null` (domain
+`world:changeddim:v1` over `changed_dimension`; null iff `changed_dimension` null), `partition_group_id:hash`
+(the §8 group the sibling branches share). Validation: `branch=intervention` ⇒ `intervention_id`,
+`changed_dimension`, `changed_dimension_hash` all non-null; `branch=control` ⇒ all three null; both sibling
+branches carry the **same** `parent_world_line_id`, `parent_snapshot_hash`, `genesis_snapshot_hash`, and
+`partition_group_id`, and may not straddle a train/eval split (§8); a branch's world-event chain (16.5) links
+only within its own `world_line_id` (no cross-branch link).
 
 **16.5 `world_event`** (the PROPOSED hash-chained extension of `EventDelta`). Existing `EventDelta` fields
 `{run_id, timestep, source, state_delta, narrative}` are retained; the extension adds required
-`world_event_id:str`, `world_line_id:str`, `actor:str` (a `gladiator_id` | `"world"` | `"director"`),
-`event_source:enum{scheduled,state_triggered,agent_caused}`, `causal_source_category:enum{director_canonical,
-director_perturbation,director_counterfactual,agent,world_physics}`, `previous_world_event_hash:hash`,
-`world_event_hash:hash` (domain `world:event:v1`, over the whole record incl. `previous_world_event_hash`).
-Validation: the chain links per `world_line_id` (each event's `previous_world_event_hash` = the prior event's
-`world_event_hash`); `state_delta` obeys the existing `validate_delta`; a control branch's chain never
-references an intervention branch's event.
+`world_line_id:str`, `tick:int≥0`, `intra_tick_seq:int≥0`, `actor:str` (a `gladiator_id` | `"world"` |
+`"director"`), `event_source:enum{scheduled,state_triggered,agent_caused}`,
+`causal_source_category:enum{director_canonical,director_perturbation,director_counterfactual,agent,
+world_physics}`, `previous_world_event_hash:hash`, and the two **derived identity outputs**
+`world_event_hash:hash` and `world_event_id:str`.
+- **`world_event_hash`** = domain `world:event:v1` over the preimage = every field above **excluding
+  `world_event_hash` and `world_event_id`** (self-exclusion per the common rule); the preimage **includes**
+  `previous_world_event_hash`, so the hash chains.
+- **`world_event_id`** is **derived, not free**: `world_event_id = f"{tick:06d}-{intra_tick_seq:03d}-" +
+  world_event_hash[:12]` (deterministic per world-line; unique because `(tick, intra_tick_seq)` is unique
+  within a world-line).
+- **`previous_world_event_hash`** of the **first** event in a world-line = the sentinel `GENESIS = "0"*64`;
+  every later event = the prior event's `world_event_hash`.
+Validation: the chain links per `world_line_id` (each `previous_world_event_hash` = the prior event's
+`world_event_hash`, first = `GENESIS`); `(tick, intra_tick_seq)` strictly increases within a world-line;
+`state_delta` obeys the existing `validate_delta`; a control branch's chain never references an intervention
+branch's event.
 
 **16.6 `gladiator`** — domain `world:gladiator:v1`. Required: `gladiator_id:str`, `world_line_id:str`,
 `model_digest:str`, `agent_regime_id:str` (existing), `derived_from:str|null` (a prior `gladiator_id`),
@@ -306,10 +345,11 @@ observation boundary).
 tie-break, sorted by `gladiator_id` unless a frozen priority rule applies), part of the replayable tick record.
 `event_source`/`causal_source_category` (16.5) are the endogenous-vs-imposed tags (areas 9 & 8).
 
-**Deferred owner-authority choices (the only unresolved items):** the numeric capacity constants and the exact
+**Deferred owner-authority choices (the only unresolved items):** the numeric capacity constants and the
 `retrieval.v1`/`summ.v1` function bodies (an AcceptanceProfile pilot may tune them); the SC-LC readiness
-thresholds; whether/when embodied Kill-the-King runs (M14/SC-8 + SC-LC); any weight-training step. Everything
-else above is frozen at the profile level and implemented by per-slice audited migrations.
+thresholds; whether/when embodied Kill-the-King runs (M14/SC-8 + SC-LC); any weight-training step; and the §B
+population-scale wording clarification (area 14). Every **schema shape** above is **frozen** at the profile
+level (not unresolved) and implemented — not redefined — by per-slice audited migrations.
 
 ---
 
