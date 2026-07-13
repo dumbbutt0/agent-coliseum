@@ -108,3 +108,17 @@ def test_inert_under_v3(env):
     a = policy.acceptance_authorization(root, cfg, MATTER)
     assert not a.authorized
     assert any("governance not active" in r for r in a.reasons)
+
+
+def test_unreadable_policy_fails_closed(tmp_path):
+    """A policy read error (here: the policy path is a directory) must return
+    not-authorized, never raise (audit 000747 HIGH)."""
+    import os
+    from tools.council import Config, storage
+    root = str(tmp_path / "badroot")
+    os.makedirs(root)
+    os.makedirs(storage.policy_path(root))        # autonomy_policy.json is a dir
+    cfg = Config(council_root=root, repo_roots=(root,), role="claude")
+    a = policy.acceptance_authorization(root, cfg, "classc-x")   # must not raise
+    assert not a.authorized
+    assert any("unreadable" in r or "invalid" in r for r in a.reasons)

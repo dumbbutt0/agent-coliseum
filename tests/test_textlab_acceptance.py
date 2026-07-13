@@ -96,3 +96,23 @@ def test_claim_not_found(monkeypatch):
     new, res = accepted_transition("r", "c", _claims(), "nope", "classc-m",
                                    {"e1", "e2"})
     assert not res["accepted"] and "not found" in res["reason"]
+
+
+# ------------------------------------------- audit 000747: fail-closed on bad input
+
+@pytest.mark.parametrize("bad", [None, {"nope": 1}, {"claims": "notalist"}, 42])
+def test_malformed_registry_refuses_without_raising(monkeypatch, bad):
+    _patch(monkeypatch, _auth())
+    new, res = accepted_transition("r", "c", bad, "c1", "classc-m", {"e1", "e2"})
+    assert new is bad and not res["accepted"]      # input returned unchanged
+    assert "malformed" in res["reason"]
+
+
+def test_authorization_error_refuses_without_raising(monkeypatch):
+    def boom(root, cfg, matter):
+        raise OSError("policy path is a directory")
+    monkeypatch.setattr(acceptance, "acceptance_authorization", boom)
+    claims = _claims()
+    new, res = accepted_transition("r", "c", claims, "c1", "classc-m", {"e1", "e2"})
+    assert not res["accepted"] and "authorization failed" in res["reason"]
+    assert new["claims"][0]["state"] == "replicated"   # unchanged

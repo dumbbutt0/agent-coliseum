@@ -1176,9 +1176,9 @@ def acceptance_authorization(root: str, cfg: Config,
     reasons: list = []
     try:
         policy, policy_hash = load_policy(root)
-    except SchemaViolation as exc:
+    except Exception as exc:   # SchemaViolation, OSError, IsADirectoryError, ... -> fail closed
         return AcceptanceAuthorization(False, None, None, None,
-                                       [f"policy_installed: {exc}"])
+                                       [f"policy unreadable/invalid: {exc}"])
     try:
         report = events_mod.verify_chain(root)
         if not report.healthy:

@@ -38,14 +38,27 @@ def accepted_transition(root, cfg, claims: dict, claim_id: str, matter_id: str,
         return claims, {"accepted": False, "claim_id": claim_id, "reason": reason,
                         "resolved_event_id": None}
 
-    auth = acceptance_authorization(root, cfg, matter_id)
+    # fail-closed on any malformed/missing input BEFORE dereferencing (audit 000747):
+    # a bad registry shape or an authorization-boundary error is a typed refusal that
+    # leaves the input unchanged, never an exception.
+    if not isinstance(claims, dict) or not isinstance(claims.get("claims"), list):
+        return refuse("claims registry is missing or malformed "
+                      "(expected a mapping with a 'claims' list)")
+    try:
+        citable_set = set(citable_experiments or ())
+    except TypeError:
+        return refuse("citable_experiments is not iterable")
+    try:
+        auth = acceptance_authorization(root, cfg, matter_id)
+    except Exception as exc:                      # authorization-boundary -> refuse
+        return refuse(f"authorization failed: {exc}")
     if not auth.authorized:
         return refuse("not authorized by governance: " + "; ".join(auth.reasons))
     if auth.resolution != ACCEPT_RESOLUTION:
         return refuse(f"council resolution is {auth.resolution!r}, not "
                       f"{ACCEPT_RESOLUTION!r}")
 
-    entries = claims.get("claims") or []
+    entries = [c for c in claims["claims"] if isinstance(c, dict)]
     matches = [c for c in entries if c.get("claim_id") == claim_id]
     if len(matches) != 1:
         return refuse(f"claim {claim_id!r} not found (or not unique)")
@@ -60,7 +73,7 @@ def accepted_transition(root, cfg, claims: dict, claim_id: str, matter_id: str,
                       f"(must be one of {_PRE_ACCEPTED})")
     if not (claim.get("statement") or "").strip():
         return refuse("claim has an empty statement")
-    citable = set(claim.get("evidence") or []) & set(citable_experiments)
+    citable = set(claim.get("evidence") or []) & citable_set
     if len(citable) < 2:
         return refuse(f"accepted requires >=2 distinct citable evidence experiments "
                       f"(claim has {len(citable)})")
