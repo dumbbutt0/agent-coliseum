@@ -27,7 +27,9 @@ The resume-checkpoint locator (`locate-resume-checkpoint`, `3443444b`, event 000
 python3 -m tools.council.cli verify-chain                                    # chain healthy
 python3 -m tools.council.cli --role claude locate-resume-checkpoint --json   # policy_pin.live.version == 3
 ```
-- All governance `CHANGE_INTEGRATED` events present (G1–G4 + locator), each **INERT**.
+- All governance `CHANGE_INTEGRATED` events present: **G1–G4 are integrated and INERT
+  under v3**; the **locator is integrated and already live** (read-only discoverability,
+  not v4-gated — it is what runs the pin check above).
 - Working tree clean at the integrated HEAD.
 
 ## The single command (owner-reserved)
@@ -58,20 +60,31 @@ python3 -m tools.council.cli --role human amend-policy \
 
 ## Post-activation verification
 
+The **primary confirmation is `amend-policy`'s own output** — it prints
+`policy amended to version 4`, the `new_hash`, and the `diff`. Then:
+
 ```
-python3 -m tools.council.cli verify-chain
-python3 -m tools.council.cli --role claude status                            # pin shows v4
-python3 -m tools.council.cli --role claude locate-resume-checkpoint --json   # policy_pin.live.version == 4
+python3 -m tools.council.cli verify-chain                                     # chain healthy
+python3 -m tools.council.cli --role claude locate-resume-checkpoint --json    # read policy_pin.live.version == 4
 ```
-**Expected, not an error:** the existing resume checkpoint is pinned to v3, so immediately
-after activation the locator reports `POLICY_PIN_MISMATCH` until the checkpoint is
-refreshed to the v4 pin.
+
+- The **effective pin** is confirmed by the locator's `policy_pin.live.version == 4`
+  field (this is the only CLI surface that emits the pin — `status` does **not** print
+  it; it shows control/identity/chain health only).
+- **Expected, not an error:** immediately after activation the existing resume checkpoint
+  is still pinned to v3, so the locator's overall `status` is `POLICY_PIN_MISMATCH` and it
+  exits non-zero — while `policy_pin.live.version` already reads `4`. This clears once the
+  checkpoint is refreshed to the v4 pin.
+- **`governance.enabled`** is not printed by any read-only command; it is `true` **by
+  construction** in `POLICY_VERSIONS[4]`, so confirming the live pin is version 4
+  establishes that governance is enabled — no separate check is needed.
 
 ## Digest note (why no pre-computed hash)
 
 The v4 on-disk policy file embeds an `amended_utc` timestamp, so its exact hash is known
 only after the write. Verify by confirming `amend-policy` prints **version 4** and a
-`new_hash`, and that `governance.enabled` is true — do not rely on a pre-computed digest.
+`new_hash`, and that the locator reports `policy_pin.live.version == 4` — do not rely on a
+pre-computed digest.
 
 ## Revocation path
 
