@@ -108,6 +108,17 @@ def test_malformed_registry_refuses_without_raising(monkeypatch, bad):
     assert "malformed" in res["reason"]
 
 
+def test_non_mapping_list_element_refuses_unchanged(monkeypatch):
+    """A claims list containing a non-mapping entry (e.g. null) alongside an
+    otherwise-promotable target must refuse UNCHANGED, never raise (audit 000753)."""
+    _patch(monkeypatch, _auth())
+    claims = _claims()
+    claims["claims"].insert(0, None)               # [null, valid promotable c1]
+    new, res = accepted_transition("r", "c", claims, "c1", "classc-m", {"e1", "e2"})
+    assert new is claims and not res["accepted"]   # input returned unchanged, no raise
+    assert "malformed" in res["reason"]
+
+
 def test_authorization_error_refuses_without_raising(monkeypatch):
     def boom(root, cfg, matter):
         raise OSError("policy path is a directory")

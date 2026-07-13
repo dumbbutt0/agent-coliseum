@@ -41,9 +41,10 @@ def accepted_transition(root, cfg, claims: dict, claim_id: str, matter_id: str,
     # fail-closed on any malformed/missing input BEFORE dereferencing (audit 000747):
     # a bad registry shape or an authorization-boundary error is a typed refusal that
     # leaves the input unchanged, never an exception.
-    if not isinstance(claims, dict) or not isinstance(claims.get("claims"), list):
-        return refuse("claims registry is missing or malformed "
-                      "(expected a mapping with a 'claims' list)")
+    if not isinstance(claims, dict) or not isinstance(claims.get("claims"), list) \
+            or any(not isinstance(c, dict) for c in claims["claims"]):
+        return refuse("claims registry is missing or malformed (expected a mapping "
+                      "with a 'claims' list whose every entry is a mapping)")
     try:
         citable_set = set(citable_experiments or ())
     except TypeError:
@@ -58,8 +59,7 @@ def accepted_transition(root, cfg, claims: dict, claim_id: str, matter_id: str,
         return refuse(f"council resolution is {auth.resolution!r}, not "
                       f"{ACCEPT_RESOLUTION!r}")
 
-    entries = [c for c in claims["claims"] if isinstance(c, dict)]
-    matches = [c for c in entries if c.get("claim_id") == claim_id]
+    matches = [c for c in claims["claims"] if c.get("claim_id") == claim_id]
     if len(matches) != 1:
         return refuse(f"claim {claim_id!r} not found (or not unique)")
     claim = matches[0]
