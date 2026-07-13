@@ -942,16 +942,18 @@ def council_resolution_exists(chain: list, matter_id: str) -> bool:
                and e.get("request_id") == matter_id for e in chain)
 
 
-def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
-                     chain: list) -> PolicyDecision:
+def evaluate_class_c(root: str, cfg: Config,
+                     resolution_event: dict) -> PolicyDecision:
     """May a Class-C matter be resolved (COUNCIL_RESOLVED) under governance_v1's
-    FROZEN seven-gate protocol? Self-authenticating and fail-closed: every gate is
-    re-derived from the VERIFIED chain (the preregistration, the codex-approved
-    evidence, and any dissent are chain events — the builder's resolution payload is
-    a set of CLAIMS re-checked here, never trusted). Any unmet gate lands in
-    `reasons`; a non-empty `reasons` means the matter stays UNRESOLVED. Insufficient
-    auditor quorum leaves the matter unresolved — it NEVER escalates to the owner.
-    INERT unless the installed policy equals the effective owner-ratified
+    FROZEN seven-gate protocol? SELF-AUTHENTICATING and fail-closed (audit 000732):
+    it re-reads and hash-verifies the chain FROM ROOT — it never trusts a caller-
+    supplied chain — and evaluates only the candidate `resolution_event` against it.
+    Every gate is re-derived from that verified chain (the preregistration, the
+    codex-approved evidence, and any dissent are chain events; the builder's
+    resolution payload is a set of CLAIMS re-checked here, never trusted). Any unmet
+    gate lands in `reasons`; a non-empty `reasons` means the matter stays UNRESOLVED.
+    Insufficient auditor quorum leaves the matter unresolved — it NEVER escalates to
+    the owner. INERT unless the installed policy equals the effective owner-ratified
     governance-enabled pin (v4+)."""
     from tools.council.schemas import (compute_preregistration_hash,
                                        compute_resolution_hash)
@@ -970,6 +972,18 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
         cond("policy_installed", False, str(exc))
         return PolicyDecision(False, None, reasons, checked)
 
+    # F1 (000732): establish chain provenance FROM ROOT — never a caller argument.
+    report = events_mod.verify_chain(root)
+    if not report.healthy:
+        cond("event_chain_verifies", False,
+             report.error or "torn/incomplete suffix")
+        return PolicyDecision(False, policy_hash, reasons, checked)
+    try:
+        chain = events_mod.read_chain(root, verify=True)
+    except Exception as exc:
+        cond("event_chain_verifies", False, f"chain unreadable: {exc}")
+        return PolicyDecision(False, policy_hash, reasons, checked)
+
     # governance must be ACTIVE on the exact owner-ratified pin (INERT under v3)
     eff_hash, eff_version = effective_policy_pin(chain)
     try:
@@ -984,10 +998,6 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
          and policy_version_of(policy) == eff_version,
          "governance is not active on the owner-ratified pin")
 
-    report = events_mod.verify_chain(root)
-    cond("event_chain_verifies", report.healthy,
-         report.error or ("torn suffix" if report.suffix_incomplete else ""))
-
     payload = resolution_event.get("payload") or {}
     matter_id = resolution_event.get("request_id")
     cond("resolution_payload_bound",
@@ -997,6 +1007,15 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
     cond("matter_not_already_resolved",
          not council_resolution_exists(chain, matter_id),
          "matter already has a COUNCIL_RESOLVED")
+    # F3 (000732): the Class-C matter namespace must not collide with a source
+    # request — a matter_id that is also a source request could let Class-C events
+    # interfere with / borrow the authority of the source-request lifecycle.
+    cond("matter_namespace_clean",
+         not any(e.get("request_id") == matter_id
+                 and e.get("event_type") in ("AUDIT_REQUESTED", "BUILD_STARTED",
+                                             "READY_FOR_REAUDIT")
+                 for e in chain),
+         "matter_id collides with a source request_id")
 
     # --- gate 1a: the preregistration exists, is claude-authored + hash-valid ---
     prereg_id = payload.get("preregistration_event_id")
@@ -1018,8 +1037,17 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
              "preregistration is not a valid claude-authored hash-bound record")
 
     # --- resolve the cited evidence to codex RESULT_APPROVED chain events ---
+    # F2 (000732): DEDUPLICATE cited event ids first — citing the same evidence
+    # twice must never multiply the sample size or the replication count.
     by_id = {e.get("event_id"): (i, e) for i, e in enumerate(chain)}
-    cited = payload.get("evidence_approval_event_ids") or []
+    cited = list(dict.fromkeys(payload.get("evidence_approval_event_ids") or []))
+    # F/HIGH2 (000735): a role label alone NEVER establishes codex authority. Each
+    # cited evidence must be a FULLY validated, chain-bound codex RESULT_APPROVED —
+    # its result-verdict schema + payload hash + authority-context bindings re-checked
+    # against this same verified chain (mirrors the append-time enforcement).
+    from tools.council.schemas import (crosscheck_verdict_bindings,
+                                       validate_verdict_event_payload, CouncilError)
+    requests_proj = state_machine.project(chain)
     evidence = []          # [(index, event, verdict_payload)]
     all_codex_approved = bool(cited)
     for eid in cited:
@@ -1028,7 +1056,14 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
                 or pair[1].get("sender") != "codex":
             all_codex_approved = False
             continue
-        evidence.append((pair[0], pair[1], pair[1].get("payload") or {}))
+        _idx, ev = pair
+        try:
+            validate_verdict_event_payload(ev)
+            crosscheck_verdict_bindings(ev, chain, requests_proj)
+        except (CouncilError, KeyError):
+            all_codex_approved = False
+            continue
+        evidence.append((_idx, ev, ev.get("payload") or {}))
     # gate 6: independent auditor approval (codex; no self-audit — the resolver is
     # claude, the approvals are codex). Insufficient quorum -> unresolved, not owner.
     required = gov.get("class_c_required_auditors") or gov.get("required_auditors") \
@@ -1074,13 +1109,20 @@ def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
         cond("preregistration_and_freshness", False,
              "cannot establish preregistration+evidence ordering")
 
-    # gate 2: evidence adequacy — summed scenarios_run meets the precommitted size.
+    # gate 2: evidence adequacy — scenarios_run summed over UNIQUE evidence
+    # inventories meets the precommitted size (F/HIGH2/HIGH3 000735: no evidence,
+    # citation, or inventory may contribute more than once).
     if prereg is not None:
         min_n = (prereg.get("payload") or {}).get("min_sample_size", 0)
-        total_n = sum((v.get("counts") or {}).get("scenarios_run", 0)
-                      for _i, _e, v in evidence)
+        seen_inv, total_n = set(), 0
+        for _i, _e, v in evidence:
+            inv = v.get("evidence_inventory_hash")
+            if inv in seen_inv:
+                continue
+            seen_inv.add(inv)
+            total_n += (v.get("counts") or {}).get("scenarios_run", 0)
         cond("evidence_adequacy", total_n >= min_n and min_n > 0,
-             f"sample size {total_n} < precommitted min {min_n}")
+             f"unique-inventory sample size {total_n} < precommitted min {min_n}")
 
     # gate 5: metric validity — the resolution metric equals the PRECOMMITTED metric
     # (no post-hoc metric selection).

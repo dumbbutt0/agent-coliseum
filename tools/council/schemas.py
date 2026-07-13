@@ -853,6 +853,7 @@ VERDICT_PAYLOAD_EVENT_TYPES = \
 PREREGISTRATION_DOMAIN = "council:preregistration:v1"
 COUNCIL_RESOLUTION_DOMAIN = "council:council_resolution:v1"
 CLASS_C_FRESHNESS_MODES = ("sealed_inventory", "post_prereg_generation")
+CLASS_C_MATTER_PREFIX = "classc-"   # reserved matter-id namespace (never a source req)
 CLASS_C_PAYLOAD_EVENT_TYPES = frozenset(
     {"PREREGISTRATION", "COUNCIL_RESOLVED", "COUNCIL_DISSENT"})
 
@@ -887,6 +888,13 @@ def validate_class_c_event_payload(event: dict) -> None:
     etype = event["event_type"]
     p = event["payload"]
     matter = event["request_id"]
+    # MEDIUM (000735): Class-C matters live in a mechanically distinct id namespace
+    # so a matter_id can never collide with a source request_id (which never carry
+    # this reserved prefix).
+    if not isinstance(matter, str) or not matter.startswith(CLASS_C_MATTER_PREFIX):
+        raise SchemaViolation(
+            f"{etype}: Class-C matter_id must be namespaced with "
+            f"{CLASS_C_MATTER_PREFIX!r} (got {matter!r})")
     if p.get("matter_id") != matter:
         raise SchemaViolation(
             f"{etype}: payload.matter_id must equal the event request_id")

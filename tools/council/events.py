@@ -283,7 +283,10 @@ def _verify_class_c_resolution(root: str, cfg: Config, chain: list,
     error refuses the append, leaving the matter UNRESOLVED (never escalated to the
     owner)."""
     from tools.council import policy   # lazy: policy imports events
-    decision = policy.evaluate_class_c(root, cfg, event, chain)
+    # evaluate_class_c self-reads + verifies the chain from root (audit 000732) —
+    # it never trusts a caller-supplied chain, so the append-boundary passes only the
+    # candidate resolution event; the preregistration + evidence are already on disk.
+    decision = policy.evaluate_class_c(root, cfg, event)
     if not decision.auto_approve:
         raise CouncilError(
             "council resolution refused by the Class-C protocol: "
