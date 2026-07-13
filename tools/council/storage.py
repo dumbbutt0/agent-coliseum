@@ -56,10 +56,17 @@ def atomic_write_json(path: str, obj) -> None:
     """Same-directory tmp -> fsync -> rename. Readers never see a partial.
     The tmp name is per-process-unique (H2): a fixed `.tmp` raced two
     concurrent writers to the same path onto the same tmp file."""
+    atomic_write_bytes(path, (canonical_json(obj) + "\n").encode("utf-8"))
+
+
+def atomic_write_bytes(path: str, blob: bytes) -> None:
+    """Write exact bytes via same-directory tmp -> fsync -> rename (readers never
+    see a partial). Used to restore a file bit-for-bit — e.g. a byte-exact policy
+    rollback whose full hash must equal the pre-write file."""
     tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(canonical_json(obj) + "\n")
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
             _fsync_quietly(fh)
         os.rename(tmp, path)
     except OSError:

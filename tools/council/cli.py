@@ -118,14 +118,19 @@ def cmd_amend_policy(args) -> int:
         raise SchemaViolation("amend-policy is an owner action: --role human")
     cfg, root = _cfg(args)
     impl_commit = validate_commit(args.impl_commit)
+    # capture the EXACT pre-write policy bytes so a post-write failure restores the
+    # file bit-for-bit (its full hash == the unchanged effective pin). A semantic
+    # version-restore is insufficient: the amend write overwrites amended_utc, which
+    # the pin hash depends on, so the original timestamp cannot be reconstructed after.
+    prior_bytes = policy.read_policy_bytes(root)
     prev_hash, new_hash, diff = policy.amend_policy(root, args.target_version)
     payload_core = {"policy_hash": new_hash, "prev_policy_hash": prev_hash,
                     "policy_version": args.target_version,
                     "policy_diff": diff, "impl_commit": impl_commit,
                     "policy_file": storage.POLICY_FILE}
-    # ATOMIC: if minting/verifying the owner token or the append fails, roll the
-    # file back to the previous version so an invalid token leaves BOTH the file
-    # and the effective pin unchanged (never a v2 file drifting unpinned).
+    # ATOMIC: if minting/verifying the owner token or the append fails, restore the
+    # exact prior bytes so an invalid token leaves BOTH the file and the effective pin
+    # bit-identical to before (never a semantically-right file whose hash has drifted).
     try:
         token = _maybe_human_token(root, args, "POLICY_AMENDED",
                                    CONTROL_RID, impl_commit, payload_core)
@@ -133,7 +138,7 @@ def cmd_amend_policy(args) -> int:
                                     CONTROL_RID, cfg.repo_roots[0], impl_commit,
                                     _with_token(payload_core, token))
     except Exception:
-        policy.restore_policy_version(root, args.target_version - 1)
+        policy.restore_policy_bytes(root, prior_bytes)
         raise
     print(f"policy amended to version {args.target_version}\n"
           f"prev_hash: {prev_hash}\nnew_hash:  {new_hash}\n"

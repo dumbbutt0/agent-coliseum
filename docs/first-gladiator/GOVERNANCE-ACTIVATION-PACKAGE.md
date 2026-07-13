@@ -48,7 +48,10 @@ python3 -m tools.council.cli --role human amend-policy \
 - Writes `POLICY_VERSIONS[4]` over the policy file and records **one** `POLICY_AMENDED`
   binding `{prev_policy_hash = be3c42b1…, new v4 hash, policy_version = 4, diff,
   impl_commit, owner token}`.
-- **Atomic**: any token/append failure rolls the file back to v3 (no unpinned drift).
+- **Atomic (byte-exact)**: on any token/append failure the command restores the *exact
+  prior policy bytes*, so both the file and the effective v3 pin are left bit-identical —
+  never a semantically-v3 file whose full hash (which includes the `amended_utc`
+  timestamp) has drifted from the still-pinned v3 hash.
 
 ## Expected transition
 

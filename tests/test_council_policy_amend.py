@@ -137,6 +137,46 @@ def test_invalid_token_amendment_rolls_back_to_v1(env):
     assert policy.effective_policy_pin(events.read_chain(root)) == (v1_hash, 1)
 
 
+def test_failed_v3_to_v4_amend_restores_exact_prior_bytes(env, monkeypatch):
+    """Audit 000795: a failed v3->v4 amendment must leave the policy file BIT-IDENTICAL
+    to before — a semantic version-restore is insufficient because the pin's full hash
+    includes amended_utc, which the v4 write overwrites and cannot be reconstructed. The
+    CLI now snapshots the exact prior bytes and restores them on any post-write failure."""
+    from tools.council import cli
+    root, repo, head, cfg, v1_hash = env
+    # advance the pin to v3 through the sanctioned mechanism so v3 carries an amended_utc
+    for target in (2, 3):
+        ph, nh, diff = policy.amend_policy(root, target)
+        append(root, cfg, "POLICY_AMENDED", "human", CONTROL_RID, repo, head,
+               {"policy_hash": nh, "prev_policy_hash": ph, "policy_version": target,
+                "policy_diff": diff, "impl_commit": head,
+                "policy_file": storage.POLICY_FILE})
+    v3_dict, v3_hash = policy.load_policy(root)
+    assert policy.policy_version_of(v3_dict) == 3
+    assert policy.effective_policy_pin(events.read_chain(root)) == (v3_hash, 3)
+    v3_bytes = policy.read_policy_bytes(root)
+    assert v3_dict.get("amended_utc") is not None
+
+    # attempt v3 -> v4 via the CLI, forcing the append to FAIL after the v4 write
+    def boom(*a, **k):
+        raise RuntimeError("append failed after the v4 write")
+    monkeypatch.setattr("tools.council.cli.events.append_event", boom)
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    args = type("A", (), {"role": "human", "target_version": 4,
+                          "impl_commit": head, "token_file": None})()
+    with pytest.raises(RuntimeError):
+        cli.cmd_amend_policy(args)
+
+    # byte-exact rollback: file bytes, full hash, amended_utc, version, and pin unchanged
+    restored_dict, restored_hash = policy.load_policy(root)
+    assert policy.read_policy_bytes(root) == v3_bytes      # bit-identical file
+    assert restored_hash == v3_hash                        # full hash unchanged
+    assert restored_dict.get("amended_utc") == v3_dict.get("amended_utc")
+    assert policy.policy_version_of(restored_dict) == 3
+    assert policy.effective_policy_pin(events.read_chain(root)) == (v3_hash, 3)
+
+
 def test_amendment_requires_root_owned_checkpoint(env):
     """M7a cycle-3 SECURITY regression: an agent that can write events.jsonl
     could forge an identity root + a matching forged token that replay_identity

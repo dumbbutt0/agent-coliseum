@@ -379,6 +379,36 @@ def restore_policy_version(root: str, version: int) -> None:
         pass
 
 
+def read_policy_bytes(root: str) -> bytes | None:
+    """The EXACT current policy-file bytes (or None if absent). Captured before an
+    amend overwrite so a post-write failure can restore the file bit-for-bit."""
+    path = storage.policy_path(root)
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def restore_policy_bytes(root: str, blob: bytes | None) -> None:
+    """Restore the policy file to EXACT prior bytes so its full hash (payload_hash of
+    the parsed content, timestamps included) is bit-identical to the pre-write file —
+    the only rollback that truly leaves BOTH the file and the effective pin unchanged
+    after a failed amendment. A no-op when there were no prior bytes (fresh root); the
+    caller then removes any partially-written file separately if needed."""
+    if blob is None:
+        return
+    path = storage.policy_path(root)
+    try:  # the file was re-locked read-only after the amend write
+        os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+    except OSError:
+        pass
+    storage.atomic_write_bytes(path, blob)
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except OSError:
+        pass
+
+
 def _policy_diff(old: dict, new: dict) -> dict:
     """Minimal semantic diff of the two auto_approval-bearing policies."""
     diff = {}
