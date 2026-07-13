@@ -1,13 +1,13 @@
-# Spatial S2A — Mutable exclusive-location state (design source, rev 5)
+# Spatial S2A — Mutable exclusive-location state (design source, rev 6)
 
 **Status:** design source for council review. No production code. Builds on the **immutable, untouched**
-integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 5 closes audit 001005:
-coincident transit arrivals are resolved **atomically** by the single clock-advancing `advance_step`
-transition (completing *every* body due at the reached step), replacing the per-body completer so shared
-`arrival_step`s never deadlock. (Rev 4 closed audit 000999: in-transit fork inherits the parent clock +
-the transit admission invariant. Rev 3 closed audit 000993: unified entity lifecycle, actor rules,
-`ForkDecision` authorization, transit step semantics. Rev 2 closed audit 000987: fork materialization,
-provenance, canonical shapes.)
+integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 6 closes audit 001011:
+room capacity is **reserved at move-admission** (a body in transit toward a room counts against its
+capacity), so scheduled arrivals — coincident or staggered — can never overfill a room and `advance_step`
+is guaranteed to yield a capacity-valid post-state. (Rev 5 closed audit 001005: atomic coincident-arrival
+resolution. Rev 4 closed audit 000999: in-transit fork inherits the parent clock + the transit admission
+invariant. Rev 3 closed audit 000993: unified entity lifecycle, actor rules, `ForkDecision` authorization,
+transit step semantics. Rev 2 closed audit 000987: fork materialization, provenance, canonical shapes.)
 
 ## 1. Purpose and boundary
 S2A adds the **mutable world state** (*where every entity is*) as an explicit, replayable **event layer**
@@ -53,7 +53,7 @@ that record a step use the **resulting** step (N+1).
 | `despawn` | system | `entity_id`,`entity_kind` | entity `present` | entity `absent`, no placement |
 | `remove` | system | `entity_id`,`entity_kind` | entity `present`/`absent`, not `removed` | entity `removed` (terminal), no placement |
 | `advance_step` | system | *(none)* | — | `logical_step` advances to `N+1`; **atomically** every `in_transit` body with `arrival_step == N+1` (the sorted-by-`agent_body_id` due set) lands `InRoom(destination)`; all other placements/lifecycle unchanged (a pure tick when no arrival is due) |
-| `move` | actor=`agent_body_id` | `agent_body_id`,`portal_instance_id`,`from_room_instance_id`,`to_room_instance_id` | body `present`,`InRoom(from)`; registered portal connects from→to in-world | `InRoom(to)` if `traversal_duration_steps==0`, else `InTransit(portal,from,to,start=N+1,arrival=N+1+duration)` |
+| `move` | actor=`agent_body_id` | `agent_body_id`,`portal_instance_id`,`from_room_instance_id`,`to_room_instance_id` | body `present`,`InRoom(from)`; registered portal connects from→to in-world; **destination has a free slot: `to`'s effective occupancy (§capacity) after this move ≤ its capacity** (reserves the arrival slot at move time) | `InRoom(to)` if `traversal_duration_steps==0`, else `InTransit(portal,from,to,start=N+1,arrival=N+1+duration)` |
 | `take` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id` | body `InRoom(r)`; object `present`,`InRoom(r)`,`portability`; if `exclusive_possession`, not `held_by` anyone | object `HeldBy(body)` |
 | `drop` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id` | object `HeldBy(body)`; body `InRoom(r)` | object `InRoom(r)` |
 | `give` | actor=`agent_body_id` | `agent_body_id`,`object_instance_id`,`recipient_agent_body_id` | object `HeldBy(body)`; recipient `present`,`InRoom(r)`=body's room | object `HeldBy(recipient)` |
@@ -74,8 +74,16 @@ action requires `actor_body_id` = a registered, in-world `AgentBodyInstance` wit
 **Lifecycle matrix (all entities):** `absent↔present` (spawn/despawn); `present|absent → removed`
 (remove, **terminal**); `removed → *` refused (**resurrection** — bodies and objects alike; a `remove`d
 object cannot be `spawn`ed).
-**Capacity:** per room, count of **agent bodies** `InRoom` ≤ `RoomSpec.capacity` (when non-null); objects
-don't consume capacity. **Containment:** `Inside` is acyclic (re-checked each take/give/put_inside/take_out).
+**Capacity (with in-flight reservation):** a room's **effective occupancy** = (agent bodies `InRoom(R)`)
++ (agent bodies `InTransit` with `destination_room_instance_id == R`) ≤ `RoomSpec.capacity` (when
+non-null); objects don't consume capacity. Because a body in transit toward `R` already counts against
+`R`, `move` reserves the arrival slot at admission time — so two bodies can never be scheduled to arrive at
+a room beyond its capacity, and `advance_step` is therefore **guaranteed** to land every due body within
+capacity (no overfill, coincident or staggered). **Inventory:** a body holds at most
+`AgentBodySpec.inventory_limit` objects (when non-null) = the count of objects `HeldBy(body)`; any action
+that raises a body's held count (`take`, `give` into the recipient, `take_out`) is refused if it would
+exceed the limit, and admission enforces it on every state. **Containment:** `Inside` is acyclic
+(re-checked each take/give/put_inside/take_out).
 **Transit:** `start_step < arrival_step`; distinct in-world endpoints the portal connects; a body crosses a
 duration-`d>0` portal via `move` (→`InTransit(start=N+1, arrival=N+1+d)`), then `advance_step`s until the
 one reaching `arrival_step` atomically lands it (and any co-arriving bodies) `InRoom(dest)`. `d==0` lands
@@ -88,7 +96,9 @@ arrival step.
 `entity_id` and nested location id **registered, type-correct, in this world-line**; entity-kind location
 legality + exact tag key sets; **lifecycle/placement agreement** (`present` ⇒ exactly one placement;
 `absent`/`removed` ⇒ none; every placed entity has a `present` lifecycle row); exclusivity (no shared
-exclusive slot; `exclusive_possession` `held_by` ≤ 1; room capacity; containment acyclic); transit
+exclusive slot; `exclusive_possession` `held_by` ≤ 1; **effective room occupancy** — `InRoom` bodies +
+bodies `InTransit` toward the room — ≤ capacity (§4); **each body holds ≤ its `inventory_limit`** (§4, when
+non-null); containment acyclic); transit
 validity — distinct in-world endpoints the portal connects, `start_step < arrival_step`, **and the body is
 genuinely mid-transit at this state: `start_step ≤ logical_step < arrival_step`** (a state whose
 `logical_step` is before an `in_transit` body's `start_step` or at/after its `arrival_step` is malformed
@@ -167,7 +177,10 @@ traces incl. early/late completion refusal, an admitted state with an `in_transi
 `logical_step < start_step` or `≥ arrival_step` refused, **coincident arrivals** (two bodies with the same
 `arrival_step` both landed atomically by one `advance_step`; an ordinary actor action that would strand a
 due arrival at its resulting step refused by the transit admission invariant, while `advance_step` always
-succeeds), and **forking a mid-transit parent** (child inherits `logical_step = fork_logical_step` with
+succeeds), **capacity reservation** (a second `move` toward a capacity-1 room already holding an in-flight
+body — coincident OR staggered durations — refused at move admission, so no reachable state overfills on
+arrival and `advance_step` always yields a capacity-valid post-state), **inventory limit** (a `take`/`give`/`take_out` that would exceed a body's
+`inventory_limit` refused; admission refuses an over-inventory state), and **forking a mid-transit parent** (child inherits `logical_step = fork_logical_step` with
 remaining travel preserved and admits; a step-reset variant refused by the transit invariant); replay —
 identical bytes, order-independent storage.
 
