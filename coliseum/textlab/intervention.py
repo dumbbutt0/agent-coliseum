@@ -346,21 +346,30 @@ class InterventionRegistry:
     _records: dict = field(default_factory=dict)
 
     def register(self, iv: "Intervention") -> str:
-        validate_intervention(iv)
-        h = intervention_spec_hash(iv)
-        prior = self._records.get(iv.intervention_id)
+        if not isinstance(iv, Intervention):
+            raise InterventionError("not an Intervention instance")
+        # NORMALIZE into ONE detached base-class snapshot from a single read of the
+        # input's properties (audit 000832): reconstructing a base Intervention
+        # evaluates each property exactly once at the call, and all registry truth
+        # below derives from `base` — never from re-reading `iv`. A hostile/mutable
+        # SUBCLASS whose canonical_spec changes across reads therefore cannot desync
+        # the admitted hash from the stored canonical record.
+        base = Intervention(iv.intervention_id, iv.cls, iv.kind,
+                            iv.canonical_spec, iv.schema_version)
+        h = intervention_spec_hash(base)
+        prior = self._records.get(base.intervention_id)
         if prior is not None and prior["admitted_hash"] != h:
             raise InterventionError(
-                f"intervention_id {iv.intervention_id!r} already registered with "
+                f"intervention_id {base.intervention_id!r} already registered with "
                 "a different definition — ids are single-use (content-addressed)")
-        # capture an immutable admission snapshot from CANONICAL values (strings),
-        # not by retaining the caller's object.
-        self._records[iv.intervention_id] = {
+        # the admitted hash and the stored canonical record come from the SAME
+        # normalized base snapshot, so admitted_hash(id) == spec_hash(get(id)).
+        self._records[base.intervention_id] = {
             "admitted_hash": h,
-            "spec_json": canonical_json(iv.canonical_spec),
-            "cls": iv.cls,
-            "kind": iv.kind,
-            "schema_version": iv.schema_version,
+            "spec_json": canonical_json(base.canonical_spec),
+            "cls": base.cls,
+            "kind": base.kind,
+            "schema_version": base.schema_version,
         }
         return h
 

@@ -242,6 +242,34 @@ def test_object_setattr_bypass_cannot_rewrite_registry_truth():
         reg.register(got)
 
 
+def test_registry_snapshot_is_coherent_under_changing_subclass():
+    # audit 000832: register() must build ONE coherent snapshot, not hash the
+    # input and then re-read it. A valid subclass whose canonical_spec changes on
+    # successive reads must not desync admitted_hash(id) from spec_hash(get(id)).
+    class _ChangingSpec(Intervention):
+        __slots__ = ()
+
+        def __init__(self, iid):
+            super().__init__(iid, "state", "framing", {"read": -1})
+
+        @property
+        def canonical_spec(self):
+            # a different valid dict on each read (via a spec_json we rotate)
+            prev = json.loads(object.__getattribute__(self, "_spec_json"))
+            nxt = {"read": prev["read"] + 1}
+            object.__setattr__(self, "_spec_json", json.dumps(nxt))
+            return nxt
+
+    reg = InterventionRegistry()
+    hostile = _ChangingSpec("iv-changing")
+    admitted = reg.register(hostile)
+    # the registry's captured admission is internally coherent:
+    assert reg.admitted_hash("iv-changing") == admitted
+    assert intervention_spec_hash(reg.get("iv-changing")) == admitted
+    # and a fresh get() is a stable base definition (its spec does not rotate)
+    assert reg.get("iv-changing").canonical_spec == reg.get("iv-changing").canonical_spec
+
+
 # --------------------------- audit 000814 blocker 2: injective typed input
 @pytest.mark.parametrize("bad_spec", [
     {1: "x"},                        # int key aliases the string "1"
