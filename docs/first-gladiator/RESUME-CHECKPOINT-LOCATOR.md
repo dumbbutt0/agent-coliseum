@@ -50,7 +50,7 @@ python3 -c "from tools.council import get_config; print(get_config(role='claude'
 | `RESOLVED` | accessible root, present + well-formed artifact, content hash matches, chain binding consistent with the live chain, policy pin matches | **authorized** |
 | `CHECKPOINT_ARTIFACT_UNAVAILABLE` | the configured council root is **not accessible** (or its chain is unreadable) — the auditor cannot determine checkpoint state | fails closed |
 | `CHECKPOINT_MISSING` | root accessible, but **no** checkpoint file at the resolved path | fails closed |
-| `CHECKPOINT_MALFORMED` | present but not a well-formed JSON object | fails closed |
+| `CHECKPOINT_MALFORMED` | present but not a schema-valid checkpoint — not a JSON object, an absent/unsupported `checkpoint_schema_version`, or a mistyped required field (e.g. a boolean where a chain length or policy version is required) | fails closed |
 | `CONTENT_HASH_MISMATCH` | recorded `checkpoint_hash` ≠ recomputed content hash (edited out of band) | fails closed |
 | `STALE_CHAIN_BINDING` | the recorded chain head is not a prefix of the live chain (stale or divergent) | fails closed |
 | `POLICY_PIN_MISMATCH` | the recorded effective policy pin ≠ the live pin | fails closed |

@@ -32,6 +32,7 @@ from tools.council.strictjson import load_strict_file
 LOCATOR_URI = "council-root://resume_checkpoint.json"
 CHECKPOINT_FILENAME = "resume_checkpoint.json"
 CHECKPOINT_HASH_FIELD = "checkpoint_hash"
+SUPPORTED_SCHEMA_VERSION = "resume-checkpoint.v1"
 
 # Validation status codes (typed; the CLI surfaces these verbatim).
 RESOLVED = "RESOLVED"
@@ -47,6 +48,43 @@ def resolve_checkpoint_path(cfg) -> str:
     """The configured resume-checkpoint path — council_root joined with the fixed
     filename. Uses CONFIGURATION only; never a hard-coded user path."""
     return os.path.join(cfg.council_root, CHECKPOINT_FILENAME)
+
+
+def _is_int(v) -> bool:
+    """A real integer — bool is an int subclass and is explicitly rejected so a JSON
+    boolean can never masquerade as a chain length or policy version."""
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _validate_checkpoint_schema(data: dict) -> None:
+    """Enforce the typed resume-checkpoint SCHEMA before any authorization. Strict JSON
+    syntax alone does not establish a well-formed checkpoint (audit 000777): the
+    supported schema version and every typed field the resolver relies on must be
+    present and correctly typed, or resume authority is refused (CHECKPOINT_MALFORMED).
+    Raises SchemaViolation on any violation."""
+    ver = data.get("checkpoint_schema_version")
+    if ver != SUPPORTED_SCHEMA_VERSION:
+        raise SchemaViolation(
+            f"unsupported checkpoint_schema_version {ver!r} "
+            f"(require {SUPPORTED_SCHEMA_VERSION!r})")
+    if not isinstance(data.get(CHECKPOINT_HASH_FIELD), str) \
+            or not data[CHECKPOINT_HASH_FIELD]:
+        raise SchemaViolation("checkpoint_hash must be a non-empty string")
+    chain = data.get("chain")
+    if not isinstance(chain, dict):
+        raise SchemaViolation("chain must be an object")
+    if not isinstance(chain.get("head_hash"), str) or not chain["head_hash"]:
+        raise SchemaViolation("chain.head_hash must be a non-empty string")
+    if not _is_int(chain.get("length")) or chain["length"] <= 0:
+        raise SchemaViolation("chain.length must be a positive integer (not a bool)")
+    pol = data.get("effective_policy")
+    if not isinstance(pol, dict):
+        raise SchemaViolation("effective_policy must be an object")
+    if not isinstance(pol.get("hash"), str) or not pol["hash"]:
+        raise SchemaViolation("effective_policy.hash must be a non-empty string")
+    if not _is_int(pol.get("version")) or pol["version"] < 1:
+        raise SchemaViolation(
+            "effective_policy.version must be a positive integer (not a bool)")
 
 
 @dataclass
@@ -113,6 +151,9 @@ def locate_resume_checkpoint(cfg) -> ResumeLocation:
         data = load_strict_file(path)
         if not isinstance(data, dict):
             raise SchemaViolation("checkpoint is not a JSON object")
+        # syntactic validity is not enough — enforce the typed checkpoint schema
+        # (supported version + every field the resolver trusts) BEFORE authorizing.
+        _validate_checkpoint_schema(data)
     except (OSError, SchemaViolation) as exc:
         return _fail(loc, CHECKPOINT_MALFORMED, f"checkpoint unreadable/invalid: {exc}")
 
@@ -144,7 +185,7 @@ def locate_resume_checkpoint(cfg) -> ResumeLocation:
     loc.live_chain = {"head_hash": live_head, "length": live_len}
     cp_len = cp_chain.get("length")
     cp_head = cp_chain.get("head_hash")
-    consistent = (isinstance(cp_len, int) and 0 < cp_len <= live_len
+    consistent = (_is_int(cp_len) and 0 < cp_len <= live_len
                   and live_chain[cp_len - 1].get("event_hash") == cp_head)
     if not consistent:
         return _fail(loc, STALE_CHAIN_BINDING,

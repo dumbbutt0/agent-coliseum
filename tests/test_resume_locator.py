@@ -144,6 +144,65 @@ def test_policy_pin_mismatch(tmp_path):
     assert not loc.resume_authorized and not loc.policy_pin["match"]
 
 
+def test_missing_schema_version_is_malformed(tmp_path):
+    """Strict JSON syntax is not enough — a checkpoint without the supported
+    checkpoint_schema_version is CHECKPOINT_MALFORMED, never RESOLVED (audit 000777)."""
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root, extra={"checkpoint_schema_version": None})
+    loc = resume_locator.locate_resume_checkpoint(cfg)
+    assert loc.status == resume_locator.CHECKPOINT_MALFORMED
+    assert not loc.resume_authorized
+
+
+def test_wrong_schema_version_is_malformed(tmp_path):
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root, extra={"checkpoint_schema_version": "resume-checkpoint.v2"})
+    loc = resume_locator.locate_resume_checkpoint(cfg)
+    assert loc.status == resume_locator.CHECKPOINT_MALFORMED
+    assert not loc.resume_authorized
+
+
+def test_boolean_chain_length_is_malformed(tmp_path):
+    """A JSON boolean (an int subclass) must never masquerade as chain.length
+    (audit 000777)."""
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root, chain_over={"length": True})
+    loc = resume_locator.locate_resume_checkpoint(cfg)
+    assert loc.status == resume_locator.CHECKPOINT_MALFORMED
+    assert not loc.resume_authorized
+
+
+def test_boolean_policy_version_is_malformed(tmp_path):
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root, pin_over={"version": True})
+    loc = resume_locator.locate_resume_checkpoint(cfg)
+    assert loc.status == resume_locator.CHECKPOINT_MALFORMED
+    assert not loc.resume_authorized
+
+
+def test_malformed_schema_cli_exit_nonzero(tmp_path, monkeypatch):
+    """The CLI must exit nonzero (resume refused) for a schema-malformed checkpoint."""
+    from tools.council import cli
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root, chain_over={"length": True})
+    monkeypatch.setenv("COUNCIL_ROOT", root)          # CLI resolves cfg from env
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    rc = cli.cmd_locate_resume_checkpoint(
+        type("A", (), {"role": "claude", "json": True})())
+    assert rc == 1
+
+
+def test_valid_checkpoint_cli_exit_zero(tmp_path, monkeypatch):
+    from tools.council import cli
+    root, repo, head, cfg = _boot(tmp_path)
+    _write_checkpoint(root)
+    monkeypatch.setenv("COUNCIL_ROOT", root)
+    monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
+    rc = cli.cmd_locate_resume_checkpoint(
+        type("A", (), {"role": "claude", "json": True})())
+    assert rc == 0
+
+
 def test_repo_search_finds_only_the_stable_locator(tmp_path):
     """The repository carries only the stable locator STRING (in this generic module),
     never a duplicate checkpoint artifact. A repo-only search cannot discover the
