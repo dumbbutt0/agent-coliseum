@@ -161,7 +161,9 @@ def cmd_dataset_export(args):
                   held_out_scenarios=held_ids, held_out_hashes=held_hashes,
                   verify=args.verify, config_dir=args.config_dir,
                   partition=args.partition,
-                  registry_path=args.scenario_registry if args.partition else None)
+                  registry_path=args.scenario_registry if args.partition else None,
+                  training_admission=args.training_admission,
+                  require_replay_for_admission=args.admission_require_replay)
     if args.manifest:
         desc = dataset_from_manifest(args.manifest, args.out_root, **common)
     else:
@@ -234,6 +236,11 @@ def main(argv=None):
     s.add_argument("--scenario-registry", default="configs/registry/scenarios.yaml",
                    help="scenario registry supplying the §8 sibling fields "
                         "(family / control_of) for group-aware partitioning")
+    s.add_argument("--training-admission", action="store_true",
+                   help="apply the §8 training-data admission gate: filter to "
+                        "training-eligible runs and record the admit/reject report")
+    s.add_argument("--admission-require-replay", action="store_true",
+                   help="admission also requires byte-identical replay per run")
 
     args = p.parse_args(argv)
     args.fn(args)

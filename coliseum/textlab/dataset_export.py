@@ -24,6 +24,7 @@ from .metrics import aggregate
 from .sweep import manifest_load, verify_run_replay
 from .partition import (DEFAULT_SPLITS, load_scenario_siblings,
                         partition_manifest)
+from .training_admission import admit_runs
 
 DATASET_SCHEMA_VERSION = "1"
 DATASET_COMMITMENT_DOMAIN = "dataset:commitment:v1"
@@ -63,7 +64,9 @@ def build_dataset(run_dirs, *, mode="deterministic",
                   interaction_mode="independent_vignettes",
                   held_out_scenarios=None, held_out_hashes=None,
                   verify=False, config_dir="configs/scenarios",
-                  partition=False, registry_path=None, splits=DEFAULT_SPLITS):
+                  partition=False, registry_path=None, splits=DEFAULT_SPLITS,
+                  training_admission=False, exclusions=None,
+                  require_replay_for_admission=False):
     """Build a canonical, non-pooled dataset descriptor from a set of run dirs.
 
     Reuses metrics.aggregate for admission + retry-collapse + effective-unit counting; refuses if any
@@ -83,6 +86,25 @@ def build_dataset(run_dirs, *, mode="deterministic",
 
     held_ids = set(held_out_scenarios or ())
     held_hashes = set(held_out_hashes or ())
+
+    # §8 training-data admission gate: filter to training-eligible runs and record
+    # the admit/reject decision. Runs the gate BEFORE the rest of the pipeline, so
+    # rejected runs (incomplete provenance, held-out, excluded, non-reportable,
+    # unverified digest, replay failure) never enter the substrate. The report is
+    # folded into the descriptor (and thus the commitment).
+    training_admission_report = None
+    if training_admission:
+        training_admission_report = admit_runs(
+            run_dirs, held_out_ids=held_ids, held_out_hashes=held_hashes,
+            config_dir=config_dir, exclusions=set(exclusions or ()),
+            require_replay=require_replay_for_admission)
+        admitted = set(training_admission_report["admitted"])
+        run_dirs = [d for d in run_dirs if os.path.basename(d) in admitted]
+        if not run_dirs:
+            raise ValueError(
+                "training admission rejected every run — nothing to export "
+                f"({training_admission_report['rejected_count']} rejected)")
+
     if held_ids or held_hashes:
         offenders = _held_out_offenders(run_dirs, held_ids, held_hashes)
         if offenders:
@@ -156,6 +178,7 @@ def build_dataset(run_dirs, *, mode="deterministic",
         },
         "replay_verification": replay_verification,
         "partition": partition_block,
+        "training_admission": training_admission_report,
     }
     descriptor["dataset_commitment"] = dataset_commitment(descriptor)
     return descriptor
@@ -223,6 +246,24 @@ def dataset_card(descriptor):
             fams = ", ".join(g["families"])
             lines.append(f"| `{g['partition_group_id'][:12]}…` | `{fams}` | "
                          f"`{g['split']}` | {len(g['members'])} |")
+    adm = descriptor.get("training_admission")
+    if adm:
+        lines += [
+            "",
+            "## Training-data admission gate (§8)",
+            "",
+            f"- admission version: `{adm['admission_version']}`",
+            f"- admitted: **{adm['admitted_count']}** · rejected: "
+            f"**{adm['rejected_count']}**",
+            f"- criteria evaluated: {', '.join(adm['evaluated_criteria'])}",
+            f"- criteria **deferred** (evidence not present): "
+            f"{', '.join(sorted(adm['deferred_criteria']))}",
+            f"- **admission commitment**: `{adm['admission_commitment']}`",
+        ]
+        if adm["rejected"]:
+            lines += ["", "| rejected run | reasons |", "|---|---|"]
+            for r in adm["rejected"]:
+                lines.append(f"| `{r['run_dir']}` | {', '.join(r['rejections'])} |")
     partition_note = ("a deterministic, dataset-version-bound group-aware split "
                       "(§8) whose leakage lint refuses any sibling straddle"
                       if part else "no group-aware partitioning")
