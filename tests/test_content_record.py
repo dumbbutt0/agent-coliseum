@@ -21,6 +21,7 @@ from coliseum.textlab.schema import canonical_json, config_hash
 class _Rec(ContentRecord):
     __slots__ = ()
     DOMAIN = "trs.test_record.v1"
+    ID_FIELD = "test_record_id"
 
 
 def _rec(content=None):
@@ -44,6 +45,7 @@ def test_domain_separation():
     class _Other(ContentRecord):
         __slots__ = ()
         DOMAIN = "trs.other_record.v1"
+        ID_FIELD = "other_record_id"
     assert _Rec({"x": 1}).id != _Other({"x": 1}).id
 
 
@@ -54,9 +56,29 @@ def test_preimage_may_not_contain_reserved_domain_key():
 
 def test_content_id_helper_rejects_domain_key_and_bad_domain():
     with pytest.raises(ContentRecordError):
-        content_id("trs.x.v1", {"_domain": "spoof"})
+        content_id("trs.x.v1", {"_domain": "spoof"}, "x_id")
     with pytest.raises(ContentRecordError):
-        content_id("", {"x": 1})
+        content_id("", {"x": 1}, "x_id")
+    with pytest.raises(ContentRecordError):
+        content_id("trs.x.v1", {"x": 1}, "")           # empty id_field
+
+
+def test_self_exclusion_enforced_by_foundation():
+    # audit 000874: the FOUNDATION (not the call site) must reject a preimage
+    # containing the record's own declared output id field.
+    class _Bps(ContentRecord):
+        __slots__ = ()
+        DOMAIN = "trs.behavior_policy_spec.v1"
+        ID_FIELD = "behavior_policy_spec_id"
+    with pytest.raises(ContentRecordError):
+        _Bps({"behavior_policy_spec_id": "self-ref", "schema_version": "1"})
+    with pytest.raises(ContentRecordError):
+        content_id("trs.behavior_policy_spec.v1",
+                   {"behavior_policy_spec_id": "self-ref"},
+                   "behavior_policy_spec_id")
+    # a REFERENCED id with a DIFFERENT field name is accepted (not self-inclusion)
+    ok = _Bps({"schema_version": "1", "comparison_regime_id": "abc"})
+    assert ok.id and "behavior_policy_spec_id" not in ok.content
 
 
 # --------------------------------------------------------------- strict JSON preimage
