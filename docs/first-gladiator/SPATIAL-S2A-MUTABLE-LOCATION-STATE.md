@@ -1,10 +1,11 @@
-# Spatial S2A — Mutable exclusive-location state (design source, rev 3)
+# Spatial S2A — Mutable exclusive-location state (design source, rev 4)
 
 **Status:** design source for council review. No production code. Builds on the **immutable, untouched**
-integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 3 closes audit 000993:
-unified entity lifecycle (fork-remapped; terminal object removal), per-action actor rules + validation, a
-canonical `ForkDecision` authorization record, and precise transit step semantics with an `env_tick`
-progress action. (Rev 2 closed audit 000987: fork materialization, provenance, canonical shapes.)
+integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 4 closes audit 000999:
+canonical in-transit fork semantics (the child inherits the parent's logical clock, preserving remaining
+travel time) + a general admission invariant relating `logical_step` to transit bounds. (Rev 3 closed
+audit 000993: unified entity lifecycle, actor rules, `ForkDecision` authorization, transit step semantics
++ `env_tick`. Rev 2 closed audit 000987: fork materialization, provenance, canonical shapes.)
 
 ## 1. Purpose and boundary
 S2A adds the **mutable world state** (*where every entity is*) as an explicit, replayable **event layer**
@@ -34,7 +35,9 @@ Every instance id in a location must be **registered** and in the state's own `w
 
 - `placements`: list **sorted by `entity_id`**, entries `{"entity_id": <instance id>, "entity_kind": "agent_body"|"object", "location": <tagged dict §2>}`; `entity_id`s unique.
 - `entity_lifecycle`: list **sorted by `entity_id`**, entries `{"entity_id": <instance id>, "entity_kind": "agent_body"|"object", "status": "present"|"absent"|"removed"}`; `entity_id`s unique. **Unified for bodies AND objects.** `present` ⇒ exactly one `placements` row; `absent`/`removed` ⇒ no `placements` row. `removed` is **terminal** for every entity kind.
-- `logical_step`: non-negative int. Root base at `logical_step = 0`; a fork base is the ForkInitialization-bound materialized child state (§8).
+- `logical_step`: non-negative int. A **root** world-line's base is at `logical_step = 0`; a **fork's**
+  base is at `logical_step = fork_logical_step` (the child inherits the parent's logical clock at the fork
+  point — §8 — so an inherited in-progress transit keeps its exact remaining travel time).
 - `ForkDecision.id` is exactly the `source_fork_decision_hash` an S1 `WorldLine.forked(...)` was built with (its `parent_world_line_id`/`changed_dimension`/`unchanged_comparison_dims` equal S1's; it ADDS the `parent_state_hash` + `fork_logical_step` authorization S1 does not carry — S1 unchanged).
 
 ## 4. Canonical action / effect matrix + actor rules (implementation-binding)
@@ -74,9 +77,12 @@ at step `arrival_step` (total `d` steps). `d==0` lands directly `InRoom(dest)`.
 `entity_id` and nested location id **registered, type-correct, in this world-line**; entity-kind location
 legality + exact tag key sets; **lifecycle/placement agreement** (`present` ⇒ exactly one placement;
 `absent`/`removed` ⇒ none; every placed entity has a `present` lifecycle row); exclusivity (no shared
-exclusive slot; `exclusive_possession` `held_by` ≤ 1; room capacity; containment acyclic; transit
-endpoints/timing valid). Single-snapshot atomic (reuse S0 discipline): the validated content is exactly
-the admitted content.
+exclusive slot; `exclusive_possession` `held_by` ≤ 1; room capacity; containment acyclic); transit
+validity — distinct in-world endpoints the portal connects, `start_step < arrival_step`, **and the body is
+genuinely mid-transit at this state: `start_step ≤ logical_step < arrival_step`** (a state whose
+`logical_step` is before an `in_transit` body's `start_step` or at/after its `arrival_step` is malformed
+and refused — this holds for every admitted state, fork-materialized or not). Single-snapshot atomic
+(reuse S0 discipline): the validated content is exactly the admitted content.
 
 ## 6. The pure transition function
 `apply_transition(state, transition) -> WorldState` fails closed unless ALL:
@@ -110,9 +116,14 @@ Given a parent `WorldState` S_p in world-line P, a **registered** S1 forked `Wor
    `entity_id` in `placements`, an `entity_id` in `entity_lifecycle`, OR nested inside any location): recover
    `(domain, spec_id, deterministic_logical_instance_key)` and re-derive `e' = instance(spec_id, C, key)`;
    **register** each `e'` under C. Refuse unregistered/foreign/mistyped/non-bijective mappings.
-3. **Rewrite** S_p → child initial state S_c: `world_line_id=C`, `logical_step=0`, every `placements`
-   `entity_id`, every `entity_lifecycle` `entity_id`, and every nested location id replaced by its `e'`;
-   content otherwise preserved. S_c MUST pass `admit_world_state` (§5) with all child-world ids.
+3. **Rewrite** S_p → child initial state S_c: `world_line_id=C`, **`logical_step = S_p.logical_step`**
+   (the child inherits the parent's logical clock at the fork point — NOT reset to 0 — so an inherited
+   `in_transit` body keeps its absolute `start_step`/`arrival_step` and therefore its exact remaining
+   travel time), every `placements` `entity_id`, every `entity_lifecycle` `entity_id`, and every nested
+   location id replaced by its `e'`; content otherwise preserved. S_c MUST pass `admit_world_state` (§5)
+   with all child-world ids — in particular the transit invariant `start_step ≤ logical_step < arrival_step`,
+   which refuses any step-reset/mis-rebased in-transit inheritance. The child's own transitions then continue
+   from `logical_step = S_p.logical_step + 1`.
 4. **Provenance:** emit `ForkInitialization` binding `child_world_line_id=C`, `parent_world_line_id=P`,
    `parent_state_hash=S_p.id`, `fork_logical_step=S_p.logical_step`, `source_fork_decision_hash=D.id`,
    `materialized_child_initial_state_hash=S_c.id`. **Anti-transplant:** `materialized_child_initial_state_hash`
@@ -141,7 +152,10 @@ pre, resurrection of a `removed` body OR object, transplanted `resulting_state_h
 `entity_lifecycle` id) refused, fully-remapped child admits, **unauthorized** parent (a different admitted
 historical snapshot of P whose hash/step do not match D) refused, foreign/stale/unregistered parent
 refused, two siblings distinct with no contamination; transit — byte-pin duration 0/1/>1 move+completion
-traces incl. early/late completion refusal; replay — identical bytes, order-independent storage.
+traces incl. early/late completion refusal, an admitted state with an `in_transit` body whose
+`logical_step < start_step` or `≥ arrival_step` refused, and **forking a mid-transit parent** (child
+inherits `logical_step = fork_logical_step` with remaining travel preserved and admits; a step-reset
+variant refused by the transit invariant); replay — identical bytes, order-independent storage.
 
 ## 11. Compatibility
 Additive only; new files under `coliseum/textlab/spatial/`. No existing module / primary evidence /
