@@ -117,14 +117,33 @@ def continue_acceptance(root, cfg, claims_path: str, experiments_path: str,
                                             matter_id, citable)
 
     if status.already_accepted:
-        # a durable MATTER_ACCEPTED exists. The file is a projection that may already
-        # reflect it (full no-op) or may be one deterministic re-apply behind (crash
-        # between the chain record and the file write).
-        if _claim_state(registry, claim_id) == "accepted":
+        # a durable MATTER_ACCEPTED binds a SPECIFIC subject and a SPECIFIC post-state
+        # content hash. A full no-op — attesting the file already reflects the record —
+        # is legitimate ONLY when the current registry actually matches that record:
+        # same subject AND identical canonical content. Claim state alone is NOT proof
+        # (an accepted-but-drifted registry, or a different accepted subject, must be
+        # refused as divergent, never silently blessed).
+        if status.subject_ref != claim_id:
+            return _result(applied=False,
+                           accepted_event_id=status.accepted_event_id,
+                           reason="resume divergence: the durable MATTER_ACCEPTED "
+                                  f"subject {status.subject_ref!r} does not match the "
+                                  f"requested claim {claim_id!r}")
+        if _content_hash(registry) == status.result_content_hash:
             return _result(applied=False, already=True,
                            accepted_event_id=status.accepted_event_id,
-                           reason="already continued — chain record and registry "
-                                  "file both reflect the accepted transition")
+                           reason="already continued — the registry canonically "
+                                  "matches the durable MATTER_ACCEPTED content hash")
+        # content does NOT match the record. Either the file is BEHIND (the claim is
+        # not yet accepted -> re-project iff the re-derived post-state matches the
+        # record) or it has DRIFTED (accepted, but altered) -> refuse, never attest.
+        if _claim_state(registry, claim_id) == "accepted":
+            return _result(applied=False,
+                           accepted_event_id=status.accepted_event_id,
+                           reason="resume divergence: the accepted registry content "
+                                  "hash does not match the recorded "
+                                  "result_content_hash — refusing to attest a "
+                                  "drifted registry")
         if not res["accepted"]:
             return _result(applied=False,
                            accepted_event_id=status.accepted_event_id,

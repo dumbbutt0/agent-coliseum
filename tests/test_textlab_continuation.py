@@ -113,6 +113,51 @@ def test_resume_refuses_divergent_projection(env, tmp_path):
     assert _load(claims_path)["claims"][0]["state"] == "replicated"  # left untouched
 
 
+def test_resume_refuses_drifted_accepted_registry(env, tmp_path):
+    """A registry that DRIFTED after acceptance (claim still `accepted`, but content
+    edited) must NOT be blessed as 'already continued' from claim state alone — the
+    durable content hash no longer matches, so resume refuses and records nothing
+    (audit 000765 HIGH)."""
+    root, repo, head, cfg = _resolved(env)
+    claims_path, exp_path = _write_registries(tmp_path)
+    continue_acceptance(root, cfg, claims_path, exp_path, MATTER, "c1", repo, head)
+    n_after = events.verify_chain(root).length
+    # drift: keep state `accepted`, mutate the statement -> different content hash
+    reg = _load(claims_path)
+    reg["claims"][0]["statement"] = "DRIFTED after acceptance"
+    with open(claims_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(reg, fh)
+    before = _load(claims_path)
+    res = continue_acceptance(root, cfg, claims_path, exp_path, MATTER, "c1",
+                              repo, head)
+    assert not res["applied"] and not res["already_recorded"]
+    assert "drifted" in res["reason"]
+    assert _load(claims_path) == before                  # left untouched
+    assert events.verify_chain(root).length == n_after   # no second record
+
+
+def test_resume_refuses_subject_mismatch(env, tmp_path):
+    """Resume asked about an accepted claim whose id differs from the durable record's
+    subject_ref must refuse — the record binds one subject only (audit 000765 HIGH)."""
+    root, repo, head, cfg = _resolved(env)
+    claims_path, exp_path = _write_registries(tmp_path)
+    continue_acceptance(root, cfg, claims_path, exp_path, MATTER, "c1", repo, head)
+    n_after = events.verify_chain(root).length
+    # add a SECOND, independently-accepted claim c2 to the file
+    reg = _load(claims_path)
+    reg["claims"].append({"claim_id": "c2", "state": "accepted",
+                          "statement": "Y holds", "evidence": ["exp-aa", "exp-bb"],
+                          "finding_audit": "x"})
+    with open(claims_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(reg, fh)
+    before = _load(claims_path)
+    res = continue_acceptance(root, cfg, claims_path, exp_path, MATTER, "c2",
+                              repo, head)   # recorded subject is c1, not c2
+    assert not res["applied"] and "subject" in res["reason"]
+    assert _load(claims_path) == before
+    assert events.verify_chain(root).length == n_after   # no second record
+
+
 def test_inert_under_v3_applies_nothing(env, tmp_path):
     root, repo, head, cfg = env
     _ratify(root, repo, head, cfg, 3)      # no resolution possible; governance inert
