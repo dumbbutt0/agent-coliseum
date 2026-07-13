@@ -44,15 +44,16 @@ Immutable **specifications** vs world-specific mutable **instances**, all conten
 and the **universal self-exclusion + typed-preimage + registry-truth invariant** defined in
 `TRAINING-READINESS-SUBSTRATE-PROFILE.md` §3 (each id is `config_hash` of a typed, domain-separated preimage
 computed with the output field ABSENT; the protected guarantee is registry truth, not held-object
-immutability; `__slots__` alone is not immutability). Every id below has an exact typed preimage and a
-construction order in which all referenced ids pre-exist.
-- **Spec ids** (definition of a type; preimage = the spec's own typed fields only, self-excluded):
-  `spatial_world_spec_id`, `room_spec_id`, `portal_spec_id`, `object_spec_id`, `agent_body_spec_id`,
-  `perception_regime_id` (the last excludes world-truth-only fields, mirroring `agent_regime_id`).
-- **Instance ids** (preimage = `{_domain, spec_id, world_line_id, spatial_schema_version,
-  deterministic_logical_instance_key}`, self-excluded): `room_instance_id`, `portal_instance_id`,
-  `object_instance_id`, `agent_body_id`. The `deterministic_logical_instance_key` is a frozen logical index
-  (never wall-clock/PID/UUID/object-identity/mutable-name/run-row).
+immutability; `__slots__` alone is not immutability). **The literal `_domain` string and the exhaustive
+preimage key set for every id below are bound normatively in Appendix A** — the phrasing here is descriptive;
+Appendix A is the binding contract, so two conforming implementations derive identical ids.
+- **Spec ids** (definition of a type; self-excluded; exact keys in Appendix A): `spatial_world_spec_id`,
+  `room_spec_id`, `portal_spec_id`, `object_spec_id`, `agent_body_spec_id`, `perception_regime_id` (the last
+  excludes world-truth-only fields, mirroring `agent_regime_id`).
+- **Instance ids** (self-excluded; each preimage is `{_domain, spatial_schema_version, <kind>_spec_id,
+  world_line_id, deterministic_logical_instance_key}` per Appendix A): `room_instance_id`,
+  `portal_instance_id`, `object_instance_id`, `agent_body_id`. The `deterministic_logical_instance_key` is a
+  frozen logical index (never wall-clock/PID/UUID/object-identity/mutable-name/run-row).
 - Construction order: `spatial_world_spec_id`/room/portal/object/agent_body **spec** ids first (pure content);
   then `world_line_id` (§4.1); then instance ids referencing the spec + world_line. No id is part of its own
   preimage; no id references a not-yet-built id.
@@ -70,13 +71,13 @@ integrates via an **additive** `lineage_edges` input to the group-aware partitio
 callers byte-identical) and a **separate** `counterfactual_delta` metrics join — never by mutating
 `control_of` or `control_twin_delta`.
 
-Typed preimages + acyclic construction order (shared with `TRAINING-READINESS-SUBSTRATE-PROFILE.md` §4.7):
-a **root** world-line is `world_line_id = config_hash({_domain: "world_line", spatial_world_spec_id,
-initial_state_key, spatial_schema_version})` (no parent). A **forked child** world-line is
-`config_hash({_domain: "world_line", parent_world_line_id, source_fork_decision_hash, changed_dimension,
-unchanged_comparison_dims, spatial_schema_version})` — computed BEFORE any fork record; then
-`fork_id` references that already-built `branch_world_line_id`. Each is self-excluded from its own preimage,
-so `world_line_id`, `fork_id`, and the resulting branch identity form a strict order with no cycle.
+Typed preimages + acyclic construction order (shared with `TRAINING-READINESS-SUBSTRATE-PROFILE.md` §4.7;
+exact keys in Appendix A): a **root** world-line is `config_hash({_domain: "spatial.world_line.v1",
+spatial_schema_version, spatial_world_spec_id, initial_state_key})` (no parent). A **forked child**
+world-line is `config_hash({_domain: "spatial.world_line.v1", spatial_schema_version, parent_world_line_id,
+source_fork_decision_hash, changed_dimension, unchanged_comparison_dims})` — computed BEFORE any fork record;
+then `fork_id` references that already-built `branch_world_line_id`. Each is self-excluded from its own
+preimage, so `world_line_id`, `fork_id`, and the resulting branch identity form a strict order with no cycle.
 
 ## 5. Room and portal graph
 - **Room spec** (no mutable state): stable semantic name; room type/tags; permitted portal attachment
@@ -129,10 +130,11 @@ does not see entities in unrelated rooms; a held object is visible per object + 
 are excluded unless a deterministic reveal condition holds; adjacent-room hearing is off by default (or
 narrowly versioned). Each observation carries: observer identity; `world_line_id`; logical step; perception
 regime; visible room identity; visible entity identities; and the observable state projection. Its
-`observation_hash = config_hash({_domain: "observation." + view_kind, observation_schema_version,
-observer_identity, world_line_id, logical_step, perception_regime, visible_room_identity,
-visible_entity_identities, observable_state_projection})` — self-excluded from its own preimage (§3/§4), with
-`view_kind` in the domain so the actor and privileged artifacts of the same emission can never alias.
+`observation_hash = config_hash({_domain: "trs.observation." + view_kind + ".v1", schema_version,
+view_kind, observer_identity, world_line_id, logical_step, perception_regime, visible_room_identity,
+visible_entity_identities, observable_state_projection})` (literal domains + exact keys in Appendix A) —
+self-excluded from its own preimage (§3/§4), with `view_kind` in the domain so the actor and privileged
+artifacts of the same emission can never alias.
 Authoritative hidden fields are never included in the actor preimage. The renderer emits the **actor**
 `ObservationArtifact` (this projection); a separate **privileged** `ObservationArtifact` carries world truth
 under `view_kind = privileged`.
@@ -211,3 +213,29 @@ governance path — never smuggled into a spatial source slice.
 - **Gated:** a live-model spatial run and any persistent/embodied society dynamics (owner SC-LC +
   G-SOCIETY-PROFILE); weight-level behavioral training (M14/SC-8).
 - **Built + verified:** nothing yet — this is a design profile.
+
+## Appendix A — Normative spatial identity-derivation table (binding)
+Same rule as `TRAINING-READINESS-SUBSTRATE-PROFILE.md` Appendix A: `id = config_hash(canonical_json({_domain:
+<literal>, <exact keys>}))` with the output id field **absent** (self-exclusion), the literal `_domain`
+mandatory, referenced ids pre-existing (construction order §4). A conforming implementation MUST derive the
+same id from the same content. `spatial_schema_version` is the frozen `SPATIAL_SCHEMA_VERSION`.
+
+| id | literal `_domain` | preimage keys (besides `_domain`; id self-excluded) |
+| --- | --- | --- |
+| `spatial_world_spec_id` | `spatial.world_spec.v1` | `spatial_schema_version`, `room_spec_ids` (sorted), `portal_spec_ids` (sorted), `object_spec_ids` (sorted), `agent_body_spec_ids` (sorted), `perception_regime_id`, `initial_layout` |
+| `room_spec_id` | `spatial.room_spec.v1` | `spatial_schema_version`, `semantic_name`, `room_type_tags` (sorted), `permitted_portal_attachment_points` (sorted), `capacity` (or `null`), `default_visibility_policy`, `default_audibility_policy` |
+| `portal_spec_id` | `spatial.portal_spec.v1` | `spatial_schema_version`, `origin_room_spec_id`, `destination_room_spec_id`, `directionality`, `traversal_duration_steps`, `supported_state_capabilities` (sorted), `perception_behavior` |
+| `object_spec_id` | `spatial.object_spec.v1` | `spatial_schema_version`, `object_type`, `allowed_state_fields` (sorted), `allowed_actions` (sorted), `portability`, `container_capability`, `visibility_behavior`, `exclusive_possession`, `satisfies_portal_requirement` |
+| `agent_body_spec_id` | `spatial.agent_body_spec.v1` | `spatial_schema_version`, `agent_body_type`, `default_perception_regime_id`, `inventory_limit` (or `null`) |
+| `perception_regime_id` | `spatial.perception_regime.v1` | `spatial_schema_version`, `renderer_version`, `visibility_policy`, `audibility_policy`, `observation_policy_version` (world-truth-only fields are excluded) |
+| `room_instance_id` | `spatial.room_instance.v1` | `spatial_schema_version`, `room_spec_id`, `world_line_id`, `deterministic_logical_instance_key` |
+| `portal_instance_id` | `spatial.portal_instance.v1` | `spatial_schema_version`, `portal_spec_id`, `world_line_id`, `deterministic_logical_instance_key` |
+| `object_instance_id` | `spatial.object_instance.v1` | `spatial_schema_version`, `object_spec_id`, `world_line_id`, `deterministic_logical_instance_key` |
+| `agent_body_id` | `spatial.agent_body_instance.v1` | `spatial_schema_version`, `agent_body_spec_id`, `world_line_id`, `deterministic_logical_instance_key` |
+| `world_line_id` (root) | `spatial.world_line.v1` | `spatial_schema_version`, `spatial_world_spec_id`, `initial_state_key` |
+| `world_line_id` (forked) | `spatial.world_line.v1` | `spatial_schema_version`, `parent_world_line_id`, `source_fork_decision_hash`, `changed_dimension`, `unchanged_comparison_dims` |
+| `observation_hash` (per view) | `trs.observation.actor.v1` / `trs.observation.privileged.v1` | `schema_version`, `view_kind`, `observer_identity`, `world_line_id`, `logical_step`, `perception_regime`, `visible_room_identity`, `visible_entity_identities`, `observable_state_projection` |
+
+The spatial trace record ids (`SPATIAL_WORLD_INITIALIZED` … `SPATIAL_WORLD_COMPLETED`, §12) bind the fields
+listed in §12 under the literal `_domain` `spatial.trace.<event_name>.v1`, self-excluded, with pre/post-state
+and action/observation hashes referenced (not recomputed).

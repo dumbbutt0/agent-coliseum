@@ -58,7 +58,10 @@ to hidden-evaluation contents. No behavioral **label creation** (T0-B gated, §8
   identity** — they live in the TrajectoryManifest as derived pointers. TrajectoryManifest references
   decisions; no decision references its manifest. The fork/world-line/branch construction order is fixed in
   §4.7 (child `world_line_id` first, then `fork_id` referencing it, then the fork record) so there is no
-  cycle among `fork_id`, `world_line_id`, and the resulting branch identity.
+  cycle among `fork_id`, `world_line_id`, and the resulting branch identity. **The literal `_domain` string
+  and the exhaustive preimage key set for every id kind are bound in Appendix A (normative) — a conforming
+  implementation MUST use those exact values, so two implementations derive identical ids from identical
+  content.**
 - Forbidden in any identity: wall-clock, process id, random UUID (without a frozen deterministic
   derivation), Python object identity, mutable display names, or a run-row id used as a substitute for
   scenario/world identity. Wall-clock remains non-identity metadata.
@@ -168,13 +171,13 @@ lineage seam **without redefining `control_of`** (a parallel `world_line_id`/`fo
 
 **Construction order (acyclic; binding — closes the fork/world-line/branch cycle risk).** Ids are built in
 this fixed order, each self-excluded from its own preimage (§3):
-1. `branch_world_line_id = config_hash({_domain: "world_line", parent_world_line_id, source_fork_decision_hash,
-   changed_dimension, unchanged_comparison_dims, schema_version})` — all inputs pre-exist (the parent
-   world-line, the source decision, and the declared change), so the child world-line id is fully determined
-   *before* any fork record exists.
-2. `fork_id = config_hash({_domain: "counterfactual_fork", source_trajectory_id, source_fork_decision_hash,
-   source_env_identity, source_policy_identity, changed_dimension, unchanged_comparison_dims,
-   branch_world_line_id, schema_version})` — references the already-built `branch_world_line_id`.
+1. `branch_world_line_id = config_hash({_domain: "spatial.world_line.v1", spatial_schema_version,
+   parent_world_line_id, source_fork_decision_hash, changed_dimension, unchanged_comparison_dims})` — all
+   inputs pre-exist (the parent world-line, the source decision, and the declared change), so the child
+   world-line id is fully determined *before* any fork record exists. (Exact keys per Appendix A.)
+2. `fork_id = config_hash({_domain: "trs.counterfactual_fork.v1", schema_version, source_trajectory_id,
+   source_fork_decision_hash, source_env_identity, source_policy_identity, changed_dimension,
+   unchanged_comparison_dims, branch_world_line_id})` — references the already-built `branch_world_line_id`.
 3. The CounterfactualFork record's own id (if distinct from `fork_id`) is `config_hash` of its content with
    its id field absent. Nothing references a not-yet-built id; `fork_id`, `world_line_id`, and the resulting
    branch identity form a strict order, never a cycle.
@@ -287,8 +290,9 @@ deterministic re-export still succeeds; (26) high-level intent, symbolic action,
 execution result cannot be conflated; (27) parse failures, refusals, blocked actions, and recovery actions
 remain distinguishable; (28) admission supersession is append-only + auditable; (29) dataset manifests bind
 all transformations + ordering; (30) tampering with any referenced artifact changes validation or identity as
-appropriate; (31) **self-exclusion + typed preimage (§3):** for every record kind, its id recomputes from the
-frozen typed preimage with the output field ABSENT; a payload that includes its own id field is rejected,
+appropriate; (31) **normative identity (§3 + Appendix A):** for every id kind, one frozen fixture recomputes
+to a normative expected digest using the **literal `_domain` + exhaustive preimage keys of Appendix A** with
+the output field ABSENT (so two implementations agree); a payload that includes its own id field is rejected,
 cross-domain aliasing is rejected, an altered referenced hash changes the id, cross-world references fail
 closed, and `fork_id`/`world_line_id`/`branch_world_line_id` construct in the fixed acyclic order (§4.7) with
 no cycle.
@@ -317,3 +321,31 @@ Adopting this profile means the *evidence format* is training-ready — it does 
 performs, or is authorized to perform, any learning. Historical runs will carry `unavailable` for
 tokenizer/score/memory/privileged fields they never recorded; those are marked, never fabricated. No claim
 of trained behavioral agency, generalization, or governed acceptance follows from this format existing.
+
+## Appendix A — Normative identity-derivation table (binding)
+Every id below is `id = config_hash(preimage)` where `preimage` is the `canonical_json` (sorted keys,
+`allow_nan=False`) of a dict containing **exactly** `_domain` (the literal string given) plus the listed
+keys, with the **output id field itself absent** (self-exclusion, §3). A conforming implementation MUST use
+the literal `_domain` and the exact key set below; any extra/missing key, a different `_domain`, or a
+self-including payload is non-conforming. All referenced ids must already exist (construction order, §3/§4.7).
+Threat-test 31 pins each id to a frozen fixture + expected digest computed exactly this way. Schema-version
+keys hold the record's own `*_schema_version`.
+
+| id | literal `_domain` | preimage keys (besides `_domain`; id self-excluded) |
+| --- | --- | --- |
+| `behavior_policy_spec_id` | `trs.behavior_policy_spec.v1` | `schema_version`, `behavioral_config` (the full `agents.spec_dict` bundle), `comparison_regime_id`, `agent_regime_id`, `tokenizer_identity`, `action_score`, `memory_state_ref`, `exploration_mechanism` |
+| `observation_id` (per view) | `trs.observation.actor.v1` / `trs.observation.privileged.v1` | `schema_version`, `view_kind`, `content` |
+| `legal_action_set_id` | `trs.legal_action_set.v1` | `schema_version`, `ordered_action_ids`, `mask` |
+| `decision_record_id` (privileged view) | `trs.decision_record.v1` | `schema_version`, `sequence_position`, `prev_decision_hash`, `termination_kind`, `action_split` (`high_level_intent`,`symbolic_action`,`controller_actions`,`execution_result`), `actor_observation_hash`, `privileged_observation_hash`, `legal_action_set_hash`, `behavior_policy_spec_hash`, `world_instance_hash` (or the literal `null` when no spatial producer) |
+| `actor_decision_id` | `trs.actor_decision.v1` | `schema_version`, `sequence_position`, `prev_actor_decision_hash`, `termination_kind`, `action_split`, `actor_observation_hash`, `legal_action_set_hash`, `behavior_policy_spec_hash`, `memory_state_ref`, `removed_references` |
+| `trajectory_manifest_id` | `trs.trajectory_manifest.v1` | `schema_version`, `run_identity` (the `Run` id), `world_line_id` (or `null`), `ordered_decision_ids`, `episode_boundaries` (derived `next` links + the integrity report are non-identity and excluded) |
+| `failure_record_id` | `trs.failure_record.v1` | `schema_version`, `reason`, `raw_payload`, `offending_refs` |
+| `branch_world_line_id` | `spatial.world_line.v1` | root: `spatial_schema_version`,`spatial_world_spec_id`,`initial_state_key`; forked: `spatial_schema_version`,`parent_world_line_id`,`source_fork_decision_hash`,`changed_dimension`,`unchanged_comparison_dims` (see §4.7 / spatial Appendix A) |
+| `fork_id` | `trs.counterfactual_fork.v1` | `schema_version`, `source_trajectory_id`, `source_fork_decision_hash`, `source_env_identity`, `source_policy_identity`, `changed_dimension`, `unchanged_comparison_dims`, `branch_world_line_id` |
+| `label_id` | `trs.label_record.v1` | `schema_version`, `label_kind`, `label_value`, `label_provenance`, `label_authority`, `labeler_identity`, `source_evidence_refs`, `appeal_status` (timestamp is non-identity, excluded) |
+| `dataset_export_manifest_id` | `trs.dataset_export_manifest.v1` | `schema_version`, `view_kind`, `partition`, `dataset_commitment` (the existing `dataset:commitment:v1` descriptor hash), `filters`, `ordering`, `transformation_versions` |
+| `TrainingAdmissionRecord` | reuse existing `dataset:training_admission:v1` | (unchanged; see `training_admission.py`) |
+
+Spatial spec/instance/observation ids are pinned identically in the spatial profile's Appendix A. Where a
+non-spatial producer has no world, `world_line_id`/`world_instance_hash` are the literal `null` (a stable,
+canonical value), never omitted.
