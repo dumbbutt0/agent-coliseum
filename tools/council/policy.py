@@ -934,6 +934,176 @@ def governance_route(root: str, cfg: Config, request_id: str) -> GovernanceRoute
                            policy_hash, reasons)
 
 
+# -------------------------------------------- A/B/C/D governance Class-C evaluator
+
+def council_resolution_exists(chain: list, matter_id: str) -> bool:
+    """A matter is already resolved iff the chain carries a COUNCIL_RESOLVED for it."""
+    return any(e.get("event_type") == "COUNCIL_RESOLVED"
+               and e.get("request_id") == matter_id for e in chain)
+
+
+def evaluate_class_c(root: str, cfg: Config, resolution_event: dict,
+                     chain: list) -> PolicyDecision:
+    """May a Class-C matter be resolved (COUNCIL_RESOLVED) under governance_v1's
+    FROZEN seven-gate protocol? Self-authenticating and fail-closed: every gate is
+    re-derived from the VERIFIED chain (the preregistration, the codex-approved
+    evidence, and any dissent are chain events — the builder's resolution payload is
+    a set of CLAIMS re-checked here, never trusted). Any unmet gate lands in
+    `reasons`; a non-empty `reasons` means the matter stays UNRESOLVED. Insufficient
+    auditor quorum leaves the matter unresolved — it NEVER escalates to the owner.
+    INERT unless the installed policy equals the effective owner-ratified
+    governance-enabled pin (v4+)."""
+    from tools.council.schemas import (compute_preregistration_hash,
+                                       compute_resolution_hash)
+    reasons: list = []
+    checked: list = []
+
+    def cond(name: str, ok: bool, why: str = "") -> None:
+        checked.append(name)
+        if not ok:
+            reasons.append(f"{name}: {why}" if why else name)
+
+    policy = policy_hash = None
+    try:
+        policy, policy_hash = load_policy(root)
+    except SchemaViolation as exc:
+        cond("policy_installed", False, str(exc))
+        return PolicyDecision(False, None, reasons, checked)
+
+    # governance must be ACTIVE on the exact owner-ratified pin (INERT under v3)
+    eff_hash, eff_version = effective_policy_pin(chain)
+    try:
+        code_defined = is_code_defined_version(policy)
+    except SchemaViolation:
+        code_defined = False
+    gov = policy.get("governance") or {}
+    cond("governance_active",
+         bool(gov.get("enabled")) and eff_version is not None
+         and eff_version >= 4 and code_defined
+         and (eff_hash is None or eff_hash == policy_hash)
+         and policy_version_of(policy) == eff_version,
+         "governance is not active on the owner-ratified pin")
+
+    report = events_mod.verify_chain(root)
+    cond("event_chain_verifies", report.healthy,
+         report.error or ("torn suffix" if report.suffix_incomplete else ""))
+
+    payload = resolution_event.get("payload") or {}
+    matter_id = resolution_event.get("request_id")
+    cond("resolution_payload_bound",
+         payload.get("matter_id") == matter_id
+         and payload.get("resolution_hash") == compute_resolution_hash(payload),
+         "resolution payload is not self-consistent / matter-bound")
+    cond("matter_not_already_resolved",
+         not council_resolution_exists(chain, matter_id),
+         "matter already has a COUNCIL_RESOLVED")
+
+    # --- gate 1a: the preregistration exists, is claude-authored + hash-valid ---
+    prereg_id = payload.get("preregistration_event_id")
+    prereg = None
+    prereg_index = None
+    for i, e in enumerate(chain):
+        if e.get("event_id") == prereg_id \
+                and e.get("event_type") == "PREREGISTRATION" \
+                and e.get("request_id") == matter_id:
+            prereg, prereg_index = e, i
+    if prereg is None:
+        cond("preregistration_present", False,
+             "no matching PREREGISTRATION for this matter in the chain")
+    else:
+        pp = prereg.get("payload") or {}
+        cond("preregistration_present",
+             prereg.get("sender") == "claude"
+             and pp.get("preregistration_hash") == compute_preregistration_hash(pp),
+             "preregistration is not a valid claude-authored hash-bound record")
+
+    # --- resolve the cited evidence to codex RESULT_APPROVED chain events ---
+    by_id = {e.get("event_id"): (i, e) for i, e in enumerate(chain)}
+    cited = payload.get("evidence_approval_event_ids") or []
+    evidence = []          # [(index, event, verdict_payload)]
+    all_codex_approved = bool(cited)
+    for eid in cited:
+        pair = by_id.get(eid)
+        if pair is None or pair[1].get("event_type") != "RESULT_APPROVED" \
+                or pair[1].get("sender") != "codex":
+            all_codex_approved = False
+            continue
+        evidence.append((pair[0], pair[1], pair[1].get("payload") or {}))
+    # gate 6: independent auditor approval (codex; no self-audit — the resolver is
+    # claude, the approvals are codex). Insufficient quorum -> unresolved, not owner.
+    required = gov.get("class_c_required_auditors") or gov.get("required_auditors") \
+        or ["codex"]
+    cond("independent_auditor_approval",
+         all_codex_approved and len(evidence) >= 1 and required == ["codex"],
+         "every cited evidence must be an independent codex RESULT_APPROVED "
+         "(insufficient quorum leaves the matter UNRESOLVED, never owner)")
+
+    # gate 3: reproducibility replay (integrity) — every deterministic evidence
+    # byte-replayed. SEPARATE from replication.
+    cond("reproducibility_replay",
+         bool(evidence) and all(v.get("replay_result") == "replayed_ok"
+                                for _i, _e, v in evidence),
+         "every cited evidence must have replay_result == replayed_ok")
+
+    # gate 4: independent replication >= 2 DISTINCT citable experiments.
+    distinct_experiments = {v.get("experiment_config_hash")
+                            for _i, _e, v in evidence
+                            if v.get("experiment_config_hash")}
+    cond("independent_replication_2plus", len(distinct_experiments) >= 2,
+         f"needs >=2 distinct citable experiments (got "
+         f"{len(distinct_experiments)}); replay is not replication")
+
+    # gate 1b: preregistration precedes the evidence + evidence freshness. No
+    # evidence may predate the preregistration (backfilling); a sealed inventory
+    # must have been committed at preregistration.
+    if prereg is not None and evidence:
+        pp = prereg.get("payload") or {}
+        fresh_ok, fresh_why = True, ""
+        for i, _e, v in evidence:
+            if i <= prereg_index:
+                fresh_ok, fresh_why = False, "evidence predates preregistration"
+                break
+            if pp.get("freshness_mode") == "sealed_inventory":
+                if v.get("evidence_inventory_hash") not in \
+                        set(pp.get("sealed_inventory_hashes") or []):
+                    fresh_ok = False
+                    fresh_why = "evidence inventory not in the sealed precommitment"
+                    break
+        cond("preregistration_and_freshness", fresh_ok, fresh_why)
+    else:
+        cond("preregistration_and_freshness", False,
+             "cannot establish preregistration+evidence ordering")
+
+    # gate 2: evidence adequacy — summed scenarios_run meets the precommitted size.
+    if prereg is not None:
+        min_n = (prereg.get("payload") or {}).get("min_sample_size", 0)
+        total_n = sum((v.get("counts") or {}).get("scenarios_run", 0)
+                      for _i, _e, v in evidence)
+        cond("evidence_adequacy", total_n >= min_n and min_n > 0,
+             f"sample size {total_n} < precommitted min {min_n}")
+
+    # gate 5: metric validity — the resolution metric equals the PRECOMMITTED metric
+    # (no post-hoc metric selection).
+    if prereg is not None:
+        cond("metric_validity",
+             payload.get("metric") == (prereg.get("payload") or {})
+             .get("precommitted_metric"),
+             "resolution metric differs from the preregistered metric "
+             "(post-hoc metric selection)")
+
+    # gate 7: recorded-dissent consensus — an unreconciled codex COUNCIL_DISSENT
+    # for the matter BLOCKS (dissent is never averaged or builder-resolved).
+    open_dissent = [e for e in chain
+                    if e.get("event_type") == "COUNCIL_DISSENT"
+                    and e.get("request_id") == matter_id
+                    and not (e.get("payload") or {}).get("reconciled", False)]
+    cond("recorded_dissent_consensus", not open_dissent,
+         f"{len(open_dissent)} unreconciled council dissent(s) block resolution")
+
+    return PolicyDecision(auto_approve=not reasons, policy_hash=policy_hash,
+                          reasons=reasons, checked=checked)
+
+
 # ------------------------------------------------------------ society milestone
 
 def milestone_status(chain: list, policy: dict) -> tuple:

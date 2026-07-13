@@ -78,6 +78,16 @@ EVENT_TYPES = (
     # delegation envelope. Class-A eligibility is the CODEX-emitted
     # condition_classes in the verdict (hash-bound; the builder cannot forge it).
     "CONDITIONS_AUTO_SATISFIED",
+    # A/B/C/D governance Class-C resolution (governance_v1; INERT until owner v4).
+    # PREREGISTRATION (claude) commits the question/criteria/metric/sample-size/
+    # freshness BEFORE the resolving evidence; COUNCIL_DISSENT (codex) records an
+    # auditor dissent that blocks until reconciled; COUNCIL_RESOLVED (claude,
+    # TOKENLESS) resolves a Class-C matter, authorized ONLY when
+    # policy.evaluate_class_c passes at append time (re-validated in
+    # events.append_event) — mirrors CONDITIONS_AUTO_SATISFIED / AUTO_APPROVED.
+    "PREREGISTRATION",
+    "COUNCIL_DISSENT",
+    "COUNCIL_RESOLVED",
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
@@ -128,6 +138,12 @@ SENDER_ALLOWED = {
     # HUMAN_TOKEN_REQUIRED_EVENT_TYPES). append_event refuses it unless the
     # delegation actually holds — so a bare claude sender is never sufficient.
     "CONDITIONS_AUTO_SATISFIED": frozenset({"claude"}),
+    # Class-C governance: preregistration/resolution are claude-authored records
+    # (resolution authority is a re-validated evaluate_class_c pass, NOT a token);
+    # dissent is an independent-auditor (codex) act.
+    "PREREGISTRATION": frozenset({"claude"}),
+    "COUNCIL_DISSENT": frozenset({"codex"}),
+    "COUNCIL_RESOLVED": frozenset({"claude"}),
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
@@ -482,6 +498,8 @@ def validate_event(event: dict, for_append: bool = False) -> None:
         raise SchemaViolation("event payload must be an object")
     if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
         validate_verdict_event_payload(event)
+    if event["event_type"] in CLASS_C_PAYLOAD_EVENT_TYPES:
+        validate_class_c_event_payload(event)
     if compute_event_hash(event) != event["event_hash"]:
         raise ChainError(
             f"event {event.get('event_id')!r}: event_hash does not match "
@@ -830,6 +848,81 @@ RESULT_VERDICT_TO_EVENT = {
 RESULT_VERDICT_EVENT_TYPES = frozenset(RESULT_VERDICT_TO_EVENT.values())
 VERDICT_PAYLOAD_EVENT_TYPES = \
     frozenset(VERDICT_TO_EVENT.values()) | RESULT_VERDICT_EVENT_TYPES
+
+# --- A/B/C/D governance Class-C payloads (governance_v1; INERT until owner v4) ---
+PREREGISTRATION_DOMAIN = "council:preregistration:v1"
+COUNCIL_RESOLUTION_DOMAIN = "council:council_resolution:v1"
+CLASS_C_FRESHNESS_MODES = ("sealed_inventory", "post_prereg_generation")
+CLASS_C_PAYLOAD_EVENT_TYPES = frozenset(
+    {"PREREGISTRATION", "COUNCIL_RESOLVED", "COUNCIL_DISSENT"})
+
+
+def compute_preregistration_hash(payload: dict) -> str:
+    body = {k: v for k, v in payload.items() if k != "preregistration_hash"}
+    return payload_hash({"domain": PREREGISTRATION_DOMAIN, "payload": body})
+
+
+def compute_resolution_hash(payload: dict) -> str:
+    body = {k: v for k, v in payload.items() if k != "resolution_hash"}
+    return payload_hash({"domain": COUNCIL_RESOLUTION_DOMAIN, "payload": body})
+
+
+def _req_str(payload: dict, field: str, where: str) -> None:
+    if not isinstance(payload.get(field), str) or not payload[field]:
+        raise SchemaViolation(f"{where}: {field} must be a non-empty string")
+
+
+def _req_nonneg_int(payload: dict, field: str, where: str) -> None:
+    v = payload.get(field)
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        raise SchemaViolation(f"{where}: {field} must be a non-negative int")
+
+
+def validate_class_c_event_payload(event: dict) -> None:
+    """Structural schema for the Class-C governance events. The AUTHORITY of a
+    COUNCIL_RESOLVED (the seven frozen gates) is re-validated from the chain by
+    policy.evaluate_class_c at the append boundary — this only enforces the
+    payload SHAPE + its self-referential content hash, so a malformed record can
+    never enter the chain and every field the evaluator reads is well-typed."""
+    etype = event["event_type"]
+    p = event["payload"]
+    matter = event["request_id"]
+    if p.get("matter_id") != matter:
+        raise SchemaViolation(
+            f"{etype}: payload.matter_id must equal the event request_id")
+    if etype == "PREREGISTRATION":
+        for f in ("question", "decision_criteria", "precommitted_metric",
+                  "metric_version", "freshness_mode"):
+            _req_str(p, f, "PREREGISTRATION")
+        _req_nonneg_int(p, "min_sample_size", "PREREGISTRATION")
+        if p["freshness_mode"] not in CLASS_C_FRESHNESS_MODES:
+            raise SchemaViolation(
+                f"freshness_mode must be one of {CLASS_C_FRESHNESS_MODES}")
+        sealed = p.get("sealed_inventory_hashes") or []
+        if p["freshness_mode"] == "sealed_inventory":
+            if not isinstance(sealed, list) or not sealed \
+                    or any(not isinstance(h, str) or not h for h in sealed):
+                raise SchemaViolation(
+                    "sealed_inventory mode requires a non-empty "
+                    "sealed_inventory_hashes list of strings")
+        if p.get("preregistration_hash") != compute_preregistration_hash(p):
+            raise SchemaViolation(
+                "preregistration_hash does not match content")
+    elif etype == "COUNCIL_RESOLVED":
+        for f in ("preregistration_event_id", "resolution", "metric"):
+            _req_str(p, f, "COUNCIL_RESOLVED")
+        _req_nonneg_int(p, "sample_size", "COUNCIL_RESOLVED")
+        ev = p.get("evidence_approval_event_ids")
+        if not isinstance(ev, list) \
+                or any(not isinstance(x, str) or not x for x in ev):
+            raise SchemaViolation(
+                "evidence_approval_event_ids must be a list of event-id strings")
+        if p.get("resolution_hash") != compute_resolution_hash(p):
+            raise SchemaViolation("resolution_hash does not match content")
+    elif etype == "COUNCIL_DISSENT":
+        _req_str(p, "dissent", "COUNCIL_DISSENT")
+        if not isinstance(p.get("reconciled"), bool):
+            raise SchemaViolation("COUNCIL_DISSENT: reconciled must be a bool")
 
 
 def validate_verdict_event_payload(event: dict) -> None:

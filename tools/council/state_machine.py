@@ -88,7 +88,14 @@ STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
                               "POLICY_INITIALIZED", "POLICY_AMENDED",
                               "HUMAN_IDENTITY_INITIALIZED",
                               "HUMAN_IDENTITY_ROTATED",
-                              "MIGRATION_APPROVED"})
+                              "MIGRATION_APPROVED",
+                              # Class-C governance matters use their own matter_id
+                              # (request_id) and carry NO source-request authority;
+                              # their lifecycle/ordering is gated below + at the
+                              # append boundary (policy.evaluate_class_c), never in
+                              # the source-request FSM.
+                              "PREREGISTRATION", "COUNCIL_DISSENT",
+                              "COUNCIL_RESOLVED"})
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",

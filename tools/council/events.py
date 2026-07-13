@@ -176,6 +176,12 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         # right now (mirrors the AUTO_APPROVED trust model; fail-closed).
         if event_type == "CONDITIONS_AUTO_SATISFIED":
             _verify_delegated_satisfaction(root, cfg, chain, event)
+        # governance Class-C: a COUNCIL_RESOLVED is a claude-sender, TOKENLESS
+        # resolution whose authority is a re-validated evaluate_class_c pass (the
+        # frozen seven-gate protocol), never its presence. Fail-closed at the append
+        # boundary (mirrors CONDITIONS_AUTO_SATISFIED).
+        if event_type == "COUNCIL_RESOLVED":
+            _verify_class_c_resolution(root, cfg, chain, event)
         # H1: burn the human one-time token (if this event type requires
         # one) durably BEFORE the line lands — a crash here wastes a
         # token, it never leaves a spendable one behind an appended event
@@ -266,6 +272,21 @@ def _verify_delegated_satisfaction(root: str, cfg: Config, chain: list,
     if not decision.auto_approve:
         raise CouncilError(
             "delegated satisfaction refused by the delegation policy: "
+            + "; ".join(decision.reasons))
+
+
+def _verify_class_c_resolution(root: str, cfg: Config, chain: list,
+                               event: dict) -> None:
+    """Refuse a COUNCIL_RESOLVED unless `policy.evaluate_class_c` passes right now
+    against the verified chain — the resolution's authority is the re-validated
+    seven-gate evaluation, not the event's presence. Fail-closed: any unmet gate or
+    error refuses the append, leaving the matter UNRESOLVED (never escalated to the
+    owner)."""
+    from tools.council import policy   # lazy: policy imports events
+    decision = policy.evaluate_class_c(root, cfg, event, chain)
+    if not decision.auto_approve:
+        raise CouncilError(
+            "council resolution refused by the Class-C protocol: "
             + "; ".join(decision.reasons))
 
 
