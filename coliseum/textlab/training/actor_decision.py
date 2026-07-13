@@ -20,6 +20,30 @@ ACTOR_DECISION_SCHEMA_VERSION = "1"
 #: privileged references that are physically removed from the actor projection.
 REMOVED_REFERENCES = ("privileged_observation_hash", "world_instance_hash")
 
+#: the EXACT Appendix-A actor_decision preimage key set (id self-excluded).
+_ACTOR_DECISION_KEYS = frozenset({
+    "schema_version", "sequence_position", "prev_actor_decision_hash",
+    "termination_kind", "action_split", "actor_observation_hash",
+    "legal_action_set_hash", "behavior_policy_spec_hash", "memory_state_ref",
+    "removed_references",
+})
+
+
+def _assert_no_privileged_ref(payload, where: str = "actor decision") -> None:
+    """Recursively reject a privileged/world-instance reference name at ANY depth
+    (including inside action_split.execution_result), so a nested privileged ref
+    can never become part of actor canonical bytes."""
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            if k in REMOVED_REFERENCES:
+                raise ContentRecordError(
+                    f"{where}: actor decision must not contain privileged "
+                    f"reference {k!r} at any depth")
+            _assert_no_privileged_ref(v, f"{where}.{k}")
+    elif isinstance(payload, list):
+        for i, v in enumerate(payload):
+            _assert_no_privileged_ref(v, f"{where}[{i}]")
+
 
 class ActorDecisionRecord(ContentRecord):
     __slots__ = ()
@@ -27,15 +51,25 @@ class ActorDecisionRecord(ContentRecord):
     ID_FIELD = "actor_decision_id"
 
     def __init__(self, preimage: dict):
-        # fail closed: an actor decision may never reference a removed privileged
-        # id or carry any registered privileged field at any depth, even when
-        # constructed directly (not only via project_actor_decision).
-        if isinstance(preimage, dict):
-            for k in REMOVED_REFERENCES:
-                if k in preimage:
-                    raise ContentRecordError(
-                        f"actor decision must not reference privileged {k!r}")
-            assert_no_privileged_leak(preimage, "actor decision preimage")
+        if not isinstance(preimage, dict):
+            raise ContentRecordError("preimage must be a dict")
+        # exact Appendix-A key set + fixed schema version (no missing/extra keys).
+        if set(preimage) != _ACTOR_DECISION_KEYS:
+            missing = sorted(_ACTOR_DECISION_KEYS - set(preimage))
+            extra = sorted(set(preimage) - _ACTOR_DECISION_KEYS)
+            raise ContentRecordError(
+                f"actor decision preimage must be exactly {sorted(_ACTOR_DECISION_KEYS)} "
+                f"(missing={missing}, extra={extra})")
+        if preimage["schema_version"] != ACTOR_DECISION_SCHEMA_VERSION:
+            raise ContentRecordError(
+                f"actor decision schema_version must be {ACTOR_DECISION_SCHEMA_VERSION!r}")
+        if list(preimage["removed_references"]) != list(REMOVED_REFERENCES):
+            raise ContentRecordError(
+                f"removed_references must be exactly {list(REMOVED_REFERENCES)}")
+        # fail closed: no registered privileged FIELD (facts/hidden_effects/…) and
+        # no privileged/world REFERENCE name anywhere, even via direct construction.
+        assert_no_privileged_leak(preimage, "actor decision preimage")
+        _assert_no_privileged_ref(preimage, "actor decision preimage")
         super().__init__(preimage)
 
 

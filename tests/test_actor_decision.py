@@ -77,10 +77,46 @@ def test_actor_only_reconstruction_needs_no_privileged_data():
 
 
 # ------------------------------------------------------- leak fail-closed
-def test_actor_decision_rejects_privileged_reference_directly():
+def _valid_actor_preimage(**over):
+    p = {
+        "schema_version": "1", "sequence_position": 0,
+        "prev_actor_decision_hash": None, "termination_kind": "natural_terminal",
+        "action_split": {"high_level_intent": None, "symbolic_action": "execute",
+                         "controller_actions": None,
+                         "execution_result": {"narrative": "done"}},
+        "actor_observation_hash": "a" * 64, "legal_action_set_hash": "l" * 64,
+        "behavior_policy_spec_hash": "b" * 64,
+        "memory_state_ref": {"status": "unavailable"},
+        "removed_references": list(REMOVED_REFERENCES),
+    }
+    p.update(over)
+    return p
+
+
+def test_valid_actor_preimage_constructs():
+    assert ActorDecisionRecord(_valid_actor_preimage()).domain == "trs.actor_decision.v1"
+
+
+def test_actor_decision_rejects_nested_privileged_reference():
+    # audit 000899: a privileged/world reference nested at ANY depth is refused.
     for k in REMOVED_REFERENCES:
+        nested = _valid_actor_preimage(
+            action_split={"high_level_intent": None, "symbolic_action": "execute",
+                          "controller_actions": None,
+                          "execution_result": {"narrative": "done", k: "x" * 64}})
         with pytest.raises(ContentRecordError):
-            ActorDecisionRecord({"schema_version": "1", k: "x" * 64})
+            ActorDecisionRecord(nested)
+
+
+def test_actor_projection_rejects_nested_privileged_reference_in_action_split():
+    leaky = DecisionRecord(
+        0, None, "natural_terminal",
+        {"high_level_intent": None, "symbolic_action": "execute",
+         "controller_actions": None,
+         "execution_result": {"world_instance_hash": "w" * 64}},   # nested priv ref
+        "a" * 64, "p" * 64, _LAS, "b" * 64)
+    with pytest.raises(ContentRecordError):
+        _actor(leaky)
 
 
 def test_actor_projection_rejects_privileged_field_in_action_split():
@@ -88,10 +124,24 @@ def test_actor_projection_rejects_privileged_field_in_action_split():
         0, None, "natural_terminal",
         {"high_level_intent": None, "symbolic_action": "execute",
          "controller_actions": None,
-         "execution_result": {"facts": {"harm": "none"}}},   # privileged leak
+         "execution_result": {"facts": {"harm": "none"}}},   # privileged field
         "a" * 64, "p" * 64, _LAS, "b" * 64)
     with pytest.raises(ContentRecordError):
         _actor(leaky)
+
+
+def test_actor_decision_enforces_exact_appendix_a_key_set():
+    # audit 000899: missing / extra keys and wrong schema version are refused.
+    incomplete = _valid_actor_preimage()
+    del incomplete["memory_state_ref"]
+    with pytest.raises(ContentRecordError):
+        ActorDecisionRecord(incomplete)
+    with pytest.raises(ContentRecordError):
+        ActorDecisionRecord(_valid_actor_preimage(unexpected="x"))
+    with pytest.raises(ContentRecordError):
+        ActorDecisionRecord(_valid_actor_preimage(schema_version="9"))
+    with pytest.raises(ContentRecordError):
+        ActorDecisionRecord(_valid_actor_preimage(removed_references=["only_one"]))
 
 
 def test_project_actor_decision_validates_inputs():
