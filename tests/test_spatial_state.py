@@ -288,6 +288,68 @@ def test_fork_unauthorized_parent_refused():
         materialize_fork(sp2, C, D, reg)
 
 
+def test_remove_cannot_bypass_due_arrival():
+    """A remove targeting an in-transit body AT its arrival step is refused — only
+    advance_step may resolve a step with due arrivals (no fail-open placement delete)."""
+    ids = _base(duration=1)
+    reg = ids["reg"]
+    loc = {"tag": "in_transit", "portal_instance_id": ids["portal"].id,
+           "origin_room_instance_id": ids["rA"].id,
+           "destination_room_instance_id": ids["rB"].id, "start_step": 0, "arrival_step": 1}
+    s0 = _state(ids, 0, [{"entity_id": ids["body"].id, "entity_kind": "agent_body",
+                          "location": loc}], [_life(ids["body"].id, "agent_body")])
+    admit_world_state(s0, reg)
+    eff = {"action": "remove", "entity_id": ids["body"].id, "entity_kind": "agent_body"}
+    post = _apply_effect(s0, eff, reg, 1); admit_world_state(post, reg)
+    t = LocationTransition(ids["wl"].id, 1, s0.id, post.id, eff)
+    with pytest.raises(ContentRecordError, match="due arrival"):
+        apply_transition(s0, t, reg)
+
+
+def test_zero_duration_move_foreign_portal_refused():
+    """A duration-0 move drops the portal from the post-state, so the cross-world
+    portal must be caught by the pre-application reference check."""
+    ids = _base(duration=0)
+    reg = ids["reg"]
+    wl2 = WorldLine.root(ids["world"].id, "other"); reg.register(wl2)
+    foreign_portal = PortalInstance(ids["ps"].id, wl2.id, "AB"); reg.register(foreign_portal)
+    s0 = _state(ids, 0, [_in_room(ids["body"].id, "agent_body", ids["rA"].id)],
+                [_life(ids["body"].id, "agent_body")])
+    admit_world_state(s0, reg)
+    eff = {"action": "move", "agent_body_id": ids["body"].id,
+           "portal_instance_id": foreign_portal.id,
+           "from_room_instance_id": ids["rA"].id, "to_room_instance_id": ids["rB"].id}
+    post = _apply_effect(s0, eff, reg, 1); admit_world_state(post, reg)
+    t = LocationTransition(ids["wl"].id, 1, s0.id, post.id, eff, actor_body_id=ids["body"].id)
+    with pytest.raises(ContentRecordError, match="cross-world"):
+        apply_transition(s0, t, reg)
+
+
+def test_remove_wrong_entity_kind_refused():
+    ids = _base()
+    reg = ids["reg"]
+    s0 = _state(ids, 0, [_in_room(ids["body"].id, "agent_body", ids["rA"].id)],
+                [_life(ids["body"].id, "agent_body")])
+    admit_world_state(s0, reg)
+    eff = {"action": "remove", "entity_id": ids["body"].id, "entity_kind": "object"}
+    post = _apply_effect(s0, eff, reg, 1); admit_world_state(post, reg)
+    t = LocationTransition(ids["wl"].id, 1, s0.id, post.id, eff)
+    with pytest.raises(ContentRecordError):        # instance domain != declared kind
+        apply_transition(s0, t, reg)
+
+
+def test_fork_unregistered_decision_refused():
+    ids = _base()
+    reg = ids["reg"]
+    sp = _state(ids, 2, [_in_room(ids["body"].id, "agent_body", ids["rA"].id)],
+                [_life(ids["body"].id, "agent_body")])
+    admit_world_state(sp, reg)
+    D = ForkDecision(ids["wl"].id, sp.id, 2, "x", {})       # deliberately NOT registered
+    C = WorldLine.forked(ids["wl"].id, D.id, "x", {}); reg.register(C)
+    with pytest.raises(ContentRecordError, match="not registered"):
+        materialize_fork(sp, C, D, reg)
+
+
 def test_fork_in_transit_preserves_remaining_travel():
     ids = _base(duration=3)
     reg = ids["reg"]

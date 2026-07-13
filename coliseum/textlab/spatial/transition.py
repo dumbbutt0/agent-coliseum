@@ -11,7 +11,14 @@ import copy
 
 from coliseum.textlab._content_record import ContentRecord, ContentRecordError
 from coliseum.textlab.spatial.state import (WorldState, admit_world_state,
+                                            _LOCATION_REF_DOMAINS, _location_ref_ids,
                                             _resolve_spec, validate_location)
+
+_AB = "spatial.agent_body_instance.v1"
+_OBJ = "spatial.object_instance.v1"
+_ROOM = "spatial.room_instance.v1"
+_PORTAL = "spatial.portal_instance.v1"
+_ENTITY_KIND_DOMAIN = {"agent_body": _AB, "object": _OBJ}
 
 LOCATION_TRANSITION_SCHEMA_VERSION = "1"
 
@@ -84,6 +91,45 @@ def _validate_effect_shape(effect):
     if action in ("spawn",):
         validate_location(effect["location"])
     return effect
+
+
+def _effect_ref_specs(effect):
+    """(instance_id, expected_instance_domain) for every instance reference an effect
+    names — so registration + exact type + world can be validated BEFORE application,
+    independent of which references survive in the post-state (a duration-0 move must
+    still validate its portal; despawn/remove must bind the declared entity_kind)."""
+    a = effect["action"]
+    refs = []
+    if a in ("spawn", "despawn", "remove"):
+        refs.append((effect["entity_id"], _ENTITY_KIND_DOMAIN[effect["entity_kind"]]))
+        if a == "spawn":
+            refs += [(ref, _LOCATION_REF_DOMAINS[f])
+                     for f, ref in _location_ref_ids(effect["location"])]
+    elif a == "move":
+        refs += [(effect["agent_body_id"], _AB),
+                 (effect["portal_instance_id"], _PORTAL),
+                 (effect["from_room_instance_id"], _ROOM),
+                 (effect["to_room_instance_id"], _ROOM)]
+    elif a in ("take", "drop"):
+        refs += [(effect["agent_body_id"], _AB), (effect["object_instance_id"], _OBJ)]
+    elif a == "give":
+        refs += [(effect["agent_body_id"], _AB), (effect["object_instance_id"], _OBJ),
+                 (effect["recipient_agent_body_id"], _AB)]
+    elif a in ("put_inside", "take_out"):
+        refs += [(effect["agent_body_id"], _AB), (effect["object_instance_id"], _OBJ),
+                 (effect["container_object_instance_id"], _OBJ)]
+    return refs
+
+
+def _validate_effect_refs(state, effect, registry):
+    """Every effect instance id must be registered, of the exact expected domain, and
+    in this world-line — checked before application (fail closed, world- and
+    type-safe regardless of the post-state)."""
+    for ref, expected in _effect_ref_specs(effect):
+        ic, _spec = _resolve_spec(registry, ref, expected)   # registered + exact domain
+        if ic["world_line_id"] != state.world_line_id:
+            raise ContentRecordError(
+                f"effect reference {ref[:12]!r} is cross-world")
 
 
 def _index(state):
@@ -270,6 +316,17 @@ def apply_transition(state, transition, registry):
         row = next((e for e in state.content["entity_lifecycle"] if e["entity_id"] == actor), None)
         if row is None or row["status"] != "present":
             raise ContentRecordError("actor body is not present")
+    # due-arrival guard: a step with a transit due at it must be resolved exclusively
+    # by advance_step — no other action (incl. one that removes/despawns the due body)
+    # may advance the clock onto that step.
+    if action != "advance_step":
+        for p in state.content["placements"]:
+            loc = p["location"]
+            if loc["tag"] == "in_transit" and loc["arrival_step"] == c["logical_step"]:
+                raise ContentRecordError(
+                    "a step with a due arrival must be resolved by advance_step")
+    # every effect reference is registered, type-correct, and in-world BEFORE apply.
+    _validate_effect_refs(state, effect, registry)
     # compute + admit the post-state; verify the claimed resulting hash.
     post = _apply_effect(state, effect, registry, c["logical_step"])
     admit_world_state(post, registry)

@@ -140,6 +140,14 @@ def materialize_fork(parent_state, child_world_line, fork_decision, registry):
         raise ContentRecordError("child_world_line must be a forked WorldLine")
     if not isinstance(fork_decision, ForkDecision):
         raise ContentRecordError("fork_decision must be a ForkDecision")
+    # the fork_decision must be REGISTERED (admitted authorization), of the exact
+    # domain, with content identical to the supplied decision (content-addressed).
+    try:
+        stored = registry.get(fork_decision.id)
+    except ContentRecordError:
+        raise ContentRecordError("fork_decision is not registered")
+    if stored.domain != "spatial.fork_decision.v1" or stored.content != fork_decision.content:
+        raise ContentRecordError("fork_decision is not a registered spatial.fork_decision.v1")
     # the parent snapshot must itself be admissible.
     admit_world_state(parent_state, registry)
     cwl = child_world_line.content
