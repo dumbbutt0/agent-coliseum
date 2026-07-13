@@ -791,42 +791,91 @@ def evaluate_delegation(root: str, cfg: Config, request: dict,
 
 # ----------------------------------------------------- A/B/C/D governance routing
 
-def governance_route(root: str, cfg: Config, request: dict, verdict_event: dict,
+_SOURCE_VERDICT_EVENTS = ("AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS", "AUDIT_BLOCKED")
+
+
+def _authoritative_matter_class(request: dict, chain: list):
+    """Derive the routing matter_class from the VERIFIED chain, never a caller
+    argument (audit 000700 F1): the LAST codex source verdict for this request that
+    is schema/payload-hash valid, target-commit bound, and enum-valid. Returns
+    (matter_class|None, reason|None) — None class means fail-closed to D."""
+    from tools.council.schemas import (compute_verdict_payload_hash,
+                                       validate_verdict, CouncilError)
+    rid = request.get("request_id")
+    target = request.get("target_commit")
+    verdict_event = None
+    for e in chain:
+        if e.get("request_id") == rid \
+                and e.get("event_type") in _SOURCE_VERDICT_EVENTS \
+                and e.get("sender") == "codex":
+            verdict_event = e   # last wins
+    if verdict_event is None:
+        return None, "no codex source verdict for this request in the chain"
+    if verdict_event.get("target_commit") != target:
+        return None, "verdict target_commit does not bind the request target_commit"
+    verdict = verdict_event.get("payload") or {}
+    try:
+        validate_verdict(verdict, result_audit=False)
+    except CouncilError as exc:
+        return None, f"chain verdict fails schema validation: {exc}"
+    if verdict.get("verdict_payload_hash") != compute_verdict_payload_hash(verdict):
+        return None, "chain verdict payload hash mismatch"
+    if verdict.get("audited_commit") != target:
+        return None, "verdict audited_commit does not bind the request target_commit"
+    mc = verdict.get("matter_class")
+    if mc not in GOVERNANCE_MATTER_CLASSES:
+        return None, f"absent/invalid matter_class ({mc!r})"
+    return mc, None
+
+
+def governance_route(root: str, cfg: Config, request: dict,
                      chain: list) -> GovernanceRoute:
     """Route a matter A/B/C/D under governance_v1 (owner-ratified v4+). The
-    auditor-emitted `matter_class` in the verdict payload is the routing primitive;
-    it is verdict_payload_hash-bound, so the builder cannot forge it. Fail-closed:
-    an absent/invalid class routes to D, and DEFLATION is caught — any matter whose
-    audited commit changes a protected path, or whose request omits a required
-    reserved-capability declaration, is forced to D regardless of the label (a non-D
-    label can never buy Class-A/B/C authority for a D-touching change). Dormant
-    (active=False, route=owner) whenever the effective policy has no governance
-    enabled (v1-v3). A pure, re-runnable function of (chain, request, verdict)."""
+    authoritative matter_class is DERIVED from the verified chain (the last codex
+    source verdict for the exact request/commit that passes schema + payload-hash
+    validation) — never a caller-supplied argument (audit 000700 F1). Fail-closed:
+    an absent/invalid/unverifiable class routes to D, and DEFLATION is caught — any
+    matter whose audited commit changes a protected path (real diff), whose request
+    omits the hash-bound declaration forbidding ALL SIX governance Class-D predicates
+    (or implicates one in its allowed actions), or omits a legacy reserved capability,
+    is forced to D regardless of the label. Governance is active ONLY when the
+    installed policy equals the effective owner-ratified pin (hash AND version) and is
+    a code-defined governance-enabled version >= 4 (audit 000700 F3); otherwise
+    dormant (active=False, route=owner). A pure, re-runnable function of (chain,
+    request)."""
     policy = policy_hash = None
     try:
         policy, policy_hash = load_policy(root)
     except SchemaViolation as exc:
         return GovernanceRoute(False, "D", None, "owner", None,
                                [f"policy_installed: {exc}"])
-    _eff_hash, eff_version = effective_policy_pin(chain)
+    eff_hash, eff_version = effective_policy_pin(chain)
+    try:
+        code_defined = is_code_defined_version(policy)
+    except SchemaViolation:
+        code_defined = False
     gov = policy.get("governance") or {}
-    active = (bool(gov.get("enabled")) and eff_version is not None
-              and eff_version >= 4 and is_code_defined_version(policy))
+    # F3: bind the INSTALLED policy to the effective owner-ratified pin (hash AND
+    # version), mirroring evaluate/evaluate_delegation — a pin/install mismatch is
+    # inactive, never active on the wrong policy.
+    active = (eff_version is not None and eff_version >= 4
+              and (eff_hash is None or eff_hash == policy_hash)
+              and code_defined and policy_version_of(policy) == eff_version
+              and bool(gov.get("enabled")))
     if not active:
         return GovernanceRoute(False, "D", None, "owner", policy_hash,
-                               ["governance not active (requires an owner-ratified "
-                                "governance-enabled policy version)"])
+                               ["governance not active (requires the installed policy "
+                                "to equal the owner-ratified governance-enabled pin "
+                                ">= v4)"])
     reasons: list = []
-    verdict = verdict_event.get("payload", {}) or {}
-    declared = verdict.get("matter_class")
-    valid = declared in GOVERNANCE_MATTER_CLASSES
-    effective = declared if valid else (gov.get("unclassified_routes_to") or "D")
-    if not valid:
-        reasons.append(f"absent/invalid matter_class -> {effective} ({declared!r})")
+    declared, why = _authoritative_matter_class(request, chain)
+    effective = declared if declared is not None \
+        else (gov.get("unclassified_routes_to") or "D")
+    if declared is None:
+        reasons.append(f"matter_class not authenticated from chain -> {effective}: {why}")
 
-    # anti-deflation: a D-touching change can never be A/B/C. Verified from the EXACT
-    # audited commit's real diff (never request prose) + the reserved-capability
-    # declaration; any failure to verify fails closed to D.
+    # anti-deflation guard 1: a D-touching change can never be A/B/C — verified from
+    # the EXACT audited commit's real diff, fail-closed on any verification failure.
     protected = tuple(policy["protected_paths"])
     try:
         changed = git_state.changed_paths(request["repository"],
@@ -839,15 +888,26 @@ def governance_route(root: str, cfg: Config, request: dict, verdict_event: dict,
         effective = "D"
         reasons.append(f"cannot verify the audited commit's changed paths "
                        f"(fail-closed -> D): {exc}")
+    # anti-deflation guard 2 (F2): the request must carry the hash-bound declaration
+    # forbidding EVERY one of the six governance Class-D predicates, and may not
+    # implicate any in its allowed_actions — plus the legacy experiment capabilities.
     forbidden = set(request.get("forbidden_actions", []))
-    missing = [c for c in policy["auto_approval"]["forbidden_capabilities"]
-               if c not in forbidden]
-    if missing:
+    allowed = set(request.get("allowed_actions", []))
+    reserved_d = list(gov.get("class_d_reserved") or [])
+    undeclared_d = [p for p in reserved_d if p not in forbidden]
+    implicated_d = [p for p in reserved_d if p in allowed]
+    if undeclared_d or implicated_d:
         effective = "D"
-        reasons.append(f"undeclared reserved capabilities -> D: {missing}")
+        reasons.append(f"Class-D predicate implicated/undeclared -> D "
+                       f"(undeclared={undeclared_d}, implicated={implicated_d})")
+    missing_legacy = [c for c in policy["auto_approval"]["forbidden_capabilities"]
+                      if c not in forbidden]
+    if missing_legacy:
+        effective = "D"
+        reasons.append(f"undeclared legacy reserved capabilities -> D: {missing_legacy}")
 
-    return GovernanceRoute(True, effective, (declared if valid else None),
-                           _ROUTE_OF[effective], policy_hash, reasons)
+    return GovernanceRoute(True, effective, declared, _ROUTE_OF[effective],
+                           policy_hash, reasons)
 
 
 # ------------------------------------------------------------ society milestone
