@@ -1,4 +1,4 @@
-# Governance Classification Charter — A/B/C/D decision authority (Rev. 2)
+# Governance Classification Charter — A/B/C/D decision authority (Rev. 3)
 
 > **Status:** design source (doc-only). This charter SPECIFIES a governance model; it grants no new
 > authority by being integrated. The A/B/C/D envelope becomes operative only when the owner ratifies the
@@ -6,10 +6,16 @@
 > then the active policy is delegation v3 (Class-A structural-`source` auto; everything else → owner token).
 > Integrating this document is inert, exactly as the Delegated-Authority Charter was inert until Step C.
 >
-> **Rev. 2** resolves the five HIGH + one MEDIUM design findings of audit `governance-charter-001`
+> **Rev. 2** resolved the five HIGH + one MEDIUM design findings of audit `governance-charter-001`
 > (AUDIT_BLOCKED 000646): a distinct hash-bound **matter_class** (F1); classification-is-not-satisfaction for
 > Class B (F2); replay-vs-independent-replication (F3); enforceable preregistration + evidence-freshness (F4);
 > the owner-gate contradiction (F5); and the actual claim-ladder states (F6).
+>
+> **Rev. 3** resolves the two remaining HIGH findings of `governance-charter-002` (AUDIT_BLOCKED 000652):
+> the F4 sealed-inventory paradox (refusal now keys on **exposure/observation**, not mere creation — a
+> held-out set legitimately predates preregistration provided it was sealed and never exposed until
+> resolution); and the §7↔§8 sequencing contradiction (machinery is built **inert BEFORE** ratification, and
+> the single owner token **activates** it — §7 now matches §8).
 
 ## 1. Purpose and the problem it fixes
 
@@ -104,16 +110,24 @@ for lack of quorum stays *unresolved*, it does not become an owner action.
 A Class-C matter is resolved **only** through frozen policy, recorded evidence, explicit dissent handling, and
 an auditable verdict. The gates (code-defined, versioned, all required):
 
-1. **Preregistration + evidence freshness (F4).** Before the resolving evidence exists or is examined, a
-   hash-bound **preregistration** event records: the question, the decision criteria, the **precommitted
-   eligible evidence sources and metrics**, and either (a) a **sealed, precommitted hidden inventory**
-   (revealed only at resolution) or (b) a commitment to generate the resolving evidence under a **new
-   post-preregistration execution identity** (`execution_instance_id` created *after* the preregistration).
-   Acceptance **refuses**: evidence whose creation or exposure predates the preregistration; a swapped or
-   backfilled inventory; a post-hoc-selected metric; and a **previously-spent held-out suite** — unless a
-   frozen protocol *explicitly permits and records* that use. Chain order alone is insufficient (it proves
-   when a record was appended, not that evidence was unseen); the binding is to execution/sealed identity
-   plus an **access/exposure ledger**, not to append order.
+1. **Preregistration + evidence freshness (F4 — refusal keys on EXPOSURE, not creation).** Before the
+   resolving evidence is examined, a hash-bound **preregistration** event records the question, the decision
+   criteria, the **precommitted eligible evidence sources and metrics**, and ONE of two freshness bindings:
+   - **(a) Sealed hidden inventory.** A pre-existing inventory that was **created, content-hash sealed, and
+     placed under a non-exposure commitment**; its sealed identity (content hash) is recorded in the
+     preregistration and its contents are revealed only at resolution. Such an inventory **MAY predate the
+     preregistration** — that is exactly what a held-out set is — because what makes it valid is that it was
+     **never exposed or examined** before resolution, proven by a clean **access/exposure ledger**; the
+     sealed hash recorded at preregistration must match the inventory opened at resolution.
+   - **(b) Post-preregistration generation.** The resolving evidence is generated fresh under a **new
+     execution identity** (`execution_instance_id`) created *after* the preregistration event.
+   Acceptance **refuses**: evidence that was **exposed, observed, or examined before preregistration** (mere
+   prior *creation* under an unbroken seal is permitted — the ledger, not the creation timestamp, is
+   authoritative); an inventory whose opened contents do not match its sealed hash, or a swapped/backfilled
+   inventory; a post-hoc-selected metric; and a **previously-spent (already-revealed/consumed) held-out
+   suite** — unless a frozen protocol *explicitly permits and records* the reuse. Chain order alone is
+   insufficient; the binding is to the **sealed identity** or the **post-preregistration execution identity**
+   plus the **access/exposure ledger**, never to append order.
 2. **Evidence adequacy.** A pre-declared sample size / power for empirical claims; the enumerated options with
    pre-declared trade-off criteria for architectural choices.
 3. **Reproducibility (integrity) — SEPARATE from replication (F3).** Deterministic evidence must **byte-replay**
@@ -178,7 +192,9 @@ enumerated Class-D predicate, and then only for that Class-D part.
   (speculation…accepted/refuted/demoted); the evidence-manifest + `verify_run_replay` gates; METRICS-v1;
   the §8 partition + held-out disciplines; identity / append-only chain / emergency stop / checkpoint;
   the code-defined policy-version + owner-token amendment walk; v3 `condition_classes` + `evaluate_delegation`.
-- **New (specified here; built as bounded, Codex-audited slices AFTER ratification):**
+- **New (specified here; built as bounded, Codex-audited slices that integrate INERT *before* ratification,
+  then are switched on by the single owner token — the exact sequence of §8, matching how delegation v3 was
+  built inert and then activated at Step C):**
   1. a mandatory **`matter_class` ∈ {A,B,C,D}** on every governed verdict (schema + hash-binding + auditor
      authority), plus the `governance_route` policy consumer that fail-closes absent/invalid → D;
   2. a code-defined `governance_v1` policy version (class definitions, the Class-D reserved list, the Class-C
