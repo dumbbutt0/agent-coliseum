@@ -252,6 +252,22 @@ def test_protected_path_change_forced_to_d_despite_label(env, tmp_path):
     assert any("protected paths" in r for r in d.reasons)
 
 
+# ------------------------- C1 (000714): malformed chain record fails closed to D
+
+def test_malformed_chain_record_routes_to_d(env):
+    """A newline-terminated malformed JSON event record must yield an owner/Class-D
+    decision, never an uncaught StrictJSONError (audit 000714 C1)."""
+    root, repo, head, cfg = env
+    _ratify(root, repo, head, cfg, 4)
+    _publish_and_go(root, cfg, repo, head, "A")
+    assert _route(root, cfg).matter_class == "A"          # healthy -> A
+    # append a malformed but newline-terminated (complete) record to the chain
+    with open(os.path.join(root, "events.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write('{"event_type": "BUILD_STARTED", not valid json\n')
+    d = _route(root, cfg)
+    assert not d.active and d.matter_class == "D" and d.route == "owner"
+
+
 # ----------------------------- F3: active only on the effective owner-ratified pin
 
 def test_installed_policy_must_equal_effective_pin(env):

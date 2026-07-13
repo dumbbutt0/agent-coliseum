@@ -846,12 +846,19 @@ def governance_route(root: str, cfg: Config, request_id: str) -> GovernanceRoute
         return GovernanceRoute(False, "D", None, "owner", None,
                                [f"policy_installed: {exc}"])
     # F1 (000708): establish chain provenance from root — never a caller argument.
-    report = events_mod.verify_chain(root)
-    if not report.healthy:
+    # Every read/parse/verification failure (incl. a malformed complete record that
+    # raises StrictJSONError) fails closed to an owner/D decision (audit 000714 C1),
+    # never an uncaught exception.
+    try:
+        report = events_mod.verify_chain(root)
+        if not report.healthy:
+            return GovernanceRoute(False, "D", None, "owner", policy_hash,
+                                   [f"chain not healthy -> D: "
+                                    f"{report.error or 'torn/incomplete suffix'}"])
+        chain = events_mod.read_chain(root, verify=True)
+    except Exception as exc:
         return GovernanceRoute(False, "D", None, "owner", policy_hash,
-                               [f"chain not healthy -> D: "
-                                f"{report.error or 'torn/incomplete suffix'}"])
-    chain = events_mod.read_chain(root, verify=True)
+                               [f"chain unreadable/unverifiable -> D: {exc}"])
     eff_hash, eff_version = effective_policy_pin(chain)
     try:
         code_defined = is_code_defined_version(policy)

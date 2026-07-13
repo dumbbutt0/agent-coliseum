@@ -55,9 +55,13 @@ a plain `AUDIT_GO` has a `matter_class` even though it has no conditions. Proper
 - **Auditor authority.** Only an auditor (codex; later a second independent auditor) may emit or change
   `matter_class`; it lives in the verdict payload covered by `verdict_payload_hash`. **Claude cannot emit,
   forge, or alter it** — verdict-hash substitution fails the existing bindings.
-- **A mechanical consumer.** A new policy gate `governance_route(verdict, request, chain)` reads `matter_class`
-  and dispatches: A → `evaluate_delegation` (v3); B → the Codex build→audit lifecycle (§2.2); C → the
-  Class-C evaluator (§3); D → refuse all agent authority, route to the owner token.
+- **A mechanical consumer.** A new **self-authenticating** policy gate
+  `governance_route(root, cfg, request_id)` — it re-reads and hash-verifies the chain from root and obtains the
+  request through `publish.verified_request` (bound to the publication event's pinned `request_payload_hash`),
+  trusting no caller argument — reads the codex-authored, hash-bound `matter_class` from the verified chain and
+  dispatches: A → `evaluate_delegation` (v3); B → the Codex build→audit lifecycle (§2.2); C → the Class-C
+  evaluator (§3); D → refuse all agent authority, route to the owner token. Any unreadable/unverifiable chain
+  or request fails closed to D.
 - **Fail closed to D.** An **absent, malformed, or enum-invalid** `matter_class` yields **no A/B/C authority**
   — the matter is treated as D (owner). Deflation is inert: a D-touching change carrying a non-D label is
   still refused by the commit-derived protected-path guard and the reserved-capability declaration guards,
@@ -211,7 +215,9 @@ enumerated Class-D predicate, and then only for that Class-D part.
    INERT.
 3. The owner ratifies the `governance_v1` policy version with **one S/KEY `POLICY_AMENDED`** (Class-D item 6).
    Only this owner token makes A/B/C/D operative and moves Class-C resolution from the owner to the council.
-4. Revocation/adjustment is the forward-only owner-tokened amendment (never a rollback), as with v3→v4.
+4. Revocation/adjustment is the forward-only owner-tokened amendment (never a rollback): the ladder is
+   **v3 = delegation → v4 = governance activation (delegation retained) → v5 = delegation revocation**; each is
+   a monotonic forward `POLICY_AMENDED`.
 
 ## 9. Explicit non-goals
 - Does **not** authorize weights/training (still gated behind the `weight_training` interpretation + M14/SC-8),
