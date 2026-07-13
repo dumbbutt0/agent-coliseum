@@ -1,110 +1,156 @@
-# Spatial S2A — Mutable exclusive-location state (design source)
+# Spatial S2A — Mutable exclusive-location state (design source, rev 2)
 
-**Status:** design source for council review. No production code in this document. Builds on the
-integrated spatial identity layers S0 (specs) and S1 (world-lines + instances), which remain
-**immutable and untouched**. Slice of the owner-directed three-part perception track
-(S2A location state → S2B deterministic scheduler → S2C perception non-interference).
+**Status:** design source for council review. No production code. Builds on the **immutable, untouched**
+integrated identity layers S0 (specs) and S1 (world-lines + instances). Rev 2 closes the three HIGH gaps
+from audit 000987: (a) a deterministic fork-materialization algorithm reconciled with S1 world-line-bound
+instance identity; (b) explicit authorized-parent-snapshot provenance in a new content-addressed record;
+(c) normative canonical location/effect shapes + a single-snapshot state admission validator so transition
+identity, legal application, and byte-identical replay are implementation-binding.
 
 ## 1. Purpose and boundary
-S2A adds the **mutable world state** — *where every entity is* — as an explicit, replayable
-**event layer** over the immutable identity records. It introduces no simulation loop, no scheduler
-(S2B), no perception/observation (S2C), no labels/training/weights. It is deterministic and
-content-addressed throughout.
+S2A adds the **mutable world state** (*where every entity is*) as an explicit, replayable **event layer**
+over the immutable identity records. No scheduler (S2B), no perception/observation (S2C), no
+labels/training/weights, no `tools/council` change. Deterministic and content-addressed throughout.
+Mutable state is **never** a mutation of a registered identity record; it lives in separate
+content-addressed `WorldState` snapshots produced by folding ordered `LocationTransition` events.
 
-**Inviolable:** mutable state is **never** represented by mutating a registered identity record
-(spec or instance). Identity records stay frozen; state lives in separate content-addressed
-`WorldState` snapshots produced by folding ordered `LocationTransition` events.
+## 2. Location — an exclusive tagged union with EXACT key sets
+A location value is one canonical tagged dict, exactly one of (no extra/missing keys):
+- `{"tag": "in_room", "room_instance_id": <id>}`
+- `{"tag": "held_by", "agent_body_id": <id>}`
+- `{"tag": "inside", "object_instance_id": <id>}`
+- `{"tag": "in_transit", "portal_instance_id": <id>, "origin_room_instance_id": <id>, "destination_room_instance_id": <id>, "start_step": <int≥0>, "arrival_step": <int>}` with `arrival_step > start_step`.
 
-## 2. Location — an exclusive tagged union (profile §7)
-An entity's location is **exactly one** of:
-- `InRoom(room_instance_id)`
-- `HeldBy(agent_body_id)`
-- `Inside(object_instance_id)`
-- `InTransit(portal_instance_id, origin_room_instance_id, destination_room_instance_id, start_step, arrival_step)`
+**Entity-kind location legality** (fail closed otherwise):
+- `agent_body`: `in_room` or `in_transit` only.
+- `object`: `in_room`, `held_by`, or `inside` only.
 
-Every referenced instance id must be **registered** and belong to the **same `world_line_id`** as the
-state (cross-world reference fails closed, reusing S1 `assert_same_world_line`). An entity is never in
-two locations; the location value is canonical (a tagged dict with a fixed key set per tag).
+Every instance id inside a location must be **registered** and in the state's **own `world_line_id`**
+(cross-world nested reference fails closed, reusing S1 `assert_same_world_line`).
 
-## 3. Records and identities (Appendix-A style; self-excluded, domain-separated)
-All ids are `config_hash` of a typed preimage with the id field ABSENT, reusing the integrated
-`_content_record` standard and the S0 single-snapshot registry discipline.
+## 3. Records and identities (self-excluded, domain-separated; reuse `_content_record` + S0 registry)
 
 | record | literal `_domain` | preimage keys (id self-excluded) |
 | --- | --- | --- |
-| `WorldState` | `spatial.world_state.v1` | `spatial_schema_version`, `world_line_id`, `logical_step`, `placements` (sorted list of `{entity_id, entity_kind, location}`), `body_lifecycle` (sorted list of `{agent_body_id, status}`) |
-| `LocationTransition` | `spatial.location_transition.v1` | `spatial_schema_version`, `world_line_id`, `logical_step`, `prior_state_hash`, `resulting_state_hash`, `actor_body_id` (or `null` for an environment/system transition), `canonical_action`, `effect` (the canonical placement/lifecycle delta) |
-| `InitialWorldState` | (a `WorldState` at `logical_step = 0`) | — the fold's base; a fork's base is the authorized parent snapshot (§6) |
+| `WorldState` | `spatial.world_state.v1` | `spatial_schema_version`, `world_line_id`, `logical_step`, `placements`, `body_lifecycle` |
+| `LocationTransition` | `spatial.location_transition.v1` | `spatial_schema_version`, `world_line_id`, `logical_step`, `prior_state_hash`, `resulting_state_hash`, `actor_body_id`(or `null`), `effect` |
+| `ForkInitialization` | `spatial.fork_initialization.v1` | `spatial_schema_version`, `child_world_line_id`, `parent_world_line_id`, `parent_state_hash`, `fork_logical_step`, `source_fork_decision_hash`, `materialized_child_initial_state_hash` |
 
-- `entity_kind ∈ {agent_body, object}`. `status ∈ {active, absent, removed}` — a **removed** body holds
-  no location; an **absent** body (temporarily out of play) holds no location; an **active** body holds
-  exactly one location.
-- `canonical_action` is drawn from a closed S2A action set: `move` (through a portal),
-  `take`/`drop`/`give` (change `HeldBy`/`Inside`/`InRoom`), `enter`/`exit` (container),
-  `advance_transit` (progress/complete an `InTransit`), plus `spawn`/`despawn` lifecycle actions. Portal
-  and object *internal* mutable attributes (open/closed, locked) are a **documented follow-on** (S2A′ or
-  folded into S2C world-truth), NOT in S2A — S2A is placement + lifecycle only.
+- `placements`: a list **sorted by `entity_id`** of `{"entity_id": <instance id>, "entity_kind": "agent_body"|"object", "location": <tagged dict §2>}`. `entity_id` values are **unique** across the list.
+- `body_lifecycle`: a list **sorted by `agent_body_id`** of `{"agent_body_id": <id>, "status": "active"|"absent"|"removed"}`; `agent_body_id` values unique.
+- `logical_step`: non-negative int. An `InitialWorldState` is any admitted `WorldState`; a root world-line's base is at `logical_step = 0`; a fork's base is the `ForkInitialization.materialized_child_initial_state_hash` state (§8).
+- `effect`: the canonical per-action delta (§4); its exact shape is enumerated so two conforming
+  implementations derive identical `LocationTransition` ids.
 
-## 4. The pure transition function
-`apply_transition(state: WorldState, transition: LocationTransition) -> WorldState` is pure and
-deterministic. It **fails closed** unless ALL hold:
+## 4. Canonical action / effect matrix (implementation-binding)
+`effect` is a tagged dict `{"action": <name>, …}` with the exact keys listed. Each action's **pre**
+(guard on the current state) and **post** (the resulting placement/lifecycle) are normative.
+
+| action | effect keys (besides `action`) | pre | post |
+| --- | --- | --- | --- |
+| `spawn` | `entity_id`, `entity_kind`, `location` | entity not in `placements`; if body, lifecycle ∈ {absent, ∅} (never `removed`) | entity in `placements` at `location`; if body, lifecycle→`active` (system/env transition: `actor_body_id=null`) |
+| `despawn` | `entity_id`, `entity_kind` | entity active/present, in `placements` | entity removed from `placements`; if body, lifecycle→`absent` |
+| `remove` | `entity_id`, `entity_kind` | entity present or absent; if body not already `removed` | entity absent from `placements`; if body, lifecycle→`removed` (terminal) |
+| `move` | `agent_body_id`, `portal_instance_id`, `from_room_instance_id`, `to_room_instance_id` | body `active`, `InRoom(from)`; a registered portal instance connects from→to in-world & traversable | body → `InRoom(to)` if portal `traversal_duration_steps==0`, else `InTransit(portal, from, to, start=step, arrival=step+duration)` |
+| `complete_transit` | `agent_body_id` | body `InTransit(…, arrival)`; next state step `== arrival_step` | body → `InRoom(destination)` |
+| `take` | `agent_body_id`, `object_instance_id` | body `InRoom(r)`; object `InRoom(r)`; object `portability==true`; if `exclusive_possession`, object not currently `held_by` anyone | object → `HeldBy(body)` |
+| `drop` | `agent_body_id`, `object_instance_id` | object `HeldBy(body)`; body `InRoom(r)` | object → `InRoom(r)` |
+| `give` | `agent_body_id`, `object_instance_id`, `recipient_agent_body_id` | object `HeldBy(body)`; recipient `active`, `InRoom(r)` = body's room | object → `HeldBy(recipient)` |
+| `put_inside` | `agent_body_id`, `object_instance_id`, `container_object_instance_id` | object `HeldBy(body)`; container `container_capability==true`, `InRoom(body's room)` or `HeldBy(body)`; object≠container and container not transitively `Inside` object (**acyclic**) | object → `Inside(container)` |
+| `take_out` | `agent_body_id`, `object_instance_id`, `container_object_instance_id` | object `Inside(container)`; container `InRoom(body's room)` or `HeldBy(body)` | object → `HeldBy(body)` |
+
+**Lifecycle matrix (bodies):** `absent↔active` (spawn/despawn); `active|absent → removed` (remove,
+**terminal**); `removed → *` refused (**resurrection**). Objects are *present* iff in `placements`; a
+`remove`d object cannot be re-spawned.
+**Capacity:** for each room, the count of **agent bodies** with `InRoom(that room)` ≤ its `RoomSpec.capacity`
+(when non-null); objects do not consume room capacity.
+**Containment:** the `Inside` relation is a forest (acyclic); every `take/give/put_inside/take_out`
+re-checks acyclicity.
+**Transit:** `start_step < arrival_step`; origin/destination are distinct in-world rooms the portal connects.
+
+## 5. State admission validator (single-snapshot, runs BEFORE any fold)
+`admit_world_state(state)` fails closed unless ALL hold — so malformed/duplicate/cross-world content can
+never enter the base state and escape transition-time checks:
+1. `spatial_schema_version` supported; `world_line_id` registered; `logical_step ≥ 0`.
+2. `placements` sorted by `entity_id`, `entity_id`s unique; `body_lifecycle` sorted, `agent_body_id`s unique.
+3. every `entity_id` and every nested location instance id is **registered, type-correct** (kind matches
+   domain), and in **this** `world_line_id`.
+4. entity-kind location legality (§2); tagged-dict key sets exact.
+5. lifecycle/placement agreement: `active` body ⇒ exactly one location in `placements`; `absent`/`removed`
+   body ⇒ **not** in `placements`; every placed body has an `active` lifecycle row.
+6. exclusivity: no two placements share an exclusive slot; `exclusive_possession` object `held_by` ≤ 1;
+   room capacity respected; containment acyclic; transit endpoints/timing valid.
+Admission is single-snapshot atomic (reuse S0 discipline): the validated content is exactly the content
+whose id is admitted — no re-read of a polymorphic caller.
+
+## 6. The pure transition function
+`apply_transition(state, transition) -> WorldState` is pure/deterministic and fails closed unless ALL:
 1. `transition.world_line_id == state.world_line_id` (no cross-world contamination).
-2. `transition.prior_state_hash == state.id` (**stale-transition** rejection — a transition computed
-   against a different/older state is refused).
+2. `transition.prior_state_hash == state.id` (**stale-transition** rejection).
 3. `transition.logical_step == state.logical_step + 1` (monotonic, gap-free).
-4. every instance id referenced by the effect is registered and in this world-line (nonexistent-room /
-   cross-world rejection).
-5. the effect is **legal** for the actor + current location + canonical_action (e.g. `move` requires an
-   available portal from the body's current room; `take` requires the object co-located and, if
-   `exclusive_possession`, not already held; `give` requires giver holding it and recipient co-located).
-6. **exclusivity**: applying the effect leaves every `active` body in exactly one location, respects
-   room `capacity`, and never assigns two holders to an `exclusive_possession` object
-   (**duplicate-occupancy** rejection).
-7. **no illegal resurrection**: a `removed` body may not be re-placed or re-activated.
-8. the recomputed post-state's id `== transition.resulting_state_hash` (**transplant/forgery**
-   rejection — the caller cannot claim a resulting state that does not follow from prior+effect).
+4. every instance id in `effect` is registered + type-correct + in this world-line.
+5. the `effect` satisfies its §4 **pre** on `state` (legal application: right location, availability,
+   portability, exclusivity, capacity headroom, acyclicity, transit timing, lifecycle legality — incl.
+   **resurrection** refusal).
+6. the recomputed post-state (apply §4 **post**, re-sort, re-admit via §5) has id `==
+   transition.resulting_state_hash` (**transplant/forgery** rejection).
+Success returns the new `WorldState` (step+1). A transition is thus a verifiable edge
+`prior_state_hash --(actor, effect)--> resulting_state_hash`.
 
-On success it returns the new `WorldState` (step + 1). The transition record is thus a verifiable edge:
-`prior_state_hash --(actor, action, effect)--> resulting_state_hash`.
+## 7. Replay (determinism)
+`replay(initial_state, [t0,…]) -> WorldState` folds `apply_transition` after `admit_world_state(initial_state)`.
+**Guarantee:** same admitted initial state + same ordered transition list ⇒ **byte-identical** state bytes
+at every step (identical `WorldState.id`). Placements/lifecycle are **sorted canonical lists**, so identity
+is independent of insertion order / dict iteration / host/thread/filesystem order.
 
-## 5. Replay (determinism)
-`replay(initial_state, [t0, t1, …]) -> WorldState` folds `apply_transition`. **Guarantee:** the same
-`initial_state` + the same ordered transition list reconstruct **byte-identical** state bytes (identical
-`WorldState.id` at every step and at the end). No wall-clock/PID/UUID/object-identity/dict-iteration
-influence: placements and lifecycle are stored as **sorted** canonical lists, so state identity is
-independent of insertion order.
+## 8. Fork — deterministic materialization + authorized-parent provenance
+Reconciles inheritance with S1 (instance id = `config_hash(spec_id, world_line_id, logical_key)`; a
+foreign-world instance id fails closed). Given a parent `WorldState` S_p in world-line P (the exact fork
+step) and a **registered** S1 forked `WorldLine` C whose `parent_world_line_id == P`:
 
-## 6. Fork semantics (parallel to control_of; never redefined)
-A forked `world_line_id` (S1) begins from an **authorized parent snapshot**: the fork's
-`InitialWorldState` is the parent `WorldState` at the exact fork step, **re-domained to the child
-`world_line_id`** (every placement/lifecycle entry keeps its logical content but the state binds the
-child world-line). Thereafter:
-- the child's transitions bind the child `world_line_id`; applying a child transition to a parent state
-  (or vice-versa) fails at check §4.1 — **no parent/sibling contamination**.
-- sibling forks that share actor-visible content still differ in `world_line_id` and therefore in every
-  `WorldState.id` and instance id; nothing crosses.
-- a fork may only inherit a parent state the caller is authorized to branch from (the fork records the
-  parent `world_line_id` + parent state hash it descends from; an unregistered/foreign parent state is
-  refused).
+1. **Remap** (total, type-preserving bijection): for every instance id `e` referenced by S_p (as an
+   `entity_id` OR nested inside any location), recover its `(domain, spec_id, deterministic_logical_instance_key)`
+   and re-derive the child id `e' = instance(spec_id, C, logical_key)`; **register** each `e'` under C
+   (deterministic re-instantiation). Refuse if any `e` is unregistered/foreign, if the re-derived spec is
+   missing, if kinds mismatch, or if the mapping is not bijective (two parents → one child).
+2. **Rewrite** S_p → child initial state S_c: `world_line_id=C`, `logical_step=0`, every `entity_id` and
+   every nested location instance id replaced by its remapped `e'`; placements/lifecycle content otherwise
+   preserved. S_c MUST pass `admit_world_state` (§5) — all child-world ids, exclusivity, capacity,
+   acyclicity, transit validity.
+3. **Provenance:** emit `ForkInitialization` binding `child_world_line_id=C`, `parent_world_line_id=P`,
+   `parent_state_hash = S_p.id`, `fork_logical_step = S_p.logical_step`, `source_fork_decision_hash`
+   (matching C's S1 preimage), `materialized_child_initial_state_hash = S_c.id`.
+4. **Authorization / anti-transplant:** `materialized_child_initial_state_hash` MUST equal the id
+   recomputed by re-running steps 1–2 on the state named by `parent_state_hash`. A child initial state that
+   is not the deterministic remap of the stated authorized parent snapshot is refused; a foreign, stale
+   (wrong `fork_logical_step`), unregistered, or unauthorized parent is refused.
 
-## 7. Non-goals / deferred (explicit)
-No scheduler or turn order (S2B). No perception/observation/visibility (S2C). No portal/object internal
-attribute state (open/closed/locked) — documented follow-on. No pathfinding beyond one-portal `move`.
-No labels/training/weights/T0-B/M14-SC-8/society surfaces. No `tools/council` changes (the spatial state
-lives in `coliseum/textlab/spatial/`, never as council `EVENT_TYPES`).
+**Isolation:** child transitions bind C; applying a child transition to a parent state (or vice-versa)
+fails §6.1. Siblings sharing actor-visible content still differ in `world_line_id` and therefore in every
+`WorldState.id` and instance id — **nothing crosses** between parent/sibling world-lines. `control_of` /
+`control_twin_delta` are untouched; `world_line_id`/`fork_id` remain the separate lineage dimension.
 
-## 8. Threat model (the S2A adversarial test set)
-cross-world transition (world_line mismatch) refused; nonexistent room/portal/object refused; stale
-transition (wrong `prior_state_hash`) refused; non-monotonic/gapped `logical_step` refused; duplicate
-occupancy / capacity overflow / double-hold of an exclusive object refused; illegal resurrection of a
-`removed` body refused; **transplanted** `resulting_state_hash` (claiming a state that does not follow)
-refused; registry TOCTOU on the new records refused (reuse S0 single-snapshot admission); fork isolation
-(child transition cannot mutate parent/sibling state; sibling `WorldState.id`s differ); replay
-determinism (same initial + ordered transitions → identical bytes, order-independent internal storage);
-lifecycle exclusivity (an `active` body has exactly one location, a `removed`/`absent` body none).
+## 9. Non-goals / deferred (explicit)
+No scheduler/turn order (S2B). No perception/observation/visibility (S2C). No portal/object *internal*
+attribute state (open/closed/locked) — documented follow-on. No pathfinding beyond one-portal `move`. No
+labels/training/weights/T0-B/M14-SC-8/society surfaces. No `tools/council` changes.
 
-## 9. Compatibility
-Additive only. New files under `coliseum/textlab/spatial/`. No existing module, primary evidence, or
-`tools/council` change; `control_of`/`control_twin_delta` untouched; frozen `SPATIAL_SCHEMA_VERSION`
-reused (a new record schema version bumps only if a preimage field changes). Historical evidence and
-schema dispatch preserved.
+## 10. Threat model + required identity vectors
+**Identity vectors (byte-pinned in tests):** every location tag and every §4 action/effect shape; a
+`WorldState`; a `LocationTransition`; a `ForkInitialization`.
+**Adversarial (each fails closed):** initial-state admission — duplicate `entity_id`/lifecycle rows,
+nonexistent or wrong-kind ids, cross-world nested references, entity-kind-illegal location, capacity
+overflow, double-hold of an exclusive object, containment cycle, invalid transit endpoints/timing,
+lifecycle/placement disagreement; transitions — cross-world (`world_line` mismatch), stale
+(`prior_state_hash`), non-monotonic/gapped `logical_step`, illegal `effect` pre (wrong location, missing
+portal, non-portable take, over-capacity, acyclicity break), illegal resurrection of a `removed` body,
+transplanted `resulting_state_hash`; registry TOCTOU on the new records (reuse S0 single-snapshot);
+fork — raw parent-id snapshot refused, fully-remapped child admits with all child-world nested ids,
+unauthorized/foreign/stale/transplanted parent refused, two siblings distinct with no parent/sibling
+contamination; replay — same initial+ordered transitions ⇒ identical bytes, order-independent internal
+storage.
+
+## 11. Compatibility
+Additive only; new files under `coliseum/textlab/spatial/`. No existing module / primary evidence /
+`tools/council` change; `control_of` untouched; frozen `SPATIAL_SCHEMA_VERSION` reused. Historical
+evidence + schema dispatch preserved.
