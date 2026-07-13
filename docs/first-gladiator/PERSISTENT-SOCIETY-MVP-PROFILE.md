@@ -1,4 +1,4 @@
-# Persistent Society MVP Profile (Rev. 3)
+# Persistent Society MVP Profile (Rev. 4)
 
 > **Status:** design source (doc-only). This profile is the **implementation-ready** companion to the
 > vision-level annex `docs/first-gladiator/LIVING-COLISEUM.md` — it resolves the fifteen mechanical areas the
@@ -21,6 +21,13 @@
 > contradiction** is reconciled (area 14): the 3–5-Gladiator MVP is pre-population-scale because it omits the
 > scarcity-politics + elimination that (with N≥3) define Hunger Games; SC-9 is unchanged and the §B wording is
 > flagged as a deferred owner clarification.
+>
+> **Rev. 4** resolves the one HIGH finding of `society-profile-003` (AUDIT_BLOCKED 000688): matched
+> control/intervention fork siblings previously collided on `world_line_id` (the §16.2 preimage lacked a
+> branch discriminator). §16.4 now defines a self-excluding **`fork_id`** over the full fork payload, and
+> §16.2 binds `fork_id` into every non-genesis `world_line_id` — so siblings get **distinct `world_line_id`s**
+> (enabling the 16.4–16.5 per-world-line chain isolation) while still sharing `partition_group_id` and the
+> parent/genesis/snapshot bindings.
 >
 > **Grounding & reuse — implemented vs proposed (F2).**
 > *Anchors* `docs/first-gladiator/LIVING-COLISEUM.md` (world-identity taxonomy §C, one deterministic world
@@ -278,9 +285,15 @@ the enumerated owner-authority values remain open.
 stable across a world-line.
 
 **16.2 `world_line`** — domain `world:line:v1`. Required: `schema_version`, `world_definition_hash:hash`,
-`genesis_snapshot_hash:hash`, `world_seed:int≥0`, `parent_world_line_id:str|null`, `fork_tick:int≥0|null`
-(both null iff genesis). Identity: `world_line_id` = domain-hash of those fields. Validation: a non-null
-`parent_world_line_id` requires a non-null `fork_tick` and a `fork` record (16.4); the genesis line has both null.
+`genesis_snapshot_hash:hash`, `world_seed:int≥0`, `parent_world_line_id:str|null`, `fork_tick:int≥0|null`,
+`fork_id:hash|null` (all three null iff genesis). Identity: `world_line_id` = domain-hash of those fields
+(self-excluding `world_line_id`). The **`fork_id` (16.4) is the branch discriminator**: matched control and
+intervention siblings share `parent_world_line_id`/`genesis_snapshot_hash`/`fork_tick`/`world_seed` but carry
+**distinct `fork_id`s** (branch/intervention differ), so they receive **distinct `world_line_id`s** — required
+for the per-world-line chain isolation of 16.4–16.5. Validation: a non-null `parent_world_line_id` requires a
+non-null `fork_tick` **and** a non-null `fork_id` and its `fork` record (16.4); the genesis line has all three
+null; a matched sibling pair must have **distinct `world_line_id`** yet identical `partition_group_id`,
+`parent_world_line_id`, `parent_snapshot_hash`, and `genesis_snapshot_hash`.
 
 **16.3 `snapshot`** (evidence coordinate, **not** a regime discriminator). Required: `tick:int≥0`,
 `current_snapshot_hash:hash` (domain `world:snapshot:v1`, over the objective world state only),
@@ -293,11 +306,14 @@ stable across a world-line.
 `held_constant_hash:hash` (domain `world:heldconstant:v1` over the sorted list — the exact canonical payload
 verdict 000579 requires), `changed_dimension:str|null`, `changed_dimension_hash:hash|null` (domain
 `world:changeddim:v1` over `changed_dimension`; null iff `changed_dimension` null), `partition_group_id:hash`
-(the §8 group the sibling branches share). Validation: `branch=intervention` ⇒ `intervention_id`,
-`changed_dimension`, `changed_dimension_hash` all non-null; `branch=control` ⇒ all three null; both sibling
-branches carry the **same** `parent_world_line_id`, `parent_snapshot_hash`, `genesis_snapshot_hash`, and
-`partition_group_id`, and may not straddle a train/eval split (§8); a branch's world-event chain (16.5) links
-only within its own `world_line_id` (no cross-branch link).
+(the §8 group the sibling branches share). Identity: `fork_id` = domain-`world:fork:v1`-hash over this payload
+(self-excluding `fork_id`); because `branch`/`intervention_id`/`changed_dimension_hash` differ between siblings,
+their `fork_id`s differ (and feed 16.2 so their `world_line_id`s differ). Validation: `branch=intervention` ⇒
+`intervention_id`, `changed_dimension`, `changed_dimension_hash` all non-null; `branch=control` ⇒ all three
+null; both sibling branches carry the **same** `parent_world_line_id`, `parent_snapshot_hash`,
+`genesis_snapshot_hash`, and `partition_group_id` but **distinct** `fork_id` (hence distinct `world_line_id`),
+and may not straddle a train/eval split (§8); a branch's world-event chain (16.5) links only within its own
+`world_line_id` (no cross-branch link).
 
 **16.5 `world_event`** (the PROPOSED hash-chained extension of `EventDelta`). Existing `EventDelta` fields
 `{run_id, timestep, source, state_delta, narrative}` are retained; the extension adds required
