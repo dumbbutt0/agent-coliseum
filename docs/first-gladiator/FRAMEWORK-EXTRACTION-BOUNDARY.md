@@ -16,10 +16,13 @@ untouched).
 > contract — but make **no further code changes** to the role, event-type, policy, or anchor internals.
 > Rationale: every remaining slice (S2–S5) would refactor code that *implements* a constitutional safety
 > control (the crypto-bound-role check in the policy pin-walk and `identity.py`; the policy engine; the
-> `/etc/coliseum` anti-tamper anchors), for reusability value that has **no second consumer yet**. The
-> import seam already holds, so the core is already project-independent at the level that matters; deeper
-> parameterization is deferred until a real second consumer justifies touching those controls. **S2–S5 below
-> are the documented, not-yet-built extension design; building any of them requires explicit owner go-ahead.**
+> `/etc/coliseum` anti-tamper anchors), for reusability value that has **no second consumer yet**. **What S1
+> delivers is precisely bounded: deployment portability (the council root / repo roots are injectable, no
+> baked-in machine path) and import decoupling (the core imports no `coliseum` code). It does NOT deliver
+> complete project independence** — the roles, event vocabulary, policy versions, and anti-tamper anchors
+> all remain Coliseum-profile-bound until S2–S5 (or an equivalent second-consumer extraction) are actually
+> implemented. **S2–S5 below are the documented, not-yet-built extension design; building any of them
+> requires explicit owner go-ahead.**
 
 **Inviolable (owner-directed).** Extraction must NOT weaken any of: append-only hash-chained history,
 independent audits, hidden-evaluation controls, identity binding, critical-violation vetoes, or the
@@ -83,11 +86,18 @@ regression) → commit → route as a `source` request → Codex adversarial aud
 verdict. Stop for the owner on any Class-C authority expansion, a blocked verdict past the cycle bound, or
 any inability to preserve the inviolable controls.
 
-## Reusability contract (the seam, as it stands after S1)
+## What S1 delivers, precisely (and what it does NOT)
 
-The framework is reusable **today** at the level the import seam already guarantees: `tools/council/*` is
-project-independent (no `coliseum` imports), and a second deployment can already run it by supplying its
-own council root / repo roots via environment variables or `register_site_defaults(...)` — with the
-Coliseum event/role/policy vocabulary as the default profile. The four injection seams above are the
-documented extension points a second consumer would parameterize; only seam #1 (config/paths) is
-implemented, because it is the only one whose value did not require refactoring a constitutional control.
+**Delivered by S1:** (1) **deployment portability** — the council root and repo roots are injectable (env
+vars or `register_site_defaults(...)`), so no machine-specific path is baked into the generic core; and
+(2) **import decoupling** — `tools/council/*` imports no `coliseum` code. A second deployment could point
+the engine at its own filesystem locations without editing the package.
+
+**NOT delivered by S1 (still Coliseum-profile-bound):** the **roles** (`claude/codex/human`), the **event
+vocabulary** (`SENDER_ALLOWED`, token/verdict sets, the FSM table), the **policy versions/evaluators**
+(`POLICY_VERSIONS`, delegation/governance/revocation), and the **anti-tamper anchors** (`/etc/coliseum`
+enrollment + chain-head). These remain welded to the Coliseum profile until S2–S5 (or an equivalent
+second-consumer extraction) are implemented. So the engine is **import-decoupled and deployment-portable
+after S1 — not project-independent.** A genuinely second consumer would still have to parameterize the four
+injection seams above (only seam #1, config/paths, is implemented) before it could run its own roles,
+events, or policy.
