@@ -54,7 +54,7 @@ authority**, not a per-verdict approval service.
 | Envelope escape / out-of-scope request | The `OwnerDelegationProfile` enumerates authorized task kinds/capabilities/paths; anything outside → fail closed. |
 | Cross-request delegation reuse | The auto-satisfy event binds `request_id` + `target_commit` + `delegation_hash`; a delegation grant is not transferable between requests/commits (mirrors token binding). |
 | Commit swap after audit | Reuses the existing `verdict_commit_exact` + `head_is_target` + clean-tree guards; a changed commit invalidates authorization. |
-| Expired / revoked / kill-switched delegation | `evaluate_delegation` checks start/expiration + revocation marker + kill-switch + budget; any → fail closed to the owner. |
+| Expired / revoked / suspended delegation | `evaluate_delegation` checks start/expiration + budget + `STOP`/`MANUAL` (immediate suspension) + the active policy version (a v3→v4 owner-tokened forward-only `POLICY_AMENDED` disables delegation, §5); any → fail closed to the owner. Revocation is never a v3→v2 rollback (impossible under monotonic `effective_policy_pin`) and never an agent-creatable marker. |
 | Budget evasion | A code-defined delegation task/compute budget + fail-closed `cond`; exhaustion → owner gate. |
 | Protocol self-modification | `no_protocol_self_modification` (unchanged) forces council-authority changes to the owner. |
 | Hunger-Games / weights escalation | Explicit Class-C; never delegated. |
@@ -80,8 +80,19 @@ A content-addressed object embedded in `POLICY_VERSIONS[3]`, bound into every au
 - `budgets`: `max_delegated_integrations_per_owner_action` (new code-defined ceiling) + the existing
   720-aggregate-compute-minute envelope; `expiration`: N days OR the next owner `STATUS_CHANGED`/`POLICY_AMENDED`
   (whichever first), re-granted by re-ratification.
-- `revocation`: a `DELEGATION_REVOKED` marker file (MANUAL-style) OR any owner `POLICY_AMENDED` reverting to v2;
-  `emergency_stop`: the existing `STOP` file halts everything.
+- **`revocation` (owner-authenticated, monotonic — corrected).** Permanent revocation is a **forward-only,
+  owner-tokened `POLICY_AMENDED` from v3 to a new code-defined delegation-DISABLED version v4** (v4 = the policy
+  with the `OwnerDelegationProfile` removed/disabled). It is **never** a v3→v2 rollback: `effective_policy_pin`
+  is strictly monotonic (`policy_version == current+1`, root-anchored, `policy.py:202-220`), so rollback is
+  impossible by construction and must not be claimed. Only the owner S/KEY token can emit this `POLICY_AMENDED`
+  (`schemas.py:123,136`), so no agent can forge revocation. **Immediate emergency suspension** (no token) reuses
+  the existing **owner/root-controlled `STOP` file** (halts every transition) and **`MANUAL` marker** (disables
+  auto-approval, hence the delegated path); `evaluate_delegation` already fails closed on both via
+  `emergency_stop_clear` / `auto_approval_enabled` (§9). These markers are created only outside the agent's
+  write scope (owner action; the identity root is root-anchored to `/etc/coliseum`) — the agent never creates
+  them, and the enforcement slice includes an adversarial test proving a claude-authored revocation /
+  policy-amendment is rejected by `validate_sender` + the human-token requirement, and that a present
+  `STOP`/`MANUAL` marker forces the delegated satisfaction path closed.
 - `immutable_audit_requirements`: every auto-satisfied integration is a normal chain event, re-derivable by
   replay; nothing is trusted from event presence.
 
@@ -126,7 +137,8 @@ permitted). It reuses **every** `policy.evaluate` guard — `policy_installed`/`
 `identity_chain_valid`, `milestone_not_reached`, `working_tree_clean` + `head_is_target`, `verdict_commit_exact`
 — **plus** delegation-specific checks: verdict is `AUDIT_GO_WITH_CONDITIONS` from `codex`; the request is an
 authorized structural `source` task within `authorized_paths`; every condition classifies **Class A**;
-`no_protocol_self_modification`; delegation not expired/revoked/kill-switched; budget within bound;
+`no_protocol_self_modification`; the pinned policy version is the delegation-ENABLED v3 (a v4 disable version or
+any non-v3 pin ⇒ no delegation); delegation not expired; `STOP`/`MANUAL` absent; budget within bound;
 `delegation_hash` matches the pinned profile. Any non-empty `reasons` ⇒ fall back to the owner gate.
 
 ## 10. State-machine gate extension (one place)
@@ -153,9 +165,12 @@ transition (`CHANGE_INTEGRATED` / `POLICY_VALIDATION_REQUIRED`) until **all** re
 
 ## 12. Circuit breakers
 
-Reuse: `STOP` file, `MANUAL` marker, `control.json` pause, 720-aggregate-compute-minute ceiling,
-3-consecutive-failure auto-halt, `bounded_loops` (≤5 cycles / ≤2 retries). New (code-defined + fail-closed):
-a delegation task/compute budget and a `DELEGATION_REVOKED` kill-switch. **Always stop automatically** for:
+Reuse: `STOP` file (halts all), `MANUAL` marker (disables auto-approval, hence the delegated path),
+`control.json` pause, 720-aggregate-compute-minute ceiling, 3-consecutive-failure auto-halt, `bounded_loops`
+(≤5 cycles / ≤2 retries) — all owner/root-controlled and already checked fail-closed by the delegation
+evaluator. New (code-defined + fail-closed): a delegation task/compute budget. **Revocation** is the
+owner-tokened forward-only `POLICY_AMENDED` v3→v4 (§5), not a marker an agent could create. **Always stop
+automatically** for:
 delegation expiration/revocation · chain-verify failure · auditor-identity failure · unaudited-commit mismatch
 · protected-path change outside scope · unexpected schema migration · hidden-data boundary failure · external
 network/tool request outside scope · untrusted content escaping isolation · budget exhaustion · critical
@@ -175,10 +190,12 @@ Claude cannot self-approve (append an `AUDIT_*`/self CONDITIONS_AUTO_SATISFIED w
 cannot expand authority through conditions (a Class-C condition never auto-satisfies) · Fable cannot convert
 methodological advice into policy authority · an uncovered condition cannot auto-satisfy · a substituted
 `condition_hash` fails closed · a request cannot reuse another request's delegation (binding mismatch) · a
-changed commit invalidates authorization · expired/revoked/kill-switched delegation fails closed · budget
-exhaustion fails closed · Hunger-Games/weights remain owner-gated · the human `CONDITIONS_SATISFIED` + S/KEY
-path is byte-unchanged · `evaluate_delegation` is a pure re-runnable function (auto-satisfaction never trusted
-from event presence).
+changed commit invalidates authorization · expired delegation / a `STOP`/`MANUAL` marker / a v4-disable pin all
+fail closed · **an agent cannot forge revocation** (a claude-authored `POLICY_AMENDED` or revocation is rejected
+by `validate_sender` + the human-token requirement; only an owner-tokened forward-only v3→v4 amendment disables
+delegation) · budget exhaustion fails closed · Hunger-Games/weights remain owner-gated · the human
+`CONDITIONS_SATISFIED` + S/KEY path is byte-unchanged · `evaluate_delegation` is a pure re-runnable function
+(auto-satisfaction never trusted from event presence).
 
 ## 15. Non-goals & explicit deferrals
 
@@ -199,9 +216,10 @@ disagreement · Hunger-Games readiness · revocation / emergency intervention.
 ## 17. Implementation order (bounded, each Codex-audited)
 
 1. This design source → Codex audit → integrate.
-2. Slice 1 (enforcement): `POLICY_VERSIONS[3]` + `evaluate_delegation` + `CONDITIONS_AUTO_SATISFIED` +
-   state-machine gate + `claude_watch` branch + delegation budget/kill-switch + the §14 adversarial suite →
-   Codex audit → integrate.
+2. Slice 1 (enforcement): `POLICY_VERSIONS[3]` (delegation-enabled) **and `POLICY_VERSIONS[4]`
+   (delegation-disabled, the forward-only revocation target)** + `evaluate_delegation` +
+   `CONDITIONS_AUTO_SATISFIED` + state-machine gate + `claude_watch` branch + delegation budget + the §14
+   adversarial suite (incl. the un-forgeable-revocation regression) → Codex audit → integrate.
 3. Owner ratification: `amend-policy --target-version 3` → one `POLICY_AMENDED`.
 4. (Deferred, separate) Fable scaffold + quorum; envelope broadening; `TrainingDelegationProfile`.
 
