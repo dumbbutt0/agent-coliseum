@@ -165,6 +165,65 @@ def test_registry_unknown_id():
         InterventionRegistry().get("nope")
 
 
+# --------------------------- audit 000814 blocker 1: immutable definitions
+def test_mutating_caller_spec_cannot_change_registered_identity():
+    spec = {"strength": 1, "nested": {"k": [1, 2]}}
+    iv = Intervention("iv-mutable", "state", "framing", spec)
+    reg = InterventionRegistry()
+    admitted = reg.register(iv)
+    # mutate the caller's ORIGINAL object, top-level and nested
+    spec["strength"] = 999
+    spec["nested"]["k"].append(3)
+    spec["added"] = "new"
+    assert intervention_spec_hash(iv) == admitted            # identity unchanged
+    assert reg.register(iv) == admitted                      # still idempotent
+    assert iv.canonical_spec == {"strength": 1, "nested": {"k": [1, 2]}}
+
+
+def test_get_result_cannot_mutate_registry_state():
+    iv = Intervention("iv-immut", "state", "framing", {"a": {"b": 1}})
+    reg = InterventionRegistry()
+    admitted = reg.register(iv)
+    got = reg.get("iv-immut")
+    # canonical_spec hands back a fresh copy; mutating it is inert
+    got.canonical_spec["a"]["b"] = 42
+    got.canonical_spec["c"] = 9
+    assert intervention_spec_hash(reg.get("iv-immut")) == admitted
+    assert reg.get("iv-immut").canonical_spec == {"a": {"b": 1}}
+    # the definition exposes no setter for its scalar identity fields
+    with pytest.raises(AttributeError):
+        got.intervention_id = "hijacked"
+
+
+# --------------------------- audit 000814 blocker 2: injective typed input
+@pytest.mark.parametrize("bad_spec", [
+    {1: "x"},                        # int key aliases the string "1"
+    {"ok": {2: "y"}},                # nested int key
+    {"ok": [{"3": 1}, {4: 2}]},      # int key nested in a list
+    {"t": (1, 2)},                   # tuple serializes like a list
+    {"s": {"a"}},                    # set is not JSON
+])
+def test_non_string_keys_and_non_json_types_rejected(bad_spec):
+    with pytest.raises(InterventionError):
+        Intervention("iv-bad", "state", "framing", bad_spec)
+
+
+def test_int_and_string_key_aliases_cannot_collapse_to_one_identity():
+    # {"1": "x"} is valid; {1: "x"} must be REFUSED (not silently equal).
+    ok = Intervention("iv-a", "state", "framing", {"1": "x"})
+    assert intervention_spec_hash(ok)          # valid, hashes fine
+    with pytest.raises(InterventionError):
+        Intervention("iv-b", "state", "framing", {1: "x"})
+
+
+def test_realization_rejects_non_string_keys_in_payload():
+    regime = intervention_regime_hash("d" * 64, _iv())
+    with pytest.raises(InterventionError):
+        intervention_realization_hash(regime, "exec-1", {1: "x"})
+    with pytest.raises(InterventionError):
+        intervention_realization_hash(regime, "exec-1", {"ok": {2: "y"}})
+
+
 # ------------------------------------------------- naming / terminology guard
 def test_public_names_and_reserved_values_are_not_alignment_framed():
     # Binding terminology: the machinery measures behavioral CALIBRATION and never

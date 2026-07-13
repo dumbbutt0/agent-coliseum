@@ -43,6 +43,8 @@ pool. Weight/adapter interventions are out of scope until M14/SC-8 (owner-gated)
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
 
 from coliseum.textlab.schema import canonical_json, config_hash
@@ -74,26 +76,129 @@ class InterventionError(ValueError):
     """An intervention definition or identity request violates the schema."""
 
 
-@dataclass(frozen=True)
+def _validate_json_payload(value, where: str) -> None:
+    """Recursively require a strict JSON DATA-MODEL value: dict / list / str /
+    finite-number / bool / None only, with **string-only object keys**.
+
+    This closes the non-injective-input hole (audit 000814): ``json.dumps``
+    coerces a non-string object key (e.g. int ``1``) to its string form, so
+    ``{1: "x"}`` and ``{"1": "x"}`` would canonicalize identically and collapse
+    to one content identity. Rejecting non-string keys (and tuples, which
+    serialize like lists) makes the accepted-value -> canonical-JSON mapping
+    injective, so distinct accepted definitions cannot share a hash."""
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, str):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise InterventionError(f"{where}: non-finite float is not allowed")
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise InterventionError(
+                    f"{where}: object keys must be strings, got "
+                    f"{type(k).__name__} {k!r}")
+            _validate_json_payload(v, f"{where}.{k}")
+        return
+    if isinstance(value, list):
+        for i, v in enumerate(value):
+            _validate_json_payload(v, f"{where}[{i}]")
+        return
+    # tuples/sets/bytes/custom objects are rejected: a tuple would serialize like
+    # a list (another non-injective input), and non-JSON types have no stable id.
+    raise InterventionError(
+        f"{where}: unsupported type {type(value).__name__} "
+        "(only JSON dict/list/str/number/bool/null with string keys)")
+
+
+def _detached_canonical_spec(spec) -> dict:
+    """Validate a spec dict and return a DETACHED canonical copy (round-tripped
+    through canonical JSON) that shares no mutable state with the caller — so a
+    later mutation of the caller's object can never change a registered
+    definition's identity (audit 000814, blocker 1)."""
+    if not isinstance(spec, dict):
+        raise InterventionError("canonical_spec must be a dict")
+    _validate_json_payload(spec, "canonical_spec")
+    return json.loads(canonical_json(spec))
+
+
 class Intervention:
     """A registered, content-addressed treatment definition.
 
-    ``canonical_spec`` is the treatment's parameters as a JSON-serializable dict;
-    it is hashed canonically (sorted keys) so key order never affects identity.
+    Immutable by construction: the scalar fields and a **detached, deeply
+    validated** canonical spec are captured at ``__init__`` and exposed only
+    through read-only properties (``canonical_spec`` returns a fresh copy per
+    access). Neither the caller's original object nor a registry consumer can
+    mutate a definition after it is created, so its identity is stable for life.
     """
-    intervention_id: str
-    cls: str
-    kind: str
-    canonical_spec: dict
-    schema_version: str = INTERVENTION_SCHEMA_VERSION
 
-    def __post_init__(self):
-        validate_intervention(self)
+    __slots__ = ("_intervention_id", "_cls", "_kind", "_schema_version",
+                 "_spec_json")
+
+    def __init__(self, intervention_id: str, cls: str, kind: str,
+                 canonical_spec: dict,
+                 schema_version: str = INTERVENTION_SCHEMA_VERSION):
+        if not isinstance(intervention_id, str) or not intervention_id.strip():
+            raise InterventionError("intervention_id must be a non-empty string")
+        if cls not in INTERVENTION_CLASSES:
+            raise InterventionError(
+                f"class must be one of {INTERVENTION_CLASSES}, got {cls!r}")
+        if not isinstance(kind, str) or not kind.strip():
+            raise InterventionError("kind must be a non-empty string")
+        if schema_version != INTERVENTION_SCHEMA_VERSION:
+            raise InterventionError(
+                f"unsupported schema_version {schema_version!r} "
+                f"(want {INTERVENTION_SCHEMA_VERSION!r})")
+        if intervention_id == CONTROL_TREATMENT:
+            raise InterventionError(
+                f"intervention_id {CONTROL_TREATMENT!r} is reserved for the "
+                "no-intervention control and cannot name a registered intervention")
+        # detached + deeply validated canonical form (blockers 1 and 2)
+        detached = _detached_canonical_spec(canonical_spec)
+        self._intervention_id = intervention_id
+        self._cls = cls
+        self._kind = kind
+        self._schema_version = schema_version
+        # store the canonical JSON string: the immutable identity substrate
+        self._spec_json = canonical_json(detached)
+
+    @property
+    def intervention_id(self) -> str:
+        return self._intervention_id
+
+    @property
+    def cls(self) -> str:
+        return self._cls
+
+    @property
+    def kind(self) -> str:
+        return self._kind
+
+    @property
+    def schema_version(self) -> str:
+        return self._schema_version
+
+    @property
+    def canonical_spec(self) -> dict:
+        """A FRESH copy of the canonical spec on every access — mutating the
+        returned object never touches the registered definition."""
+        return json.loads(self._spec_json)
+
+    def __repr__(self) -> str:
+        return (f"Intervention(id={self._intervention_id!r}, cls={self._cls!r}, "
+                f"kind={self._kind!r})")
 
 
 def validate_intervention(iv: "Intervention") -> "Intervention":
-    """Fail closed on a malformed intervention (non-empty id/kind, known class,
-    known schema version, canonically-serializable spec dict)."""
+    """Fail closed on a malformed intervention. Construction already validates
+    and freezes; this re-checks the (immutable) scalar fields for callers that
+    accept an already-built Intervention, and returns it unchanged."""
+    if not isinstance(iv, Intervention):
+        raise InterventionError("not an Intervention instance")
     if not isinstance(iv.intervention_id, str) or not iv.intervention_id.strip():
         raise InterventionError("intervention_id must be a non-empty string")
     if iv.cls not in INTERVENTION_CLASSES:
@@ -107,20 +212,14 @@ def validate_intervention(iv: "Intervention") -> "Intervention":
             f"(want {INTERVENTION_SCHEMA_VERSION!r})")
     if iv.intervention_id == CONTROL_TREATMENT:
         raise InterventionError(
-            f"intervention_id {CONTROL_TREATMENT!r} is reserved for the "
-            "no-intervention control and cannot name a registered intervention")
-    if not isinstance(iv.canonical_spec, dict):
-        raise InterventionError("canonical_spec must be a dict")
-    try:
-        canonical_json(iv.canonical_spec)  # rejects NaN/Infinity/non-serializable
-    except (ValueError, TypeError) as exc:
-        raise InterventionError(f"canonical_spec is not canonically serializable: {exc}")
+            f"intervention_id {CONTROL_TREATMENT!r} is reserved")
     return iv
 
 
 def intervention_spec_hash(iv: "Intervention") -> str:
     """The registered DEFINITION hash — the identity of *what the treatment is*.
-    Independent of any regime or run."""
+    Independent of any regime or run. Computed from the immutable, detached,
+    string-key-only canonical spec captured at construction."""
     validate_intervention(iv)
     return config_hash({
         "_domain": _SPEC_DOMAIN,
@@ -168,10 +267,10 @@ def intervention_realization_hash(regime_hash: str,
         raise InterventionError("execution_instance_id must be a non-empty string")
     if not isinstance(realized_payload, dict):
         raise InterventionError("realized_payload must be a dict")
-    try:
-        canonical_json(realized_payload)
-    except (ValueError, TypeError) as exc:
-        raise InterventionError(f"realized_payload is not canonically serializable: {exc}")
+    # same injective-input rule as the spec (audit 000814, blocker 2): reject
+    # non-string keys / non-JSON types so distinct payloads cannot collapse to
+    # one realization identity.
+    _validate_json_payload(realized_payload, "realized_payload")
     return config_hash({
         "_domain": _REALIZATION_DOMAIN,
         "intervention_regime_hash": regime_hash,
