@@ -12,7 +12,9 @@ adds two spatial rules, both fail-closed:
 """
 from __future__ import annotations
 
-from coliseum.textlab._content_record import ContentRecord, ContentRecordError, ContentRegistry
+from coliseum.textlab._content_record import (ContentRecord, ContentRecordError,
+                                              ContentRegistry, _StoredRecord,
+                                              content_id)
 from coliseum.textlab.spatial.world import is_supported_version
 
 # scalar reference fields: content key -> the domain the referenced id must have.
@@ -67,19 +69,33 @@ class SpatialSpecRegistry:
     def register(self, record: "ContentRecord") -> str:
         if not isinstance(record, ContentRecord):
             raise ContentRecordError("not a ContentRecord")
+        # SINGLE detached snapshot: capture domain + content exactly ONCE. Every check
+        # below AND the final admission operate on this immutable snapshot, never on a
+        # re-read of the caller-controlled record — closing the check/admit TOCTOU (a
+        # record whose content accessor switches between reads cannot pass validation
+        # with one snapshot and be admitted with another).
+        domain = record.domain
         content = record.content
+        id_field = type(record).ID_FIELD
+        # re-derive the id from the snapshot; refuse a record whose claimed id does not
+        # match its content (tampered/drifted). Storage uses the snapshot, not record.id.
+        derived_id = content_id(domain, content, id_field) if id_field else None
+        if derived_id is not None and record.id != derived_id:
+            raise ContentRecordError(
+                "record id does not match its content (tampered or drifted)")
         version = content.get("spatial_schema_version")
         if not is_supported_version(version):
             raise ContentRecordError(
                 f"unsupported spatial_schema_version {version!r} — refused (unknown "
                 "versions fail closed)")
-        domain = record.domain
         for field, expected in _SCALAR_REFERENCES.get(domain, ()):  # construction order
             self._check_reference(content[field], expected, field)
         for field, expected in _LIST_REFERENCES.get(domain, ()):
             for rid in content[field]:
                 self._check_reference(rid, expected, field)
-        return self._base.register(record)
+        # admit the EXACT validated snapshot as an immutable record — the base registry
+        # reads only this detached snapshot, not the original polymorphic record.
+        return self._base.register(_StoredRecord(domain, content))
 
     def get(self, record_id: str) -> "ContentRecord":
         return self._base.get(record_id)

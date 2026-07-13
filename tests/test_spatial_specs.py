@@ -141,3 +141,72 @@ def test_registry_refuses_world_spec_with_unregistered_member():
 def test_version_dispatch_fail_closed():
     assert is_supported_version(SPATIAL_SCHEMA_VERSION)
     assert not is_supported_version("9.9")
+
+
+# ---------------------------------------------- single-snapshot atomicity (TOCTOU)
+from coliseum.textlab._content_record import ContentRecord, content_id  # noqa: E402
+
+
+class _SwitchingRecord(ContentRecord):
+    """An adversarial record whose content accessor returns a clean snapshot on the
+    first read and a dirty (unknown-version / unregistered-ref) snapshot afterwards —
+    the check/admit TOCTOU probe."""
+
+    # deliberately NO __slots__ so the read counter can live in __dict__.
+    DOMAIN = "spatial.portal_spec.v1"
+    ID_FIELD = "portal_spec_id"
+
+    def __init__(self, clean, dirty, dirty_first=False):
+        object.__setattr__(self, "_n", 0)
+        object.__setattr__(self, "_clean", clean)
+        object.__setattr__(self, "_dirty", dirty)
+        object.__setattr__(self, "_dirty_first", dirty_first)
+
+    @property
+    def content(self):
+        object.__setattr__(self, "_n", self._n + 1)
+        first, second = ((self._dirty, self._clean) if self._dirty_first
+                         else (self._clean, self._dirty))
+        return dict(first if self._n == 1 else second)
+
+    @property
+    def domain(self):
+        return self.DOMAIN
+
+    @property
+    def id(self):
+        snap = self._dirty if self._dirty_first else self._clean
+        return content_id(self.DOMAIN, snap, self.ID_FIELD)
+
+
+def _clean_dirty_portals():
+    reg = SpatialSpecRegistry()
+    r1 = _room("hall"); r2 = _room("vault", ("private",))
+    reg.register(r1); reg.register(r2)
+    clean = dict(PortalSpec(r1.id, r2.id, "bidirectional", 1, "opaque",
+                            ["openable"]).content)
+    dirty = dict(clean)
+    dirty["spatial_schema_version"] = "9.9"           # unknown version
+    dirty["origin_room_spec_id"] = "unregistered-origin"  # unregistered ref
+    return reg, r1, clean, dirty
+
+
+def test_switching_content_admits_only_validated_snapshot():
+    """A record that presents a clean snapshot to validation must not smuggle a dirty
+    snapshot into registry truth: the validated snapshot is what gets admitted."""
+    reg, r1, clean, dirty = _clean_dirty_portals()
+    rid = reg.register(_SwitchingRecord(clean, dirty))
+    stored = reg.get(rid).content
+    assert stored["spatial_schema_version"] == SPATIAL_SCHEMA_VERSION
+    assert stored["origin_room_spec_id"] == r1.id
+    # the dirty snapshot's unknown version never entered registry truth.
+    assert all(reg.get(i).content.get("spatial_schema_version") == SPATIAL_SCHEMA_VERSION
+               for i in reg.ids())
+
+
+def test_switching_content_dirty_first_refused_registry_unchanged():
+    reg, r1, clean, dirty = _clean_dirty_portals()
+    before = set(reg.ids())
+    with pytest.raises(ContentRecordError):
+        reg.register(_SwitchingRecord(clean, dirty, dirty_first=True))
+    assert set(reg.ids()) == before   # refusal left registry truth untouched
