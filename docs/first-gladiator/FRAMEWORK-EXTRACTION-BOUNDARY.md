@@ -11,6 +11,16 @@ established build→Codex-audit→integrate path. Each slice is bounded, indepen
 **behavior-preserving for Coliseum** (the existing suite stays green; the live chain/identity/policy are
 untouched).
 
+> **Scope decision (2026-07-13, owner): LIGHT.** Ship the safe, high-value decoupling (slice **S1**, done +
+> integrated) and **document** the framework/adapter boundary + the four injection seams as the reusability
+> contract — but make **no further code changes** to the role, event-type, policy, or anchor internals.
+> Rationale: every remaining slice (S2–S5) would refactor code that *implements* a constitutional safety
+> control (the crypto-bound-role check in the policy pin-walk and `identity.py`; the policy engine; the
+> `/etc/coliseum` anti-tamper anchors), for reusability value that has **no second consumer yet**. The
+> import seam already holds, so the core is already project-independent at the level that matters; deeper
+> parameterization is deferred until a real second consumer justifies touching those controls. **S2–S5 below
+> are the documented, not-yet-built extension design; building any of them requires explicit owner go-ahead.**
+
 **Inviolable (owner-directed).** Extraction must NOT weaken any of: append-only hash-chained history,
 independent audits, hidden-evaluation controls, identity binding, critical-violation vetoes, or the
 owner's revocation power. If a slice cannot preserve all of these it fails closed and stops for the owner.
@@ -50,19 +60,34 @@ value (an env var the agent process controls, or a repo/agent-writable config fi
 delegated program must not be able to point its own identity anchor at a file it controls. This slice is
 sequenced **last** and carries adversarial tests proving no agent-writable channel can redirect the anchor.
 
-## Slice sequence (smallest / safest first; security-critical last)
+## Slice sequence (S1 built; S2–S5 documented-but-deferred per the LIGHT decision)
 
-- **S1 — de-hardcode project defaults.** Move `DEFAULT_COUNCIL_ROOT` / `DEFAULT_REPO_ROOTS` out of the
-  generic core; the framework core requires them via config, a Coliseum profile supplies the current
-  values. Behavior byte-identical. No security surface. *(first)*
-- **S2 — role registry.** Injected role set + authority map; Coliseum registers `claude/codex/human`.
-- **S3 — event-type registry.** Injected event vocabulary + token/verdict sets + FSM transition table;
-  Coliseum registers its lifecycle. `EXPERIMENT_TEST_COMMAND` moves to the profile.
-- **S4 — policy-profile registry.** Core keeps the pin/amend/verify walk + oracle shapes; Coliseum
-  registers `POLICY_VERSIONS` and the delegation/governance/revocation evaluators.
-- **S5 — anchor deployment-config model (security-critical, adversarially audited).** Enrollment +
-  chain-head anchor locations become operator/deploy configuration that no agent-writable channel can set.
+- **S1 — de-hardcode project defaults. ✅ BUILT + INTEGRATED** (commit `9dbdb5ac`, plain GO `000808`,
+  `CHANGE_INTEGRATED` **000809**; suite 1075 passed). `DEFAULT_COUNCIL_ROOT` / `DEFAULT_REPO_ROOTS` moved
+  out of the generic core into `tools/council/site_defaults.py` + a runtime `register_site_defaults()`
+  hook; `get_config()` resolution byte-identical (env → runtime override → site default). No security
+  surface. This realizes injection **seam #1** below.
+- **S2 — role registry. ⏸ DEFERRED (design only).** Injected role set + authority map; Coliseum registers
+  `claude/codex/human`. Touches the crypto-bound-role literal in `policy.py:306` (pin-walk) and
+  `identity.py` — constitutional-control code. *Build requires explicit owner go-ahead.*
+- **S3 — event-type registry. ⏸ DEFERRED (design only).** Injected event vocabulary + token/verdict sets +
+  FSM transition table; Coliseum registers its lifecycle; `EXPERIMENT_TEST_COMMAND` moves to the profile.
+- **S4 — policy-profile registry. ⏸ DEFERRED (design only).** Core keeps the pin/amend/verify walk + oracle
+  shapes; Coliseum registers `POLICY_VERSIONS` and the delegation/governance/revocation evaluators.
+- **S5 — anchor deployment-config model. ⏸ DEFERRED (design only, security-critical).** Enrollment +
+  chain-head anchor locations become operator/deploy configuration that no agent-writable channel can set;
+  must ship with adversarial "an agent cannot redirect its own anchor" tests.
 
-Each slice: build + tests (incl. a Coliseum-unchanged regression) → commit → route as a `source` request →
-Codex adversarial audit → integrate on a valid verdict. Stop for the owner on any Class-C authority
-expansion, a blocked verdict past the cycle bound, or any inability to preserve the inviolable controls.
+If any deferred slice is later authorized, each proceeds as: build + tests (incl. a Coliseum-unchanged
+regression) → commit → route as a `source` request → Codex adversarial audit → integrate on a valid
+verdict. Stop for the owner on any Class-C authority expansion, a blocked verdict past the cycle bound, or
+any inability to preserve the inviolable controls.
+
+## Reusability contract (the seam, as it stands after S1)
+
+The framework is reusable **today** at the level the import seam already guarantees: `tools/council/*` is
+project-independent (no `coliseum` imports), and a second deployment can already run it by supplying its
+own council root / repo roots via environment variables or `register_site_defaults(...)` — with the
+Coliseum event/role/policy vocabulary as the default profile. The four injection seams above are the
+documented extension points a second consumer would parameterize; only seam #1 (config/paths) is
+implemented, because it is the only one whose value did not require refactoring a constitutional control.
