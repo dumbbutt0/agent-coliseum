@@ -1,18 +1,23 @@
-# Governance Classification Charter — A/B/C/D decision authority
+# Governance Classification Charter — A/B/C/D decision authority (Rev. 2)
 
 > **Status:** design source (doc-only). This charter SPECIFIES a governance model; it grants no new
 > authority by being integrated. The A/B/C/D envelope becomes operative only when the owner ratifies the
 > corresponding code-defined policy version with a single S/KEY token (a Class-D constitutional act). Until
 > then the active policy is delegation v3 (Class-A structural-`source` auto; everything else → owner token).
 > Integrating this document is inert, exactly as the Delegated-Authority Charter was inert until Step C.
+>
+> **Rev. 2** resolves the five HIGH + one MEDIUM design findings of audit `governance-charter-001`
+> (AUDIT_BLOCKED 000646): a distinct hash-bound **matter_class** (F1); classification-is-not-satisfaction for
+> Class B (F2); replay-vs-independent-replication (F3); enforceable preregistration + evidence-freshness (F4);
+> the owner-gate contradiction (F5); and the actual claim-ladder states (F6).
 
 ## 1. Purpose and the problem it fixes
 
 Owner-directed (2026-07-12): *"'Not routine' should not mean 'owner required.'"* The v3 delegation envelope
 auto-satisfies only Class-A conditions and routes **everything else** to the owner's passphrase. That makes
 the owner the routine approval mechanism for work that is significant but rule-governable — scientific
-acceptance, architectural choices, ambiguity resolution — none of which actually require the owner's
-subjective judgment when a **frozen protocol** can decide them on recorded evidence.
+acceptance, architectural choices, ambiguity resolution — none of which require the owner's subjective
+judgment when a **frozen protocol** decides them on recorded evidence.
 
 This charter replaces the binary (auto | owner) with a four-tier model in which only a small, enumerated set
 of **truly owner-reserved** actions interrupt the owner. Everything else is governed automatically — Class A
@@ -29,95 +34,131 @@ envelope*. Widening it remains a Class-D owner act.
 | Class | Meaning | Decision-maker | Recorded authority |
 |---|---|---|---|
 | **A** | Routine, bounded, reversible work | Claude, automatically | a re-validated `evaluate_delegation` pass (v3) |
-| **B** | Significant but rule-governed work | Claude **+ Codex audit** | a codex terminal verdict (`AUDIT_GO` / all-Class-A conditional) |
-| **C** | Scientific or architectural judgment | the **autonomous council** under a frozen protocol | a `COUNCIL_RESOLVED` verdict meeting every frozen gate, with dissent recorded |
+| **B** | Significant but rule-governed work | Claude **+ Codex audit** | a codex terminal verdict bound to the exact integrated commit |
+| **C** | Scientific or architectural judgment | the **autonomous council** under a frozen protocol | a `COUNCIL_RESOLVED` verdict meeting every frozen gate, dissent recorded |
 | **D** | Truly owner-reserved action | the **owner** | a human S/KEY token |
 
-The classification of a matter is **auditor-emitted and hash-bound** (as Class-A/B/C already are in the v3
-verdict `condition_classes`), extended with class `D`. Claude cannot author or forge the class; the class
-travels inside the codex verdict payload covered by `verdict_payload_hash`. A **missing or ambiguous class
-fails closed to the next-higher authority** (unclassified → D).
+### 2.0 The `matter_class` field (F1 — the routing primitive, distinct from `condition_classes`)
+
+Classification of a **whole matter** is a NEW, mandatory, auditor-emitted, hash-bound field — **`matter_class`
+∈ {A,B,C,D}** — carried on **every governed verdict**: source verdicts (`AUDIT_GO`, `AUDIT_GO_WITH_CONDITIONS`,
+`AUDIT_BLOCKED`), result verdicts, and the new `COUNCIL_RESOLVED`. It is **separate from** v3's per-condition
+`condition_classes` (which stays a 1:1 list over `conditions` and governs only the Class-A auto-satisfy path);
+a plain `AUDIT_GO` has a `matter_class` even though it has no conditions. Properties:
+
+- **Auditor authority.** Only an auditor (codex; later a second independent auditor) may emit or change
+  `matter_class`; it lives in the verdict payload covered by `verdict_payload_hash`. **Claude cannot emit,
+  forge, or alter it** — verdict-hash substitution fails the existing bindings.
+- **A mechanical consumer.** A new policy gate `governance_route(verdict, request, chain)` reads `matter_class`
+  and dispatches: A → `evaluate_delegation` (v3); B → the Codex build→audit lifecycle (§2.2); C → the
+  Class-C evaluator (§3); D → refuse all agent authority, route to the owner token.
+- **Fail closed to D.** An **absent, malformed, or enum-invalid** `matter_class` yields **no A/B/C authority**
+  — the matter is treated as D (owner). Deflation is inert: a D-touching change carrying a non-D label is
+  still refused by the commit-derived protected-path guard and the reserved-capability declaration guards,
+  regardless of the label.
 
 ### 2.1 Class A — routine, bounded, reversible
-Structural source work inside the ratified envelope (the v3 definition): no new authority, no protected paths
-(enforced against the audited commit's real diff), no weights/labels/external systems, within the compute and
-delegation budgets, on a clean tree at the exact audited commit. Claude integrates on a plain `AUDIT_GO`, and
-auto-satisfies an all-Class-A conditional via `CONDITIONS_AUTO_SATISFIED`. **Unchanged from v3.**
+The v3 envelope, unchanged: structural `source` work, no new authority, no protected paths (enforced against
+the audited commit's real diff), no weights/labels/external systems, within budgets, clean tree at the exact
+audited commit. Claude integrates a plain `AUDIT_GO` and auto-satisfies an **all-Class-A** conditional via
+`CONDITIONS_AUTO_SATISFIED`, bound to the audited commit.
 
-### 2.2 Class B — significant but rule-governed
-Work whose correctness is decidable by the existing build→audit contract but that goes beyond the smallest
-Class-A envelope: e.g. new non-normative modules, registry-*consistent* additions that touch no frozen
-artifact, refactors within `coliseum/textlab/*`, evidence tooling, expanded (still non-normative) datasets.
-Governed by Claude **plus a Codex audit** exactly as source requests are today; a codex `AUDIT_GO` (or all-B
-conditional whose corrections stay in-envelope) integrates without the owner. Class B **never** silently
-crosses into C or D — any condition an auditor classes C or D routes onward.
+### 2.2 Class B — significant but rule-governed (F2 — classification is not satisfaction)
+Work whose correctness is decidable by the build→audit contract but beyond the smallest Class-A envelope
+(new non-normative modules, refactors within `coliseum/textlab/*`, evidence tooling, expanded non-normative
+datasets). Governed by Claude **plus a Codex audit**. Critically:
+
+- A Class-B matter integrates **only on a clean codex `AUDIT_GO` bound to the exact integrated commit**.
+  There is **no** "auto-satisfy an outstanding Class-B condition" path: **classification is not satisfaction.**
+- A Class-B verdict that requires a **technical correction** is `AUDIT_BLOCKED` (or a conditional treated as
+  blocking): the correction is `FIX_STARTED → new commit → independent re-audit`, and integration binds the
+  **corrected** commit. Changing bytes to perform a correction **invalidates** any prior verdict binding, so a
+  stale verdict can never unlock `CHANGE_INTEGRATED`, and a builder-authored "satisfaction" of a B condition
+  is refused. (Only Class A keeps the hash-bound all-A `CONDITIONS_AUTO_SATISFIED` path.)
+- Class B **never** silently crosses into C or D — any condition/finding an auditor classes C or D routes on.
 
 ### 2.3 Class C — scientific / architectural judgment, resolved by the autonomous council
-The heart of this charter. Matters that are **not** owner-reserved but require judgment beyond a single
-auditor's GO — accepting or rejecting a scientific **claim**, choosing between materially different but
-rule-permitted architectures, freezing a *new* metric/label **within** the pre-registered protocol, resolving
-genuine ambiguity. These are decided by the council through a **frozen resolution protocol** (§3), never by
-the owner's subjective "yes." The protocol's gates are code-defined and versioned; a matter advances **iff
-every gate passes**, and remains unresolved (fails closed) otherwise.
+Matters that are **not** owner-reserved but require judgment beyond a single auditor's GO — accepting or
+rejecting a scientific **claim**, choosing between materially different but rule-permitted architectures,
+freezing a *new* metric/label **within** the pre-registered protocol, resolving genuine ambiguity. Decided by
+the council through the **frozen resolution protocol** (§3), never by the owner's subjective "yes." A matter
+advances **iff every gate passes**, and otherwise stays **unresolved** (fails closed) — it is never escalated
+to the owner merely for being Class C.
 
 ### 2.4 Class D — truly owner-reserved (the ONLY owner gate)
 Exactly six actions, and nothing else, interrupt the owner:
-1. **External publication under the owner's identity** (any outward-facing artifact attributed to the owner).
-2. **Expenditure beyond the authorized budget** (real money past a preset ceiling).
-3. **Irreversible destruction of evidence or infrastructure** (deleting irreplaceable chain/evidence/runs).
+1. **External publication under the owner's identity.**
+2. **Expenditure beyond the authorized budget.**
+3. **Irreversible destruction of evidence or infrastructure.**
 4. **Legal, financial, privacy, or personal-risk acceptance.**
-5. **Alteration of the project's fundamental mission** (the Coliseum's constitutional purpose).
+5. **Alteration of the project's fundamental mission.**
 6. **Suspension or weakening of constitutional safety controls** (identity, append-only history, independent
-   audit, protected paths, emergency stop, the amendment monotonicity, THIS classification itself).
+   audit, protected paths, emergency stop, amendment monotonicity, THIS classification).
 
-Ratifying this charter, and any later change to it, is itself **Class D item 6** — a constitutional act
-requiring the owner's token. That is the single unavoidable owner interaction this charter introduces.
+Ratifying this charter, and any later change to it, is **Class-D item 6** — the single unavoidable owner
+interaction. **Auditor unavailability is NOT on this list** (see §5): a matter that cannot be safely resolved
+for lack of quorum stays *unresolved*, it does not become an owner action.
 
 ## 3. The frozen Class-C resolution protocol
 
-A Class-C matter is routed to the council and resolved **only** through frozen policy, recorded evidence,
-explicit dissent handling, and an auditable verdict. The gates (code-defined, versioned, all required):
+A Class-C matter is resolved **only** through frozen policy, recorded evidence, explicit dissent handling, and
+an auditable verdict. The gates (code-defined, versioned, all required):
 
-1. **Preregistration.** The question, decision criteria, and the evidence that would settle it are recorded
-   **before** the resolving evidence is examined (a preregistration event, hash-bound). A matter with no prior
-   preregistration cannot be resolved — only preregistered-then-later.
-2. **Evidence adequacy.** For empirical claims: an adequate, pre-declared sample size / power; for
-   architectural choices: the enumerated options with their pre-declared trade-off criteria.
-3. **Independent replication.** The deciding result reproduces (byte-replay for deterministic evidence; an
-   independent re-run for stochastic evidence) — never a single unreplicated observation.
-4. **Metric validity.** The metric is METRICS-v1-frozen (or a *newly* frozen metric that itself passed a
-   Class-C freeze); no post-hoc metric selection; the leakage/held-out and §8 partition disciplines hold.
-5. **Independent auditor approval.** A codex result-audit (and, when a Fable backend exists, a second
-   independent auditor — §5) approves the evidence binding and the reasoning; **no auditor approves its own
-   work.**
-6. **Council consensus with explicit dissent.** The required quorum concurs; any dissent is **recorded, not
-   averaged and not overridden by Claude** — an unresolved dissent blocks advancement (fail closed) and is
-   surfaced in the verdict.
-7. **Auditable verdict.** A `COUNCIL_RESOLVED` event binds the preregistration, the evidence inventory, each
+1. **Preregistration + evidence freshness (F4).** Before the resolving evidence exists or is examined, a
+   hash-bound **preregistration** event records: the question, the decision criteria, the **precommitted
+   eligible evidence sources and metrics**, and either (a) a **sealed, precommitted hidden inventory**
+   (revealed only at resolution) or (b) a commitment to generate the resolving evidence under a **new
+   post-preregistration execution identity** (`execution_instance_id` created *after* the preregistration).
+   Acceptance **refuses**: evidence whose creation or exposure predates the preregistration; a swapped or
+   backfilled inventory; a post-hoc-selected metric; and a **previously-spent held-out suite** — unless a
+   frozen protocol *explicitly permits and records* that use. Chain order alone is insufficient (it proves
+   when a record was appended, not that evidence was unseen); the binding is to execution/sealed identity
+   plus an **access/exposure ledger**, not to append order.
+2. **Evidence adequacy.** A pre-declared sample size / power for empirical claims; the enumerated options with
+   pre-declared trade-off criteria for architectural choices.
+3. **Reproducibility (integrity) — SEPARATE from replication (F3).** Deterministic evidence must **byte-replay**
+   (`verify_run_replay`). This proves *integrity/reproducibility of one result*; it is **not** replication.
+4. **Independent replication (F3).** Empirical acceptance requires **≥2 distinct citable experiments /
+   evidence inventories** with independence criteria frozen by matter type — preserving the existing claim
+   ladder's two-citable-experiment minimum (`registry.py`), which states a provenance link cannot substitute
+   for evidence. **One result plus any number of byte replays remains unreplicated and unaccepted.**
+5. **Metric validity.** A METRICS-v1-frozen metric (or a newly frozen metric that itself passed a Class-C
+   freeze); no post-hoc metric selection; the leakage/held-out and §8 partition disciplines hold.
+6. **Independent auditor approval.** A codex result-audit (and, when a Fable backend exists, a second
+   independent auditor — §5) approves the evidence binding and reasoning; **no auditor approves its own work.**
+7. **Council consensus with recorded, blocking dissent.** The required quorum concurs; any dissent is
+   **recorded, never averaged, never overridden by Claude**; unreconciled dissent within the bounded
+   reconciliation budget **blocks** advancement (fail closed) and is surfaced in the verdict.
+8. **Auditable verdict.** A `COUNCIL_RESOLVED` event binds the preregistration, the evidence inventory, each
    auditor verdict, the consensus/dissent record, and the resolution — append-only and replayable.
 
-**Scientific acceptance** is the canonical Class-C case: a claim advances from *proposed* to *accepted*
-**automatically** iff gates 1–7 pass, and stays unaccepted otherwise. The owner's subjective approval is not a
-gate; the owner's role is constitutional (they can change the *protocol* — a Class-D act — but not veto an
-individual claim that the frozen protocol accepts, nor accept one it rejects).
+### 3.1 Scientific acceptance (F6 — the real claim ladder)
+The claim ladder's actual states are **speculation · observation · replicated · generalized · accepted ·
+refuted · demoted** (`registry.py`; there is no "proposed" state). Acceptance automation performs **only the
+transition into `accepted`**, after every gate above passes and after validating the existing ladder
+(preserving the `replicated`/`generalized` prerequisites and the `refuted`/`demoted` semantics). It **invents
+no new state**; any change to the ladder itself is a **separately audited, versioned migration**, not part of
+acceptance automation. A claim advances to `accepted` iff gates 1–8 pass, and otherwise remains at its current
+state. The owner does not approve or veto an individual claim; the owner can only change the *protocol*
+(Class-D item 6).
 
 ## 4. Ambiguity is not an owner gate
+Genuine ambiguity is a **Class-C matter, not a Class-D interrupt**. The system: (a) investigates; (b) proposes
+the **lowest-risk, most reversible** interpretation; (c) obtains **adversarial review** (an auditor argues the
+opposing interpretation); and (d) **continues** when frozen policy provides a defensible resolution, recording
+the interpretation and its reversibility. Ambiguity that cannot be resolved under any frozen policy stays
+**unresolved/deferred** — it escalates to the owner **only** if its resolution independently matches an
+enumerated Class-D predicate, and then only for that Class-D part.
 
-Genuine ambiguity (materially different choices that would change the research meaning) is a **Class-C matter,
-not a Class-D interrupt**. The system must: (a) investigate; (b) propose the **lowest-risk, most reversible**
-interpretation; (c) obtain **adversarial review** (an auditor argues the opposing interpretation); and (d)
-**continue** when existing frozen policy provides a defensible resolution, recording the interpretation and its
-reversibility. Only ambiguity that *cannot* be resolved under any frozen policy **and** whose resolution would
-implicate a Class-D action escalates to the owner — and then only for the Class-D part.
-
-## 5. Multi-agent council & dissent
-
+## 5. Multi-agent council, quorum & dissent (F5 — one consistent fail-closed destination)
 - **Roles** are additive (only `human` is crypto-bound). Class-C resolution requires ≥1 independent auditor
   (codex today); a second independent auditor (Fable) is **scaffolded but inactive** until a Fable backend
-  exists, and any resolution that a single-auditor quorum cannot safely decide fails closed to the owner until
-  the second auditor is provisioned. Neither auditor approves its own work.
-- **Dissent** is never averaged, never silently dropped, never resolved by the builder (Claude). Recorded
-  dissent that is not reconciled within the bounded reconciliation budget **blocks** the resolution.
+  exists. **When a matter's frozen policy requires a quorum the active auditors cannot supply, the matter
+  remains `UNRESOLVED` and the evaluator emits NO owner-required transition** — insufficient quorum defers,
+  it never escalates to the owner (that would contradict the exactly-six/one-interaction rule). The only way
+  such a matter reaches the owner is if it *independently* matches an enumerated Class-D predicate.
+- **Dissent** is never averaged, never silently dropped, never resolved by the builder (Claude). Unreconciled
+  recorded dissent **blocks** the resolution.
 - **Quorum, reconciliation budget, and the auditor allowlist** are code-defined policy fields, owner-amendable
   (Class D), never agent-writable.
 
@@ -125,43 +166,41 @@ implicate a Class-D action escalates to the owner — and then only for the Clas
 
 | Threat | Control |
 |---|---|
-| **Agent self-expansion** (Claude widens its own envelope) | The class is auditor-emitted + hash-bound; policy versions are code-defined; the pin advances only by the owner-token monotonic walk; the protected-path guard checks the audited commit's real diff. Widening = Class-D owner act. **Unchanged and load-bearing.** |
-| **Class inflation/deflation** (mislabeling C as B, or D as C) | Class is codex-authored, not Claude's; a missing/ambiguous class fails closed upward (→ D). A D-touching change with a non-D class is refused by the protected-path / reserved-capability guards regardless of the label. |
-| **Council capture** (one agent drives the verdict) | No self-audit; ≥1 independent auditor; recorded dissent blocks; quorum is code-defined. |
-| **Dissent suppression** | Dissent is a first-class recorded field; unreconciled dissent fails closed; Claude may not resolve dissent. |
-| **Acceptance-protocol gaming** (p-hacking, metric shopping, unreplicated wins) | Preregistration-before-evidence; frozen metrics; independent replication; leakage/§8 discipline; auditor approval — all required, all recorded. |
-| **Mission drift** (incremental redefinition of purpose) | Altering the fundamental mission or these controls is Class-D item 5/6 — owner token only. |
-| **Irreversibility** | Destruction of evidence/infrastructure and external publication are Class-D; the lowest-risk-reversible rule (§4) governs ambiguous cases. |
+| **Agent self-expansion** | `matter_class` is auditor-emitted + hash-bound (Claude cannot author it); policy versions are code-defined; the pin advances only by the owner-token monotonic walk; the protected-path guard checks the audited commit's real diff. Widening = Class-D. |
+| **Class inflation/deflation** | Class is codex-authored; absent/invalid/deflated → fail closed to D; a D-touching change with a non-D label is still refused by the real-diff + reserved-capability guards. |
+| **Classification-as-satisfaction (F2)** | Class B integrates only on a clean verdict bound to the corrected commit; corrections are new-commit + re-audit; stale verdicts and builder-authored satisfactions fail closed. |
+| **Unreplicated / p-hacked wins (F3,F4)** | Replay is integrity only; acceptance needs ≥2 independent citable experiments; preregistration binds precommitted sources/metrics + sealed inventory / post-prereg execution identity + exposure ledger; pre-seen/backfilled/post-hoc/spent-held-out evidence refused. |
+| **Council capture / dissent suppression** | No self-audit; ≥1 independent auditor; recorded dissent blocks; Claude may not resolve dissent; insufficient quorum → unresolved (never owner). |
+| **Mission drift / irreversibility** | Altering the mission or the safety controls, destroying evidence, external publication, and spending are Class-D. |
 
-## 7. Mapping to existing machinery (what is reused vs new)
-
-- **Reused unchanged:** the source/result build→audit lifecycle; the claim ladder (proposed→…→accepted); the
-  evidence-manifest + replay gates; METRICS-v1 freeze; the §8 partition + held-out disciplines; identity /
-  append-only chain / emergency stop / checkpoint anchoring; the code-defined policy-version + owner-token
-  amendment walk; the v3 `condition_classes` hash-binding and `evaluate_delegation`.
-- **New (specified here, to be built as bounded, Codex-audited slices AFTER ratification):**
-  1. class `D` added to the auditor classification; `evaluate_delegation` extended to route B/C/D per this
-     charter (fail-closed unclassified → D);
-  2. a code-defined `governance_v1` policy block (the class definitions, the Class-D reserved list, the
-     Class-C protocol gates, quorum + reconciliation budget) as a new `POLICY_VERSIONS[…]`;
-  3. a `COUNCIL_RESOLVED` verdict event + the frozen Class-C resolution evaluator (gates 1–7), with
-     preregistration and dissent events;
-  4. the scientific-acceptance automation wired onto the existing claim ladder.
+## 7. Mapping to existing machinery (reused vs new)
+- **Reused unchanged:** the source/result build→audit lifecycle; the claim ladder
+  (speculation…accepted/refuted/demoted); the evidence-manifest + `verify_run_replay` gates; METRICS-v1;
+  the §8 partition + held-out disciplines; identity / append-only chain / emergency stop / checkpoint;
+  the code-defined policy-version + owner-token amendment walk; v3 `condition_classes` + `evaluate_delegation`.
+- **New (specified here; built as bounded, Codex-audited slices AFTER ratification):**
+  1. a mandatory **`matter_class` ∈ {A,B,C,D}** on every governed verdict (schema + hash-binding + auditor
+     authority), plus the `governance_route` policy consumer that fail-closes absent/invalid → D;
+  2. a code-defined `governance_v1` policy version (class definitions, the Class-D reserved list, the Class-C
+     gates, quorum + reconciliation budget) as a new `POLICY_VERSIONS[…]`;
+  3. a `COUNCIL_RESOLVED` verdict event + the frozen Class-C evaluator (gates 1–8), with **preregistration,
+     sealed-inventory, exposure-ledger, and dissent** events, and the **replication (≥2 citable) separated
+     from replay (integrity)**;
+  4. scientific-acceptance automation performing **only the `accepted` transition** on the existing claim
+     ladder (no new state; ladder changes are a separate audited migration).
 
 ## 8. Ratification path (the one owner action)
-
-1. Route **this charter** as a design source → Codex audit → integrate (inert design, plain-GO auto-integrate).
+1. Route this charter (Rev. 2) as a design source → Codex audit → integrate (inert design).
 2. Build the machinery (§7 new items) as bounded Codex-audited slices; each integrates in-envelope but stays
    INERT.
 3. The owner ratifies the `governance_v1` policy version with **one S/KEY `POLICY_AMENDED`** (Class-D item 6).
-   Only this owner token makes the A/B/C/D envelope operative and moves Class-C resolution from the owner to
-   the council.
-4. Revocation/adjustment is the forward-only owner-tokened amendment (never a rollback), exactly as v3→v4.
+   Only this owner token makes A/B/C/D operative and moves Class-C resolution from the owner to the council.
+4. Revocation/adjustment is the forward-only owner-tokened amendment (never a rollback), as with v3→v4.
 
 ## 9. Explicit non-goals
-
-- This charter does **not** authorize weights/training (still gated behind the `weight_training` interpretation
-  + M14/SC-8), external systems, live spending, or publication — those are Class D or remain separately gated.
-- It does **not** remove any safety control; it re-routes *judgment*, not *authority to weaken controls*.
-- It does **not** let Claude resolve dissent, accept its own claims, or self-classify.
+- Does **not** authorize weights/training (still gated behind the `weight_training` interpretation + M14/SC-8),
+  external systems, live spending, or publication — Class D or separately gated.
+- Does **not** remove any safety control; it re-routes *judgment*, not *authority to weaken controls*.
+- Does **not** let Claude self-classify, resolve dissent, accept its own claims, or treat classification as
+  satisfaction.
 - Activation is **owner-gated**; nothing here is operative until the Class-D ratification token.
