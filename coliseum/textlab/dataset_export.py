@@ -30,6 +30,16 @@ DATASET_SCHEMA_VERSION = "1"
 DATASET_COMMITMENT_DOMAIN = "dataset:commitment:v1"
 
 
+def _run_id_of(run_dir):
+    """The run's stable identity (run_id) or None if unreadable — used to bind the
+    admission filter to identity, never to the directory basename."""
+    try:
+        run = json.load(open(os.path.join(run_dir, "run.json"), encoding="utf-8"))
+        return run.get("run_id") if isinstance(run, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _scenario_content_hashes(run_dirs):
     """{scenario_id: scenario_hash} from run.json — the canonical content identity
     the held-out gate keys on, and the input the §8 dedup partitions on. Fails
@@ -98,8 +108,10 @@ def build_dataset(run_dirs, *, mode="deterministic",
             run_dirs, held_out_ids=held_ids, held_out_hashes=held_hashes,
             config_dir=config_dir, exclusions=set(exclusions or ()),
             require_replay=require_replay_for_admission)
+        # bind the filter to the stable per-run identity (run_id), NOT the directory
+        # basename — two dirs with the same basename must not alias (audit 000664 F3).
         admitted = set(training_admission_report["admitted"])
-        run_dirs = [d for d in run_dirs if os.path.basename(d) in admitted]
+        run_dirs = [d for d in run_dirs if _run_id_of(d) in admitted]
         if not run_dirs:
             raise ValueError(
                 "training admission rejected every run — nothing to export "

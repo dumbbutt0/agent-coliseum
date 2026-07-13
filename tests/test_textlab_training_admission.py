@@ -149,3 +149,77 @@ def test_card_reports_admission(tmp_path):
     assert "Training-data admission gate" in card
     assert "admission commitment" in card
     assert "deferred" in card
+
+
+# ------------------------------------------- audit 000664 regressions (F1/F2/F3)
+
+@pytest.mark.parametrize("body", ["null", "[1, 2]", "42", '"a string"'])
+def test_non_object_run_json_fails_closed(tmp_path, body):
+    d = str(tmp_path / "nd")
+    os.makedirs(d)
+    with open(os.path.join(d, "run.json"), "w") as fh:
+        fh.write(body)
+    dec = A.admit_run(d)                         # must not raise
+    assert not dec["admitted"]
+    assert any("run_json_not_object" in x for x in dec["rejections"])
+
+
+def test_seed_zero_is_admitted(tmp_path):
+    a, _b = _runs(tmp_path)
+    _tamper(a, lambda r: r.__setitem__("seed", 0))
+    dec = A.admit_run(a)
+    assert dec["admitted"], dec["rejections"]   # 0 is a valid seed, not "missing"
+
+
+def test_missing_reportable_or_digest_is_provenance_incomplete(tmp_path):
+    a, b = _runs(tmp_path)
+    _tamper(a, lambda r: r.pop("reportable"))
+    ra = A.admit_run(a)["rejections"]
+    assert any(x.startswith("provenance_incomplete:") and "reportable" in x for x in ra)
+    _tamper(b, lambda r: r.pop("digest_status"))
+    rb = A.admit_run(b)["rejections"]
+    assert any(x.startswith("provenance_incomplete:") and "digest_status" in x for x in rb)
+
+
+def test_wrong_type_reportable_and_unknown_digest_rejected(tmp_path):
+    a, b = _runs(tmp_path)
+    _tamper(a, lambda r: r.__setitem__("reportable", "yes"))
+    assert any("reportable_not_bool" in x for x in A.admit_run(a)["rejections"])
+    _tamper(b, lambda r: r.__setitem__("digest_status", "weird_value"))
+    assert any("digest_status_unknown" in x for x in A.admit_run(b)["rejections"])
+
+
+def test_ambiguous_run_id_fails_closed(tmp_path):
+    a, _b = _runs(tmp_path)
+    p1, p2 = str(tmp_path / "d1"), str(tmp_path / "d2")
+    shutil.copytree(a, p1)
+    shutil.copytree(a, p2)                       # same run_id in two dirs
+    rep = A.admit_runs([p1, p2])
+    assert rep["admitted_count"] == 0
+    assert all(any("ambiguous_run_id" in x for x in r["rejections"])
+               for r in rep["rejected"])
+
+
+def test_same_basename_does_not_alias(tmp_path):
+    # two DISTINCT runs relocated to same-basename dirs under different parents;
+    # exclude exactly one -> only the admitted run_id reaches the dataset (F3)
+    a, b = _runs(tmp_path)
+    p1, p2 = str(tmp_path / "p1" / "same"), str(tmp_path / "p2" / "same")
+    shutil.copytree(a, p1)
+    shutil.copytree(b, p2)
+    assert os.path.basename(p1) == os.path.basename(p2) == "same"
+    a_rid = json.load(open(os.path.join(p1, "run.json")))["run_id"]
+    b_rid = json.load(open(os.path.join(p2, "run.json")))["run_id"]
+    assert a_rid != b_rid
+    # without exclusion both admit -> two distinct agent regimes -> 2 units;
+    # excluding a's run_id must drop exactly a's contribution (1 unit) — proving the
+    # rejected dir does NOT alias back in via its shared basename.
+    both = build_dataset([p1, p2], training_admission=True)
+    assert both["effective_unit_count"] == 2
+    desc = build_dataset([p1, p2], training_admission=True, exclusions={a_rid})
+    assert desc["training_admission"]["admitted_count"] == 1
+    assert desc["training_admission"]["rejected_count"] == 1
+    assert desc["effective_unit_count"] == 1
+    # and the surviving unit is b's regime, not a's
+    b_regime = json.load(open(os.path.join(p2, "run.json")))["agent_regime_id"]
+    assert {u["agent_regime_id"] for u in desc["units"]} == {b_regime}
