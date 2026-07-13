@@ -133,7 +133,44 @@ def _amended_v2() -> dict:
     return v2
 
 
-POLICY_VERSIONS = {1: DEFAULT_POLICY, 2: _amended_v2()}
+# Version 3 (delegated-authority charter, owner-ratified): adds an
+# `owner_delegation` block — the SMALLEST bounded delegation, structural `source`
+# work only, Codex-only, Class-A conditions only. It changes NOTHING else, so the
+# existing experiment auto-approval is unaffected. Delegation is INERT until the
+# owner ratifies this version (the effective pin must be v3); under v1/v2 the pin
+# check in `evaluate_delegation` fails closed. Version 4 is the forward-only,
+# owner-tokened REVOCATION target: v3 with delegation disabled (never a rollback).
+def _owner_delegation() -> dict:
+    return {
+        "enabled": True,
+        "delegation_id": "coliseum-delegation-structural-source-v1",
+        "delegation_schema_version": "1",
+        "authorized_task_kinds": ["source"],
+        "technical_only": True,
+        "required_auditors": ["codex"],
+        "authorized_condition_classes": ["A"],
+        "max_delegated_integrations_per_owner_action": 25,
+    }
+
+
+def _amended_v3() -> dict:
+    v3 = _amended_v2()
+    v3["policy_version"] = 3
+    v3["amends"] = 2
+    v3["owner_delegation"] = _owner_delegation()
+    return v3
+
+
+def _amended_v4() -> dict:
+    v4 = _amended_v3()
+    v4["policy_version"] = 4
+    v4["amends"] = 3
+    v4["owner_delegation"] = dict(_owner_delegation(), enabled=False)  # revoked
+    return v4
+
+
+POLICY_VERSIONS = {1: DEFAULT_POLICY, 2: _amended_v2(),
+                   3: _amended_v3(), 4: _amended_v4()}
 
 
 _VOLATILE = ("created_utc", "amended_utc")
@@ -495,6 +532,167 @@ def evaluate(root: str, cfg: Config, request: dict, verdict_event: dict,
         cond("no_protocol_self_modification", not touched,
              f"scope touches protected paths: {touched} — council protocol "
              "changes require a separate audit and the owner")
+
+    return PolicyDecision(auto_approve=not reasons, policy_hash=policy_hash,
+                          reasons=reasons, checked=checked)
+
+
+def delegated_integration_count(chain: list) -> int:
+    """CONDITIONS_AUTO_SATISFIED events since the owner's most recent control
+    action — the delegation budget window (reset by STATUS_CHANGED/POLICY_AMENDED,
+    exactly like the compute/failure envelopes)."""
+    start = 0
+    for i, e in enumerate(chain):
+        if e.get("event_type") in ("STATUS_CHANGED", "POLICY_AMENDED"):
+            start = i + 1
+    return sum(1 for e in chain[start:]
+               if e.get("event_type") == "CONDITIONS_AUTO_SATISFIED")
+
+
+def evaluate_delegation(root: str, cfg: Config, request: dict,
+                        verdict_event: dict, chain: list) -> PolicyDecision:
+    """May a codex AUDIT_GO_WITH_CONDITIONS on a structural SOURCE task have its
+    conditions auto-satisfied under the owner-ratified delegation charter (v3)?
+    Fail-closed: every unmet condition lands in `reasons`; any non-empty `reasons`
+    means the human CONDITIONS_SATISFIED token is the only unlock. Mirrors
+    `evaluate`, reusing its guards; the CLASS-A signal is the CODEX-emitted
+    `condition_classes` in the verdict (hash-bound, codex-authored — the builder
+    cannot forge it). Delegation is INERT unless the effective policy is the
+    owner-ratified v3 with `owner_delegation.enabled`."""
+    reasons: list = []
+    checked: list = []
+
+    def cond(name: str, ok: bool, why: str = "") -> None:
+        checked.append(name)
+        if not ok:
+            reasons.append(f"{name}: {why}" if why else name)
+
+    policy = policy_hash = None
+    try:
+        policy, policy_hash = load_policy(root)
+    except SchemaViolation as exc:
+        cond("policy_installed", False, str(exc))
+    deleg = None
+    if policy is not None:
+        eff_hash, eff_version = effective_policy_pin(chain)
+        cond("policy_unchanged", eff_hash is None or eff_hash == policy_hash,
+             "autonomy policy file changed since it was pinned in the chain")
+        try:
+            known = is_code_defined_version(policy)
+        except SchemaViolation:
+            known = False
+        cond("policy_is_code_defined_version",
+             known and (eff_version is None
+                        or policy_version_of(policy) == eff_version),
+             "running policy is not the owner-authorized code-defined version")
+        deleg = policy.get("owner_delegation") or {}
+        # delegation is INERT until the owner ratifies v3 (>=3, enabled). Under
+        # v1/v2 there is no owner_delegation block and this fails closed.
+        cond("delegation_active",
+             bool(deleg.get("enabled")) and eff_version is not None
+             and eff_version >= 3,
+             "owner delegation is not active (requires an owner-ratified "
+             "delegation-enabled policy version)")
+
+    # emergency stop / manual suspension / runaway envelope (reused; fail-closed)
+    stop = storage.emergency_stop_reason(root)
+    cond("emergency_stop_clear", stop is None, stop or "")
+    cond("delegation_suspension_clear", not storage.manual_mode_present(root),
+         "MANUAL marker present — delegated satisfaction is suspended; use the "
+         "human CONDITIONS_SATISFIED gate")
+    fails, aggregate = autonomous_safety_metrics(chain)
+    cond("consecutive_failures_within_bound",
+         fails < AUTO_HALT_CONSECUTIVE_FAILURES,
+         f"{fails} consecutive autonomous failures since the last owner action")
+    cond("aggregate_compute_within_bound",
+         aggregate <= MAX_AGGREGATE_COMPUTE_MINUTES,
+         f"{aggregate:.0f} min autonomous compute exceeds the ceiling")
+
+    report = events_mod.verify_chain(root)
+    cond("event_chain_verifies", report.healthy,
+         report.error or ("torn suffix" if report.suffix_incomplete else ""))
+    from tools.council import identity
+    try:
+        identity.replay_identity(chain)
+        cond("identity_chain_valid", True)
+    except Exception as exc:
+        cond("identity_chain_valid", False, str(exc))
+    requests = state_machine.project(chain)
+    flags = state_machine.global_flags(requests)
+    cond("milestone_not_reached", not flags["milestone_reached"],
+         "society milestone reached — autonomous continuation is forbidden")
+
+    # the verdict must be a CODEX conditional GO for the exact request commit
+    cond("verdict_is_codex_conditional",
+         verdict_event.get("event_type") == "AUDIT_GO_WITH_CONDITIONS"
+         and verdict_event.get("sender") == "codex",
+         f"got {verdict_event.get('event_type')} from "
+         f"{verdict_event.get('sender')}")
+    verdict = verdict_event.get("payload", {}) or {}
+    cond("verdict_commit_exact",
+         verdict.get("audited_commit") == request.get("target_commit")
+         and verdict_event.get("target_commit") == request.get("target_commit"),
+         "audited commit differs from the request's target commit")
+
+    # AUDITOR-EMITTED CLASS-A CLASSIFICATION (the security core): every condition
+    # must be codex-classified Class A. condition_classes is part of the codex
+    # verdict payload (verdict_payload_hash-bound); the builder cannot forge it.
+    classes = verdict.get("condition_classes")
+    conditions = verdict.get("conditions", []) or []
+    cond("condition_classes_present",
+         isinstance(classes, list) and len(conditions) > 0
+         and len(classes) == len(conditions),
+         "verdict lacks a per-condition auditor classification")
+    cond("all_conditions_class_a",
+         isinstance(classes, list) and bool(classes)
+         and all(c == "A" for c in classes),
+         f"not all conditions are auditor-classified Class A: {classes!r}")
+
+    if policy is not None and deleg is not None:
+        cond("task_kind_delegated",
+             request.get("task_kind") == "source"
+             and "source" in (deleg.get("authorized_task_kinds") or []),
+             f"task_kind {request.get('task_kind')!r} is not delegated")
+        cond("technical_only_delegation", bool(deleg.get("technical_only")),
+             "delegation is technical-only")
+        cond("required_auditors_met",
+             (deleg.get("required_auditors") or []) == ["codex"],
+             "this charter is codex-only (Fable quorum deferred)")
+        cond("classes_within_charter",
+             isinstance(classes, list)
+             and set(classes) <= set(deleg.get("authorized_condition_classes")
+                                     or []),
+             "a condition class is outside the charter's authorized set")
+        protected = tuple(policy["protected_paths"])
+        touched = [s for s in request.get("scope", [])
+                   if any(p in str(s) for p in protected)]
+        cond("no_protocol_self_modification", not touched,
+             f"scope touches protected paths: {touched}")
+        forbidden = set(request.get("forbidden_actions", []))
+        missing = [c for c in policy["auto_approval"]["forbidden_capabilities"]
+                   if c not in forbidden]
+        cond("forbidden_capabilities_declared", not missing,
+             f"request must forbid {missing}")
+        used = delegated_integration_count(chain)
+        cap = deleg.get("max_delegated_integrations_per_owner_action", 0)
+        cond("delegation_budget_within_bound", used < cap,
+             f"{used}/{cap} delegated satisfactions since the last owner action")
+        cycles = requests.get(request["request_id"],
+                              {"audit_cycles": 0})["audit_cycles"]
+        cond("audit_cycles_within_bound",
+             cycles <= policy["bounded_loops"]["max_audit_cycles_per_request"],
+             f"{cycles} build-audit cycles")
+
+    try:
+        repo = request["repository"]
+        cond("working_tree_clean", git_state.is_clean(repo, cfg.repo_roots),
+             "working tree is dirty")
+        cond("head_is_target",
+             git_state.head_commit(repo, cfg.repo_roots)
+             == request.get("target_commit"),
+             "HEAD moved away from the audited commit")
+    except Exception as exc:
+        cond("git_state_readable", False, str(exc))
 
     return PolicyDecision(auto_approve=not reasons, policy_hash=policy_hash,
                           reasons=reasons, checked=checked)

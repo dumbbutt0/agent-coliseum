@@ -160,24 +160,49 @@ def _handle_result_approved(root: str, cfg, event: dict, request: dict,
           "builder launcher; this watcher stops here.")
 
 
-def _handle_source_go(event: dict, commit: str) -> None:
+def _handle_source_go(root: str, cfg, event: dict, request: dict, repo: str,
+                      commit: str) -> None:
     """Source-task GO (task_kind pinned via the verified request): the
-    experiment policy path does NOT apply. The watcher appends NOTHING —
-    state remains `go`, from which the only legal continuation is a
-    commit-bound CHANGE_INTEGRATED recorded by the integration step
-    (builder launcher or `tools.autonomy.cli integrate`)."""
+    experiment policy path does NOT apply. For a CONDITIONAL verdict, attempt
+    DELEGATED satisfaction under the owner-ratified charter — if
+    `policy.evaluate_delegation` passes, append a claude-sender, TOKENLESS
+    CONDITIONS_AUTO_SATISFIED (which events.append_event re-validates); otherwise
+    fall back to printing the owner's approve-conditions command (unchanged).
+    Either way this watcher never integrates: state remains `go`, and the only
+    continuation is a commit-bound CHANGE_INTEGRATED recorded by the integration
+    step."""
     verdict = event["payload"]
     rid = event["request_id"]
     print(f"\n{event['event_type']} on {rid} at "
           f"{commit[:12]} (source task) — summary: {verdict['summary']}")
     if event["event_type"] == "AUDIT_GO_WITH_CONDITIONS":
-        print("conditions attached — the state machine REFUSES "
-              "CHANGE_INTEGRATED until the owner signs them off:")
+        from tools.council import policy
+        chain = events.read_chain(root)
+        decision = policy.evaluate_delegation(root, cfg, request, event, chain)
+        if decision.auto_approve:
+            events.append_event(
+                root, cfg, "CONDITIONS_AUTO_SATISFIED", SENDER, rid, repo,
+                commit,
+                {"verdict_event_id": event["event_id"],
+                 "policy_hash": decision.policy_hash,
+                 "conditions_checked": decision.checked,
+                 "condition_classes": verdict.get("condition_classes"),
+                 "delegation_id": "coliseum-delegation-structural-source-v1"})
+            print("CONDITIONS_AUTO_SATISFIED: every condition is auditor-classified "
+                  f"Class A and the owner delegation holds ({len(decision.checked)} "
+                  "checks). Integration may proceed (no owner token). This watcher "
+                  "does not integrate.")
+            return
+        print("conditions attached and NOT within the owner delegation — the "
+              "state machine REFUSES CHANGE_INTEGRATED until the owner signs "
+              "them off:")
         for cond in verdict.get("conditions", []):
             print(f"  - {cond}")
+        print(f"  (delegation declined: {decision.reasons})")
         print(f"owner: python3 -m tools.council.cli approve-conditions "
               f"{rid} --commit {commit} --role human")
-    print("no policy evaluation for source tasks; state remains `go`. "
+        return
+    print("no policy evaluation for a plain source GO; state remains `go`. "
           "Integration (fast-forward + CHANGE_INTEGRATED, bound to "
           f"{commit[:12]}) belongs to the integration step, never to this "
           "watcher.")
@@ -352,7 +377,8 @@ def main(argv=None) -> int:
                     elif request.get("task_kind") == "source":
                         # kind is inside the event-pinned payload hash the
                         # verified request just passed — tamper-evident
-                        _handle_source_go(event, pin_commit)
+                        _handle_source_go(root, cfg, event, request,
+                                          pin_repo, pin_commit)
                     else:
                         _handle_go(root, cfg, event, request, pin_repo,
                                    pin_commit)

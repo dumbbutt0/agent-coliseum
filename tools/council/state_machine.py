@@ -73,6 +73,11 @@ TRANSITIONS = {
     "CHANGE_INTEGRATED": (frozenset({GO}), INTEGRATED),
     # human sign-off that the verdict's conditions are met; state stays go
     "CONDITIONS_SATISFIED": (frozenset({GO}), GO),
+    # delegated (tokenless) condition satisfaction under the owner-ratified
+    # charter; state stays go. Its append is refused by events.append_event
+    # unless policy.evaluate_delegation passes; check() below adds a chain-only
+    # replay-safe gate (all conditions codex-classified Class A).
+    "CONDITIONS_AUTO_SATISFIED": (frozenset({GO}), GO),
     "NEXT_MILESTONE_READY": (frozenset({RESULT_APPROVED, INTEGRATED}),
                              NEXT_MILESTONE_READY),
 }
@@ -155,6 +160,25 @@ def check(event: dict, requests: dict) -> None:
             raise TransitionError(
                 "CONDITIONS_SATISFIED only applies to a request whose "
                 f"last verdict is conditional (got {last!r})")
+    if etype == "CONDITIONS_AUTO_SATISFIED":
+        # Chain-only, replay-safe anti-forgery gate: delegated satisfaction is
+        # legal ONLY for a conditional verdict EVERY one of whose conditions the
+        # auditor (codex) classified Class A. The codex classification is
+        # hash-bound in the verdict payload; the git/policy/budget envelope is
+        # additionally re-validated by events.append_event before the append.
+        lv = req.get("last_verdict") or {}
+        if lv.get("event_type") != "AUDIT_GO_WITH_CONDITIONS":
+            raise TransitionError(
+                "CONDITIONS_AUTO_SATISFIED only applies to a conditional "
+                f"verdict (got {lv.get('event_type')!r})")
+        classes = lv.get("condition_classes")
+        if not isinstance(classes, list) or not classes \
+                or any(c != "A" for c in classes):
+            raise TransitionError(
+                "CONDITIONS_AUTO_SATISFIED refused: the verdict's conditions "
+                "are not all auditor-classified Class A "
+                f"(condition_classes={classes!r}) — use the human "
+                "CONDITIONS_SATISFIED gate")
 
     # commit binding: an approval/audit for one commit never applies to
     # another. The binding is set when the request is published.
@@ -199,12 +223,16 @@ def apply(event: dict, requests: dict) -> dict:
         req["claimed_by"] = event["sender"]
     if etype in ("AUDIT_BLOCKED", "AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",
                  "RESULT_APPROVED", "RESULT_BLOCKED"):
-        req["last_verdict"] = {"event_type": etype,
-                               "event_id": event["event_id"],
-                               "verdict": event["payload"].get("verdict")}
+        req["last_verdict"] = {
+            "event_type": etype,
+            "event_id": event["event_id"],
+            "verdict": event["payload"].get("verdict"),
+            # codex per-condition classification (delegated-authority extension);
+            # None for verdicts that carry no classification
+            "condition_classes": event["payload"].get("condition_classes")}
         # a fresh verdict always invalidates any earlier condition sign-off
         req["conditions_satisfied"] = False
-    if etype == "CONDITIONS_SATISFIED":
+    if etype in ("CONDITIONS_SATISFIED", "CONDITIONS_AUTO_SATISFIED"):
         req["conditions_satisfied"] = True
     return requests
 

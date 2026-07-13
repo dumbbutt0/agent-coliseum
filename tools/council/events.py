@@ -170,6 +170,12 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
                                            VERDICT_PAYLOAD_EVENT_TYPES)
         if event_type in VERDICT_PAYLOAD_EVENT_TYPES:
             crosscheck_verdict_bindings(event, chain, requests)
+        # delegated-authority: a CONDITIONS_AUTO_SATISFIED is a claude-sender,
+        # TOKENLESS event whose authority is a re-validated policy evaluation,
+        # never its mere presence. Refuse the append unless the delegation holds
+        # right now (mirrors the AUTO_APPROVED trust model; fail-closed).
+        if event_type == "CONDITIONS_AUTO_SATISFIED":
+            _verify_delegated_satisfaction(root, cfg, chain, event)
         # H1: burn the human one-time token (if this event type requires
         # one) durably BEFORE the line lands — a crash here wastes a
         # token, it never leaves a spendable one behind an appended event
@@ -230,6 +236,37 @@ def _verify_human_token(root: str, chain: list, event: dict,
         {k: v for k, v in payload.items() if k != "human_token"})
     identity.verify_and_advance(root, payload.get("human_token"), expected,
                                 expected_state=expected_state)
+
+
+def _verify_delegated_satisfaction(root: str, cfg: Config, chain: list,
+                                   event: dict) -> None:
+    """Refuse a CONDITIONS_AUTO_SATISFIED unless `policy.evaluate_delegation`
+    passes right now against the request's latest conditional codex verdict —
+    the delegated satisfaction's authority is the re-validated evaluation, not
+    the event's presence (the AUTO_APPROVED trust model). Fail-closed: any
+    failure or error refuses the append, leaving the human CONDITIONS_SATISFIED
+    token as the only unlock."""
+    from tools.council import policy, publish   # lazy: policy imports events
+    rid = event["request_id"]
+    request, failures, _repo, _commit = publish.verified_request(root, cfg, rid)
+    if failures:
+        raise CouncilError(
+            "delegated satisfaction refused — request not verifiable: "
+            + "; ".join(failures))
+    verdict_event = None
+    for e in chain:   # the LAST conditional codex verdict for this request wins
+        if e.get("request_id") == rid \
+                and e.get("event_type") == "AUDIT_GO_WITH_CONDITIONS":
+            verdict_event = e
+    if verdict_event is None:
+        raise CouncilError(
+            f"delegated satisfaction refused — no conditional verdict for {rid!r}")
+    decision = policy.evaluate_delegation(root, cfg, request, verdict_event,
+                                          chain)
+    if not decision.auto_approve:
+        raise CouncilError(
+            "delegated satisfaction refused by the delegation policy: "
+            + "; ".join(decision.reasons))
 
 
 def pause_autonomy(root: str, cfg: Config, sender: str, request_id: str,

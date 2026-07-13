@@ -70,6 +70,14 @@ EVENT_TYPES = (
     # (AUDIT_GO_WITH_CONDITIONS) mechanically refuses CHANGE_INTEGRATED
     # until the owner records this event — printed advice never gates
     "CONDITIONS_SATISFIED",
+    # delegated-authority extension (owner-ratified charter v3): a claude-sender,
+    # TOKENLESS delegated condition satisfaction, authorized ONLY when
+    # policy.evaluate_delegation passes at append time (re-validated in
+    # events.append_event) — mirrors AUTO_APPROVED. It never widens the human-only
+    # CONDITIONS_SATISFIED path, which stays the fallback for anything outside the
+    # delegation envelope. Class-A eligibility is the CODEX-emitted
+    # condition_classes in the verdict (hash-bound; the builder cannot forge it).
+    "CONDITIONS_AUTO_SATISFIED",
     "NEXT_MILESTONE_READY",
     "AUTONOMY_PAUSED",
     "AUTONOMY_MILESTONE_REACHED",
@@ -115,6 +123,11 @@ SENDER_ALLOWED = {
     "RESULT_BLOCKED": frozenset({"codex"}),
     "CHANGE_INTEGRATED": frozenset({"claude"}),
     "CONDITIONS_SATISFIED": frozenset({"human"}),
+    # claude-sender + TOKENLESS: authority is a re-validated evaluate_delegation
+    # pass, NOT a human token (deliberately absent from
+    # HUMAN_TOKEN_REQUIRED_EVENT_TYPES). append_event refuses it unless the
+    # delegation actually holds — so a bare claude sender is never sufficient.
+    "CONDITIONS_AUTO_SATISFIED": frozenset({"claude"}),
     "NEXT_MILESTONE_READY": frozenset({"claude"}),
     "AUTONOMY_PAUSED": frozenset({"claude", "codex", "human"}),
     "AUTONOMY_MILESTONE_REACHED": frozenset({"claude"}),
@@ -700,6 +713,25 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
             f"findings has more than {_MAX_LIST_ITEMS} entries")
     for finding in verdict["findings"]:
         _validate_finding(finding)
+    # delegated-authority extension: an OPTIONAL codex-emitted per-condition
+    # classification. When present it must be one class in {"A","B","C"} per
+    # condition, aligned 1:1 with `conditions`. It lives inside the verdict payload
+    # so it is covered by verdict_payload_hash below — the authority for
+    # auto-satisfying Class-A conditions (policy.evaluate_delegation) rests on
+    # this CODEX-authored, hash-bound field; the builder cannot forge it.
+    classes = verdict.get("condition_classes")
+    if classes is not None:
+        if result_audit:
+            raise SchemaViolation(
+                "condition_classes applies only to source audits")
+        if not isinstance(classes, list) \
+                or any(c not in ("A", "B", "C") for c in classes):
+            raise SchemaViolation(
+                "condition_classes must be a list of 'A'/'B'/'C'")
+        if len(classes) != len(verdict["conditions"]):
+            raise SchemaViolation(
+                "condition_classes must align 1:1 with conditions "
+                f"({len(classes)} vs {len(verdict['conditions'])})")
     want = compute_verdict_payload_hash(verdict)
     if verdict["verdict_payload_hash"] != want:
         raise SchemaViolation("verdict_payload_hash does not match content")
