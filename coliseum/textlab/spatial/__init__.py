@@ -17,6 +17,12 @@ from coliseum.textlab.spatial.world import (SPATIAL_SCHEMA_VERSION,
                                             PerceptionRegime, PortalSpec, RoomSpec,
                                             SpatialWorldSpec, is_supported_version)
 from coliseum.textlab.spatial.world_line import WorldLine
+from coliseum.textlab.spatial.state import (WorldState, admit_world_state,
+                                            validate_location)
+from coliseum.textlab.spatial.transition import (LocationTransition,
+                                                 apply_transition, replay)
+from coliseum.textlab.spatial.fork import (ForkDecision, ForkInitialization,
+                                           materialize_fork)
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
@@ -25,4 +31,8 @@ __all__ = [
     "WorldLine",
     "RoomInstance", "PortalInstance", "ObjectInstance", "AgentBodyInstance",
     "assert_same_world_line",
+    # S2A mutable state
+    "WorldState", "admit_world_state", "validate_location",
+    "LocationTransition", "apply_transition", "replay",
+    "ForkDecision", "ForkInitialization", "materialize_fork",
 ]
