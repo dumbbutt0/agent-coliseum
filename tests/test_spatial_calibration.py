@@ -259,10 +259,11 @@ def test_projection_0_3_canonical_consistency(baseline, tmp_path):
     bad2 = mutate("m2", lambda rj: rj.update({"execution_instance_id": "a" * 64}))
     with pytest.raises(ContentRecordError, match="does not re-derive"):
         project_spatial_trajectory(bad2)
-    # binding value drift (the instance no longer re-derives)
+    # binding value drift — now refused EARLIER by the closed-fork equality
+    # check (audit 001225: drift must not even reach the derivation step)
     bad3 = mutate("m3", lambda rj: rj["treatment_bindings"].update(
         {"fork_position": 3}))
-    with pytest.raises(ContentRecordError, match="does not re-derive"):
+    with pytest.raises(ContentRecordError, match="canonical fork"):
         project_spatial_trajectory(bad3)
     # non-canonical binding key set
     bad4 = mutate("m4", lambda rj: rj["treatment_bindings"].update(
@@ -274,3 +275,60 @@ def test_projection_0_3_canonical_consistency(baseline, tmp_path):
         {"scenario": "spatial_nav_exploration_v1"}))
     with pytest.raises(ContentRecordError):
         project_spatial_trajectory(bad5)
+
+
+def test_projection_0_3_coordinated_drift_refused(baseline, tmp_path):
+    """Audit 001225 HIGH: a coordinated mutation that drifts the recorded fork
+    bindings AND recomputes execution_instance_id with the production
+    constructor still refuses (recorded bindings must equal the CLOSED
+    intervention), as does a treatment_bindings.intervention_id that disagrees
+    with the run's intervention id."""
+    import shutil
+    from coliseum.textlab.training.spatial_trajectory_projection import (
+        project_spatial_trajectory)
+    b = baseline["iv_private_object_relinquish_v1"]
+
+    d1 = tmp_path / "coordinated"
+    shutil.copytree(b["treatment_dir"], d1)
+    rj = json.load(open(d1 / "run.json"))
+    tb = rj["treatment_bindings"]
+    tb["fork_position"] += 1
+    rj["execution_instance_id"] = derive_execution_instance_id(
+        rj["intervention_id"], rj["scenario"], rj["seed"], "alice",
+        tb["parent_world_line_id"], tb["control_source_evidence_id"],
+        tb["fork_position"], tb["fork_state_hash"])
+    (d1 / "run.json").write_text(json.dumps(rj))
+    with pytest.raises(ContentRecordError, match="canonical fork"):
+        project_spatial_trajectory(str(d1))
+
+    d2 = tmp_path / "iv-drift"
+    shutil.copytree(b["treatment_dir"], d2)
+    rj = json.load(open(d2 / "run.json"))
+    rj["treatment_bindings"]["intervention_id"] = "iv_nav_linger_far_v1"
+    (d2 / "run.json").write_text(json.dumps(rj))
+    with pytest.raises(ContentRecordError, match="intervention id"):
+        project_spatial_trajectory(str(d2))
+
+
+def test_counterfeit_pair_refused_at_comparator(baseline):
+    """Audit 001225 MEDIUM: a directly constructed MatchedSpatialPair with valid
+    run references but counterfeit identities is refused at report construction
+    — the comparator re-runs build_matched_pair and requires exact id equality."""
+    from coliseum.textlab.spatial.calibration import MatchedSpatialPair
+    b = baseline["iv_private_object_relinquish_v1"]
+    real = b["pair"].content
+    fake = MatchedSpatialPair(
+        "iv_nav_linger_far_v1",                     # counterfeit intervention
+        "c" * 64,                                    # counterfeit instance
+        "spatial_nav_exploration_v1", 777,           # counterfeit identity
+        real["fork_position"], real["fork_state_hash"],
+        control=dict(real["control"]), treatment=dict(real["treatment"]))
+    with pytest.raises(ContentRecordError):
+        build_divergence_report(fake, b["control_dir"], b["treatment_dir"])
+    # and a REAL-shaped pair whose id simply is not the canonical one refuses too
+    almost = MatchedSpatialPair(
+        real["intervention_id"], "d" * 64, real["scenario"], real["seed"],
+        real["fork_position"], real["fork_state_hash"],
+        control=dict(real["control"]), treatment=dict(real["treatment"]))
+    with pytest.raises(ContentRecordError, match="comparator boundary"):
+        build_divergence_report(almost, b["control_dir"], b["treatment_dir"])

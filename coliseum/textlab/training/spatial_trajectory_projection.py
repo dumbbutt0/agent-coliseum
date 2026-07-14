@@ -88,10 +88,24 @@ def project_spatial_trajectory(run_dir: str) -> dict:
                 "key set — refused")
         iv = intervention_record(run_json["intervention_id"])
         spec = iv.canonical_spec
-        if run_json["scenario"] != spec["scenario"] or                 run_json["seed"] != spec["seed"]:
+        if run_json["scenario"] != spec["scenario"] or \
+                run_json["seed"] != spec["seed"]:
             raise ContentRecordError(
                 "schema-0.3 treatment scenario/seed do not match the closed "
                 "intervention bindings — refused")
+        # COORDINATED-DRIFT closure (audit 001225): the recorded binding fields
+        # must equal the CLOSED intervention before any derivation — otherwise a
+        # mutation that recomputes the instance over drifted fork fields would
+        # pass the re-derivation check.
+        if tb["intervention_id"] != run_json["intervention_id"]:
+            raise ContentRecordError(
+                "schema-0.3 treatment_bindings.intervention_id does not equal "
+                "the run's intervention id — refused")
+        if tb["fork_position"] != spec["fork_position"] or \
+                tb["fork_state_hash"] != spec["fork_state_hash"]:
+            raise ContentRecordError(
+                "schema-0.3 recorded fork bindings do not equal the closed "
+                "intervention's canonical fork — refused")
         expected = derive_execution_instance_id(
             iv.intervention_id, spec["scenario"], spec["seed"],
             spec["agent_key"], tb["parent_world_line_id"],

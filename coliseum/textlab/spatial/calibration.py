@@ -499,14 +499,24 @@ def build_matched_pair(intervention_name, control_run_dir, treatment_run_dir):
 def build_divergence_report(pair, control_run_dir, treatment_run_dir):
     """The deterministic measurement (design §4): logical coordinates (child p ->
     fork_position + p), remap-aware structural equality, the fork-anchor refusal,
-    and per-agent action/terminal/perception divergence. Both directories are
-    re-authenticated (replay gates) before measuring."""
+    and per-agent action/terminal/perception divergence.
+
+    COMPARATOR-BOUNDARY enforcement (audit 001225): the supplied pair must be
+    EXACTLY the pair build_matched_pair canonically constructs for these
+    directories — the constructor is re-run here and the ids must be equal, so
+    a directly constructed record with counterfeit intervention/instance/
+    scenario/seed identities can never reach the comparator (this is also what
+    makes logical-key-only remap normalization sound: only witnessed-fork pairs
+    get compared)."""
+    c = pair.content
+    canonical = build_matched_pair(c["intervention_id"], control_run_dir,
+                                   treatment_run_dir)
+    if canonical.id != pair.id:
+        raise ContentRecordError(
+            "supplied pair is not the canonical build_matched_pair construction "
+            "for these directories — refused at the comparator boundary")
     control_json, cb = _authenticate_run_dir(control_run_dir)
     treatment_json, tb_bind = _authenticate_run_dir(treatment_run_dir)
-    c = pair.content
-    if cb.id != c["control"]["source_evidence_id"] or \
-            tb_bind.id != c["treatment"]["source_evidence_id"]:
-        raise ContentRecordError("pair does not bind these run directories")
     fork = c["fork_position"]
     cs = _privileged_states(control_run_dir, control_json)
     ts = _privileged_states(treatment_run_dir, treatment_json)
