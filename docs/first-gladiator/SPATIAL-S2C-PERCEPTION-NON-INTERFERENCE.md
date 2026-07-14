@@ -1,4 +1,4 @@
-# Spatial S2C — Perception rendering + non-interference (design source, rev 2)
+# Spatial S2C — Perception rendering + non-interference (design source, rev 3)
 
 Status: council-routed design source for the third perception-track slice (S2C), per the
 owner's binding perception-track directive (2026-07-13) and the master runnable-experiments
@@ -49,22 +49,42 @@ edit: it only widens what `assert_no_privileged_leak` refuses in ACTOR content; 
 actor content uses these names). No other edit to the integrated training module is
 permitted.
 
-**The canonical `observable_state_projection` container (BOTH views; frozen inner schema).**
-The 7 outer content keys are frozen; `observable_state_projection` is a dict with EXACTLY
-two keys:
+**Two frozen per-view inner schemas for `observable_state_projection`.** The 7 outer
+content keys are frozen for both views; the inner `observable_state_projection` schema is
+per-view, each frozen under `RENDERER_VERSION` (adding/renaming/removing ANY inner key in
+either view bumps the version):
 
-- `"entities"` — a list of `{entity_id, entity_kind, location}` rows, sorted by
-  `entity_id`, one row per projected entity (§4 actor scope / §5 privileged scope).
-- `"portals"` — a list of `{portal_instance_id, to_room_instance_id}` rows, sorted by
-  `(portal_instance_id, to_room_instance_id)`: the closure attachment rows departing the
-  observer's current room (§4). Empty (`[]`) for an in-transit observer and whenever the
-  observer's room has no departing attachment rows. Portals are topology, not entities —
-  they never appear in `"entities"`, and no other key may be added without bumping
-  `RENDERER_VERSION`.
+*ACTOR inner schema* — a dict with EXACTLY two keys:
 
-Insertion order, registry order, and host/dict order never affect either list; the
-canonical byte content of both views (and hence both observation ids) is pinned by these
-two sort rules for directed AND bidirectional closures alike.
+- `"entities"` — a list of `{entity_id, entity_kind, location}` rows (exactly those three
+  keys per row), sorted by `entity_id`, one row per §4-visible entity.
+- `"portals"` — a list of `{portal_instance_id, to_room_instance_id}` rows (exactly those
+  two keys per row), sorted by `(portal_instance_id, to_room_instance_id)`: the closure
+  attachment rows departing the observer's current room (§4). Empty (`[]`) for an
+  in-transit observer and whenever the observer's room has no departing attachment rows.
+  Portals are topology, not entities — they never appear in `"entities"`.
+
+*PRIVILEGED inner schema* — a dict with EXACTLY three keys:
+`{"authoritative_placements", "authoritative_lifecycle", "closure_visible_state_commitment"}`
+(§5). The privileged view does NOT use the actor two-key container; each view has exactly
+one inner schema and they share no keys.
+
+**Closed exact actor-schema validation (the leak-enforcement mechanism).** The
+implementation MUST provide and call an exact actor-content validator at the actor
+construction path: the actor `content` must have EXACTLY the 7 outer keys; its
+`observable_state_projection` EXACTLY the actor two-key container; every `"entities"` row
+EXACTLY `{entity_id, entity_kind, location}` with `location` an exact S2A tagged shape
+permitted by §4; every `"portals"` row EXACTLY `{portal_instance_id, to_room_instance_id}`.
+ANY additional or unknown key at ANY depth is REFUSED (`ContentRecordError`). This
+closed-schema rule — not name enumeration — is what excludes every smuggled carrier
+(world-state/transition/manifest/cursor hashes under any field name whatsoever). The
+generic `assert_no_privileged_leak` name backstop remains as defense-in-depth, and the
+three privileged inner-schema keys are registered names, but the semantic guarantee is
+carried by the closed schema.
+
+Insertion order, registry order, and host/dict order never affect any list; the canonical
+byte content of both views (and hence both observation ids) is pinned by the sort rules
+for directed AND bidirectional closures alike.
 
 ## 3. Renderer inputs, authentication posture, and refusals
 
@@ -140,7 +160,7 @@ perceives its own placement exactly) and its held objects; `"portals"` is `[]`. 
 portal, or other-entity visibility.
 
 `visible_entity_identities` is the SORTED list of visible entity instance ids.
-`observable_state_projection` uses the §2 two-key container: its `"entities"` rows are
+`observable_state_projection` uses the §2 ACTOR two-key container: its `"entities"` rows are
 `{entity_id, entity_kind, location}` where `location` is the S2A tagged location as visible
 to the observer: `in_room` rows verbatim; `held_by` rows verbatim (the holder is visible by
 construction); the observer's own placement verbatim (including `in_transit`). No other
@@ -173,9 +193,14 @@ plus the **closure-projected state commitment**:
 > which the registered full-state id could never satisfy (it content-addresses every
 > placement by construction).
 
-The privileged artifact is the analysis-side ground truth for leak-differential testing and
-later matched-twin comparison. The three carrier field names are registered privileged
-names (§2), so their appearance in ANY actor content fails closed.
+This three-key dict is EXACTLY the §2 privileged inner schema (the actor two-key container
+never appears in a privileged projection and vice versa). The privileged artifact is the
+analysis-side ground truth for leak-differential testing and later matched-twin comparison.
+The three carrier field names are registered privileged names (§2), so their appearance in
+ANY actor content fails closed — and the §2 closed actor schema refuses them (and every
+other unknown key) structurally. MANDATORY regression: pin the COMPLETE privileged content
+and observation id for a directed and a bidirectional closure case — closure placements,
+lifecycle, and the closure-projected commitment — so only this exact inner schema can pass.
 
 ## 6. Non-interference invariants (the heart of S2C; all adversarially tested)
 
@@ -195,8 +220,13 @@ names (§2), so their appearance in ANY actor content fails closed.
    hash, manifest/cursor hash) may appear in actor content — a full-state hash inside an
    actor observation would bind hidden content into the actor id and silently violate (2).
    Actor content references only: instance identities visible under §4, the room identity,
-   the logical step, the regime id. This is enforced by the registered privileged names +
-   a dedicated regression.
+   the logical step, the regime id. ENFORCEMENT: the §2 closed exact actor-schema
+   validator (any unknown key at any depth refused — carrier-name-independent), with the
+   registered privileged names as defense-in-depth. MANDATORY regression: each forbidden
+   carrier (e.g. a field carrying a state/transition/manifest/cursor commitment) injected
+   at MULTIPLE actor-content depths must raise `ContentRecordError` at the validator
+   boundary, and a valid actor artifact must be pinned to show visible identities remain
+   allowed.
 5. **Closure-visibility**: an admitted same-world instance outside the authenticated
    closure changes NEITHER view's artifact id — in the observer's room, holding objects, or
    in transit (every enumeration in §4/§5 ranges over the closure-visible restriction, and
@@ -228,7 +258,7 @@ frozen METRICS-v1, run-record schemas, or `tools/council/`.
 | 3 | Hidden object moved/added/removed outside visible scope | actor id UNCHANGED (invariant 2) |
 | 4 | Container contents change | non-holder AND holder actor ids unchanged in v0 |
 | 5 | Other-room entity relocated | observer's actor id unchanged (invariant 6) |
-| 6 | World-state hash (or any chain hash) in actor content | refused via registered names + regression |
+| 6 | Any privileged-truth commitment in actor content, under ANY field name, at ANY depth | refused by the §2 closed exact actor-schema validator (unknown key ⇒ `ContentRecordError`); multi-depth regressions + pinned valid artifact (invariant 4) |
 | 7 | Out-of-closure observer | refused (§3.1) |
 | 8 | Out-of-closure same-world instance co-located with observer | BOTH view ids EXACTLY equal the closure-only ids (invariant 5 mandatory regression) |
 | 9 | Cross-world observer/state or unregistered state | refused (§3.2) |
@@ -240,6 +270,7 @@ frozen METRICS-v1, run-record schemas, or `tools/council/`.
 | 15 | In-transit observer sees room content | refused by policy (§4); regression |
 | 16 | Registered but NON-ADMITTED state (structurally valid, registry-invalid) | refused by mandatory render-time `admit_world_state` (§3.3) |
 | 17 | Portal projection ambiguity / ordering drift | pinned actor content + observation ids for a directed AND a bidirectional closure, incl. attachment insertion-order permutations (§2 container sort rules) |
+| 18 | Privileged inner-schema drift (wrong keys / actor container in privileged view / extra keys) | pinned COMPLETE privileged content + observation id (§5 mandatory regression); per-view inner schemas share no keys |
 
 Audit probes follow the owner's audit probe-reroute policy: committed regressions,
 malformed-fixture negative tests, invariant + replay differentials, abstract adversarial
