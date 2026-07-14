@@ -1,4 +1,4 @@
-# Spatial Butterfly calibration MVP — scripted baseline (design source, rev 3)
+# Spatial Butterfly calibration MVP — scripted baseline (design source, rev 4)
 
 Status: council-routed design source for phase 3 of the owner's post-R3 sequence
 (2026-07-14): *"Run Butterfly MVP on those scenarios to establish a behavioral
@@ -146,14 +146,20 @@ witness, and fork-genesis validation REFUSES without one):
 - **Control-first orchestration (explicit)**: the baseline driver executes (or
   is given) the CONTROL run first; its completed six-file run directory is the
   treatment builder's input. `build_treatment_scenario(intervention_name,
-  registry, control_run_dir)` (new, in `spatial/calibration.py`): (1) VALIDATES
-  the control directory — re-hashes all six evidence files and re-derives the
-  `SpatialSourceEvidenceBinding` (this is how `parent_source_evidence_id`
-  exists BEFORE treatment execution), then rebuilds the control scenario and
-  re-runs the canonical `schedule()`, cross-checking the control `run.json`'s
-  run_id, manifest_id, world_line_id, fork_position, and fork_state_hash
-  against the freshly re-derived parent chain + manifest (ANY mismatch
-  refuses); (2) constructs
+  registry, control_run_dir)` (new, in `spatial/calibration.py`):
+  (1) **AUTHENTICATES the control directory — the integrated replay gate is
+  the prerequisite**: `replay_spatial_run` must succeed (a fresh re-execution
+  from `(scenario, seed)` byte-compared against EVERY recorded evidence file;
+  hashing alone is a COMMITMENT to whatever bytes exist and authenticates
+  nothing — altered chain/transitions/observations/activations/closure bytes
+  are refused HERE, by byte identity against the canonical reconstruction).
+  Only after the replay gate passes is the `SpatialSourceEvidenceBinding`
+  derived from the now-authenticated files (this is how
+  `parent_source_evidence_id` exists BEFORE treatment execution). The builder
+  then rebuilds the control scenario and re-runs the canonical `schedule()`,
+  cross-checking the control `run.json`'s run_id, manifest_id, world_line_id,
+  fork_position, and fork_state_hash against the freshly re-derived parent
+  chain + manifest (ANY mismatch refuses); (2) constructs
   `ForkDecision` -> forked `WorldLine` -> `materialize_fork` ->
   `materialize_fork_closure` -> fork `WorldLineGenesis`; assembles the WITNESS
   `{scheduler_state_id, scheduler_manifest_id, action_script}` from the parent
@@ -185,9 +191,14 @@ witness, and fork-genesis validation REFUSES without one):
   directory named in the treatment `run.json` (validated again on replay) —
   same six-file byte-comparison; `spatial-inspect` unchanged.
 
-Execute control + treatment through this one runner path, project both through
-the trajectory corpus, emit the pair + divergence report, and PIN the report
-ids as permanent regressions. Every claim in the baseline is a pinned,
+Execute control + treatment through this one runner path. **Pair + report
+construction requires AUTHENTICATED projections**: both the control and the
+treatment run directories must pass their replay gates (byte identity over
+every evidence file against fresh canonical re-execution) before either is
+projected through the trajectory corpus; the pair constructor records both
+replay attestations, and a report over unauthenticated projections is refused.
+Emit the pair + divergence report, and PIN the report ids as permanent
+regressions. Every claim in the baseline is a pinned,
 replayable, content-addressed measurement.
 
 ## 6. Threat model + adversarial vectors
@@ -199,7 +210,7 @@ replayable, content-addressed measurement.
 | 2 | Pair citing an intervention defined for a different fork/scenario/seed | pair constructor cross-checks canonical_spec bindings + the recorded execution instance; refuse |
 | 3 | Fork-anchor violation (child genesis not remap-equal to the control fork state) | report refuses (structural anti-transplant restated); prefix drift impossible by construction (the control IS the prefix) |
 | 4 | Illegal substituted intent | build-time legality refusal (existing `_select_effect` path) |
-| 5 | Divergence report over incomplete/tampered evidence | corpus projector + six-file source bindings refuse |
+| 5 | Divergence report over incomplete/tampered evidence | the REPLAY GATE is the authentication prerequisite at builder + pair + report construction (byte identity of every evidence file against canonical re-execution; bindings are commitments, not verification); a report over unauthenticated projections refuses |
 | 6 | Alignment-flavored over-claim | binding terminology; the report carries a fixed `claim_ceiling` string; tests assert it |
 | 7 | Pathway-competition imitation (fabricating reflex/planner data) | `not_applicable`, never fabricated |
 | 8 | Nondeterminism | pinned report ids; cross-registry byte-identical replay of both runs |
