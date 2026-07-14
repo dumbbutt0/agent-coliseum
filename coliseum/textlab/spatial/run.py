@@ -115,23 +115,41 @@ def _activation_rows(chain, transitions, sc, registry):
     return rows
 
 
-def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
+def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT,
+                        intervention=None, control_run_dir=None):
     """Build + schedule + verify + observe the named scenario and write the run
-    directory. Returns the run summary dict (= the run.json payload)."""
+    directory. Returns the run summary dict (= the run.json payload).
+
+    With ``intervention`` (calibration MVP): dispatch to the control-validating
+    treatment builder; the fork WITNESS threads through BOTH schedule() and
+    verify_manifest(); the run stamps evidence schema 0.3 (= 0.2 + the treatment
+    fields). Control runs (``intervention`` absent) take the identical code path
+    and evidence as before — byte-unchanged, schema 0.2."""
+    if (intervention is None) != (control_run_dir is None):
+        raise ContentRecordError(
+            "intervention and control_run_dir must be supplied together")
     registry = SpatialSpecRegistry()
-    sc = build_scenario(scenario, registry, seed)
+    witness = None
+    if intervention is not None:
+        from coliseum.textlab.spatial.calibration import build_treatment_scenario
+        sc = build_treatment_scenario(intervention, registry, control_run_dir)
+        witness = sc["witness"]
+    else:
+        sc = build_scenario(scenario, registry, seed)
     chain, transitions, manifest = schedule(sc["run"], sc["genesis"],
                                             list(sc["script"]), sc["closure"],
-                                            registry)
+                                            registry, witness=witness)
     # the determinism gate is not deferred to replay: verify the manifest NOW by
     # whole-chain re-derivation before any evidence is written.
     verify_manifest(manifest, sc["run"], sc["genesis"], list(sc["script"]),
-                    sc["closure"], registry)
+                    sc["closure"], registry, witness=witness)
     observations = _observe_chain(chain, sc, registry)
     activations = _activation_rows(chain, transitions, sc, registry)
-    run_id = f"{scenario}--seed{seed}--{manifest.id[:16]}"
+    prefix = scenario if intervention is None else f"{scenario}--{intervention}"
+    run_id = f"{prefix}--seed{seed}--{manifest.id[:16]}"
     summary = {
-        "spatial_run_schema_version": SPATIAL_RUN_SCHEMA_VERSION,
+        "spatial_run_schema_version": ("0.3" if intervention is not None
+                                       else SPATIAL_RUN_SCHEMA_VERSION),
         "scenario_schema_version": SPATIAL_SCENARIO_SCHEMA_VERSION,
         "spatial_schema_version": SPATIAL_SCHEMA_VERSION,
         "scheduler_version": SCHEDULER_VERSION,
@@ -158,6 +176,14 @@ def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
         "instance_ids": sc["ids"],
         "observation_count": len(observations),
     }
+    if intervention is not None:
+        summary.update({
+            "intervention_id": intervention,
+            "execution_instance_id": sc["execution_instance_id"],
+            "treatment_bindings": sc["treatment_bindings"],
+            "witness_ids": {"scheduler_state_id": witness["scheduler_state_id"],
+                            "scheduler_manifest_id": witness["scheduler_manifest_id"]},
+        })
     run_dir = os.path.join(out_root, run_id)
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "run.json"), "w", encoding="utf-8") as fh:
@@ -192,8 +218,16 @@ def replay_spatial_run(run_id, out_root=DEFAULT_SPATIAL_ROOT, scratch_root=None)
     with open(run_path, encoding="utf-8") as fh:
         recorded = json.load(fh)
     scratch = scratch_root or tempfile.mkdtemp(prefix="spatial-replay-")
+    intervention = recorded.get("intervention_id")
+    control_dir = None
+    if intervention is not None:
+        # a treatment replays against the SAME control run directory named in
+        # its evidence (re-validated by the treatment builder's replay gate).
+        control_dir = os.path.join(
+            out_root, recorded["treatment_bindings"]["control_run_id"])
     fresh = execute_spatial_run(recorded["scenario"], recorded["seed"],
-                                out_root=scratch)
+                                out_root=scratch, intervention=intervention,
+                                control_run_dir=control_dir)
     if fresh["run_id"] != run_id:
         return False, (f"replay derived a different run identity: "
                        f"{fresh['run_id']} != {run_id}")

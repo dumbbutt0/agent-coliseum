@@ -29,7 +29,11 @@ from coliseum.textlab.training.spatial_records import (SpatialBehaviorPolicySpec
 from coliseum.textlab.training.trajectory import TrajectoryManifest
 
 SPATIAL_INTERACTION_MODE = "spatial_sequential_v1"
-_SUPPORTED_RUN_SCHEMAS = ("0.2",)
+#: 0.2 = control evidence; 0.3 = calibration TREATMENT evidence (0.2 + the
+#: treatment fields, strictly validated below). Anything else fails closed.
+_SUPPORTED_RUN_SCHEMAS = ("0.2", "0.3")
+_TREATMENT_FIELDS = ("intervention_id", "execution_instance_id",
+                     "treatment_bindings", "witness_ids")
 _EVIDENCE_FILES = ("run.json", "chain.jsonl", "transitions.jsonl",
                    "observations.jsonl", "activations.jsonl", "closure.json")
 
@@ -62,6 +66,13 @@ def project_spatial_trajectory(run_dir: str) -> dict:
             f"spatial run schema {schema!r} is not projectable (supported: "
             f"{_SUPPORTED_RUN_SCHEMAS}) — evidence without the activation stream "
             "must be refused, never approximated")
+    if schema == "0.3":
+        # strict 0.3 validation: a treatment run must carry every treatment
+        # field, well-formed; a 0.3 run missing them is refused.
+        for field in _TREATMENT_FIELDS:
+            if not run_json.get(field):
+                raise ContentRecordError(
+                    f"schema-0.3 treatment evidence is missing {field!r} — refused")
     observations = _load(run_dir, "observations.jsonl")
     activations = _load(run_dir, "activations.jsonl")
 

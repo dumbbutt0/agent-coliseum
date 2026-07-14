@@ -185,7 +185,11 @@ def cmd_spatial_run(args):
     """S2D: build + schedule + verify + observe a scripted spatial scenario; the
     run dir is experiment evidence (deterministic, replayable, byte-identical)."""
     from .spatial.run import execute_spatial_run
-    s = execute_spatial_run(args.scenario, args.seed, out_root=args.spatial_root)
+    control_dir = (os.path.join(args.spatial_root, args.control_run)
+                   if args.control_run else None)
+    s = execute_spatial_run(args.scenario, args.seed, out_root=args.spatial_root,
+                            intervention=args.intervention,
+                            control_run_dir=control_dir)
     print(f"run_id   : {s['run_id']}")
     print(f"manifest : {s['manifest_id']}")
     print(f"chain    : {s['chain_length']} scheduler states "
@@ -265,6 +269,11 @@ def main(argv=None):
     s = sub.add_parser("spatial-run"); s.set_defaults(fn=cmd_spatial_run)
     s.add_argument("--scenario", required=True)
     s.add_argument("--seed", type=int, default=42)
+    s.add_argument("--intervention", default=None,
+                   help="calibration MVP: run the named preregistered TREATMENT "
+                        "(requires --control-run)")
+    s.add_argument("--control-run", default=None,
+                   help="the completed CONTROL run id under --spatial-root")
     s.add_argument("--spatial-root", **spatial_root_kw)
     s = sub.add_parser("spatial-replay"); s.set_defaults(fn=cmd_spatial_replay)
     s.add_argument("run_id")

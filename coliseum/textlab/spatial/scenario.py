@@ -52,7 +52,7 @@ def _select_effect(cands, intent, ids):
 
 
 def _derive_script(genesis, closure, registry, world_line_id, glx, intents_by_key,
-                   key_of, ids, fork_after_intent):
+                   key_of, ids, fork_after_intent, allow_unconsumed=False):
     """Simulate the canonical dispatch to derive the committed activate-effect
     script + the exclusive explicit stop position + the designated fork point.
     Returns (script, stop_position, fork_position, fork_state_hash).
@@ -86,8 +86,11 @@ def _derive_script(genesis, closure, registry, world_line_id, glx, intents_by_ke
             if step.content["outcome_kind"] == "pass" or not pending.get(key):
                 if step.content["outcome_kind"] != "pass" and not pending.get(key):
                     # intents exhausted for this body but it still has legal moves:
-                    # the scenario must terminate BEFORE minting an unscripted
-                    # activation — stop exactly here.
+                    # the run must terminate BEFORE minting an unscripted
+                    # activation — stop exactly here. (With allow_unconsumed —
+                    # calibration TREATMENT derivation — other agents' remaining
+                    # original intents are truncated at this designed terminal
+                    # rather than being an error.)
                     break
                 cursor, state = consume(cursor, state, None, closure, registry)
             else:
@@ -106,7 +109,7 @@ def _derive_script(genesis, closure, registry, world_line_id, glx, intents_by_ke
         if consumed == total and not in_transit:
             # all intents consumed and every arrival resolved: deterministic terminal.
             break
-    if consumed != total:
+    if consumed != total and not allow_unconsumed:
         raise ContentRecordError("scenario intents were not all consumable")
     return script, cursor.content["scheduler_position"], fork_position, fork_state_hash
 
@@ -190,6 +193,7 @@ def _two_agent_private_object_v1(registry, seed):
         "observers": ["alice", "bob"],
         "private_object_key": "gem",
         "ids": ids,
+        "intents": {k: [list(i) for i in v] for k, v in intents.items()},
     }
 
 
@@ -271,6 +275,7 @@ def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_ro
         "observers": [k for k, _ in body_rows],
         "private_object_key": private_object_key,
         "ids": ids,
+        "intents": {k: [list(i) for i in v] for k, v in intents.items()},
     }
 
 

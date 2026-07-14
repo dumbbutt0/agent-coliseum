@@ -41,6 +41,13 @@ from coliseum.textlab.spatial.scenario import SCENARIOS, build_scenario
 from coliseum.textlab.spatial.run import (execute_spatial_run,
                                           inspect_spatial_run,
                                           replay_spatial_run)
+from coliseum.textlab.spatial.calibration import (CLAIM_CEILING, INTERVENTIONS,
+                                                  MatchedSpatialPair,
+                                                  SpatialDivergenceReport,
+                                                  build_divergence_report,
+                                                  build_matched_pair,
+                                                  build_treatment_scenario,
+                                                  intervention_record)
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
@@ -59,4 +66,8 @@ __all__ = [
     # S2D scripted runner
     "SCENARIOS", "build_scenario", "execute_spatial_run",
     "inspect_spatial_run", "replay_spatial_run",
+    # calibration MVP (scripted measurement baseline)
+    "CLAIM_CEILING", "INTERVENTIONS", "MatchedSpatialPair",
+    "SpatialDivergenceReport", "build_divergence_report", "build_matched_pair",
+    "build_treatment_scenario", "intervention_record",
 ]
