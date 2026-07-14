@@ -8,6 +8,7 @@ venv/
 logs/*.jsonl
 logs/runs/
 logs/spatial-runs/
+logs/society-runs/
 derived/*.json
 checkpoints/*
 wandb/

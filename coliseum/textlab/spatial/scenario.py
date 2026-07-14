@@ -202,10 +202,12 @@ def _two_agent_private_object_v1(registry, seed):
 # subsystem, becoming permanent regression tests. Quality over quantity; no DSL.)
 
 def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_rows,
-              intents, fork_after_intent, private_object_key=None):
+              intents, fork_after_intent, private_object_key=None,
+              allow_unconsumed=False):
     """Shared golden-suite assembler. One room spec; template object specs
-    ('token' = portable exclusive takeable, 'box' = immobile container); every
-    identity auto-derived; the script derived by dispatch simulation."""
+    ('token' = portable exclusive takeable, 'box' = immobile container, 'gem' =
+    portable exclusive takeable private object); every identity auto-derived;
+    the script derived by dispatch simulation."""
     pr = PerceptionRegime("0.1", "room_v0", "off_v0", "1"); registry.register(pr)
     rs = RoomSpec("plain-room", [name], None, "los", "adj", ["n"])
     registry.register(rs)
@@ -222,6 +224,7 @@ def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_ro
     templates = {
         "token": ObjectSpec("token", True, False, "visible", True, False, [], ["take"]),
         "box": ObjectSpec("box", False, True, "visible", False, False, [], []),
+        "gem": ObjectSpec("gem", True, False, "visible", True, False, [], ["take"]),
     }
     used = {}
     entities = []
@@ -257,7 +260,7 @@ def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_ro
     key_of = {ids[k]: k for k, _ in body_rows}
     script, stop, fork_position, fork_state_hash = _derive_script(
         genesis, closure, registry, wl.id, glx, intents, key_of, ids,
-        fork_after_intent=fork_after_intent)
+        fork_after_intent=fork_after_intent, allow_unconsumed=allow_unconsumed)
     run = SchedulerRun(wl.id, glx.id, action_script_commitment(script),
                        explicit_stop_position=stop)
     registry.register(run)
@@ -381,6 +384,54 @@ def _long_march_v1(registry, seed):
         fork_after_intent=_LONG_MARCH_LEGS // 2)
 
 
+def _society_seed_intents(fact=True):
+    """The scripted 8-tick society story (design MINIMAL-SOCIETY-SEED.md). ada
+    takes the token in A (witnessed by bo, who arrived) then gives it to bo
+    (a trade); bo — now holding the token in A — has a blocked move-out
+    candidate every tick it lingers (institutional enforcement); ada and bo
+    shuttle A<->B; cy's tail is fact-dependent (fact_true = guard the box in C;
+    fact_false = carry the private object out via B). Every agent has a
+    consumable intent at each of its 8 activations."""
+    ada = [("move", "room_B"), ("move", "room_A"), ("take", "token"),
+           ("give", "token", "bo"), ("move", "room_B"), ("move", "room_A"),
+           ("move", "room_B"), ("move", "room_A")]
+    bo = [("move", "room_A"), ("move", "room_B"), ("move", "room_A"),
+          ("drop", "token"), ("move", "room_B"), ("move", "room_A"),
+          ("move", "room_B"), ("move", "room_A")]
+    cy_true = [("move", "room_B"), ("move", "room_C"), ("move", "room_B"),
+               ("move", "room_C"), ("move", "room_B"), ("move", "room_C"),
+               ("move", "room_B"), ("move", "room_C")]
+    cy_false = [("take_out", "gem", "box"), ("take", "gem"), ("move", "room_B"),
+                ("move", "room_C"), ("move", "room_B"), ("move", "room_C"),
+                ("move", "room_B"), ("move", "room_C")]
+    return {"ada": ada, "bo": bo, "cy": cy_true if fact else cy_false}
+
+
+def _society_seed_v1(registry, seed, fact=True):
+    """society_seed_v1 (OWNER SC-LC) — 3 rooms A-B-C, 3 scripted agents
+    (ada/bo/cy), 1 portable token (floor A), 1 private object (gem inside a box
+    in C — the referent of cy's private Boolean fact). Registered in the closed
+    spatial SCENARIOS map so the calibration fork machinery consumes it
+    unchanged; the society layer (rule/trust/ticks) is derived ABOVE it."""
+    sc = _assemble(
+        registry, seed, "society_seed_v1",
+        room_keys=("A", "B", "C"),
+        portal_rows=[("AB", "A", "B", "bidirectional"),
+                     ("BC", "B", "C", "bidirectional")],
+        object_rows=[("token", "token", {"tag": "in_room", "room_logical_key": "A"}),
+                     ("box", "box", {"tag": "in_room", "room_logical_key": "C"}),
+                     ("gem", "gem", {"tag": "inside", "container_logical_key": "box"})],
+        body_rows=[("ada", "A"), ("bo", "B"), ("cy", "C")],
+        intents=_society_seed_intents(fact),
+        # fork AFTER ada's give (global activate-intent 11) so the give sits in
+        # the shared prefix; cy is in room C here, where the fact-false tail's
+        # take_out is legal — the one authenticated counterfactual.
+        fork_after_intent=11,
+        private_object_key="gem",
+        allow_unconsumed=True)
+    return sc
+
+
 SCENARIOS = {
     "spatial_two_agent_private_object_v1": _two_agent_private_object_v1,
     # the golden suite (owner directive 2026-07-14)
@@ -389,6 +440,9 @@ SCENARIOS = {
     "spatial_info_asymmetry_v1": _info_asymmetry_v1,
     "spatial_scarce_resource_v1": _scarce_resource_v1,
     "spatial_long_march_v1": _long_march_v1,
+    # Minimal Society Seed (OWNER SC-LC 2026-07-14) — spatial substrate only;
+    # the society layer is derived above it in coliseum.textlab.society.
+    "society_seed_v1": _society_seed_v1,
 }
 
 

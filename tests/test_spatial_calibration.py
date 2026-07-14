@@ -60,7 +60,11 @@ def baseline(tmp_path_factory):
     replay-gate authentication internally)."""
     root = str(tmp_path_factory.mktemp("calibration"))
     out = {}
-    for name, spec in INTERVENTIONS.items():
+    # the GOLDEN calibration baseline is exactly the six pinned interventions;
+    # other interventions registered in the closed map (e.g. the SC-LC society
+    # fork) are validated by their own suites, not this fork+1 baseline.
+    for name in BASELINE_PINS:
+        spec = INTERVENTIONS[name]
         c = execute_spatial_run(spec["scenario"], spec["seed"], out_root=root)
         cdir = os.path.join(root, c["run_id"])
         t = execute_spatial_run(spec["scenario"], spec["seed"], out_root=root,

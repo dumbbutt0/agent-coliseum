@@ -70,6 +70,15 @@ INTERVENTIONS = {
         "agent_key": "alice", "changed_dimension": "march-on-vs-halt",
         "substituted_intents": [["move", "room_B"]],
     },
+    # Minimal Society Seed (OWNER SC-LC) — the ONE authenticated counterfactual
+    # fork: cy's private Boolean fact is flipped, substituting cy's post-fork
+    # tail with the fact-false continuation (carry the private object toward B).
+    "iv_society_seed_fact_flip_v1": {
+        "scenario": "society_seed_v1", "seed": 42,
+        "agent_key": "cy", "changed_dimension": "fact_true-vs-fact_false",
+        "substituted_intents": [["take_out", "gem", "box"], ["move", "room_B"],
+                                ["move", "room_C"], ["move", "room_B"]],
+    },
 }
 
 
