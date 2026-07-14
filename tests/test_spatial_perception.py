@@ -30,24 +30,36 @@ V0_REGIME = dict(renderer_version="0.1", visibility_policy="room_v0",
 
 
 def _world(directionality="bidirectional", regime_overrides=None,
-           extra_object_specs=(), extra_entities=(), suffix="x"):
+           extra_object_specs=(), extra_entities=(), suffix="x", alt_order=False):
     """Two rooms (one shared spec), one portal, alice(A)/bob(B), a visible token(A),
-    a container box(A) with a gem INSIDE, and a hidden shadow(A)."""
+    a container box(A) with a gem INSIDE, and a hidden shadow(A). ``alt_order``
+    registers the same specs in a genuinely different insertion order (respecting
+    construction-order constraints) — identities must not change."""
     reg = SpatialSpecRegistry()
     rp = dict(V0_REGIME)
     rp.update(regime_overrides or {})
     pr = PerceptionRegime(rp["renderer_version"], rp["visibility_policy"],
                           rp["audibility_policy"], rp["observation_policy_version"])
-    reg.register(pr)
-    rs = RoomSpec("room", [suffix], None, "los", "adj", ["n"]); reg.register(rs)
-    ps = PortalSpec(rs.id, rs.id, directionality, 0, "open"); reg.register(ps)
+    rs = RoomSpec("room", [suffix], None, "los", "adj", ["n"])
     token = ObjectSpec("token", True, False, "visible", True, False, [], ["take"])
     box = ObjectSpec("box", False, True, "visible", False, False, [], [])
     gem = ObjectSpec("gem", True, False, "visible", True, False, [], ["take"])
     shadow = ObjectSpec("shadow", False, False, "hidden", False, False, [], [])
     specs = [token, box, gem, shadow, *extra_object_specs]
-    for s in specs:
-        reg.register(s)
+    if alt_order:
+        # different construction-order-legal sequence: rooms + objects first
+        # (reversed), then the regime, portal, body spec.
+        reg.register(rs)
+        for s in reversed(specs):
+            reg.register(s)
+        reg.register(pr)
+        ps = PortalSpec(rs.id, rs.id, directionality, 0, "open"); reg.register(ps)
+    else:
+        reg.register(pr)
+        reg.register(rs)
+        ps = PortalSpec(rs.id, rs.id, directionality, 0, "open"); reg.register(ps)
+        for s in specs:
+            reg.register(s)
     bs = AgentBodySpec("humanoid", pr.id, None); reg.register(bs)
     entities = [
         {"entity_kind": "agent_body", "spec_id": bs.id, "logical_key": "alice",
@@ -402,3 +414,207 @@ def test_privileged_inner_schema_exact():
 
 def test_renderer_version_frozen():
     assert RENDERER_VERSION == "0.1"
+
+
+# ---------------------------- validator value/type rules (audit 001159 HIGH-1)
+def test_actor_schema_rejects_malformed_values():
+    """The closed validator enforces the exact S2A value/type/semantic rules, not
+    just key sets: wrong-typed references and invalid transit descriptors refuse."""
+    w = _world()
+    actor, _ = _render(w)
+    valid = actor.content["content"]
+    import copy
+    def entity_mut(fn):
+        def m(c):
+            fn(c["observable_state_projection"]["entities"][0])
+        return m
+    cases = [
+        # non-string room reference inside a location
+        entity_mut(lambda r: r["location"].update({"room_instance_id": 7})
+                   if r["location"]["tag"] == "in_room" else r.update(
+                       {"location": {"tag": "in_room", "room_instance_id": 7}})),
+        # non-string entity_id
+        entity_mut(lambda r: r.update({"entity_id": 7})),
+        # empty entity_id
+        entity_mut(lambda r: r.update({"entity_id": ""})),
+        # non-string portal reference
+        lambda c: c["observable_state_projection"]["portals"][0].update(
+            {"portal_instance_id": 7}),
+        # empty to_room reference
+        lambda c: c["observable_state_projection"]["portals"][0].update(
+            {"to_room_instance_id": ""}),
+        # in_transit with equal endpoints
+        entity_mut(lambda r: r.update({"entity_kind": "agent_body", "location": {
+            "tag": "in_transit", "portal_instance_id": "p" * 8,
+            "origin_room_instance_id": "same" * 8,
+            "destination_room_instance_id": "same" * 8,
+            "start_step": 0, "arrival_step": 1}})),
+        # in_transit with start_step >= arrival_step
+        entity_mut(lambda r: r.update({"entity_kind": "agent_body", "location": {
+            "tag": "in_transit", "portal_instance_id": "p" * 8,
+            "origin_room_instance_id": "o" * 8,
+            "destination_room_instance_id": "d" * 8,
+            "start_step": 2, "arrival_step": 1}})),
+        # kind binding: held_by row that is an agent body
+        entity_mut(lambda r: r.update({"entity_kind": "agent_body", "location": {
+            "tag": "held_by", "agent_body_id": "b" * 8}})),
+        # kind binding: in_transit row that is an object
+        entity_mut(lambda r: r.update({"entity_kind": "object", "location": {
+            "tag": "in_transit", "portal_instance_id": "p" * 8,
+            "origin_room_instance_id": "o" * 8,
+            "destination_room_instance_id": "d" * 8,
+            "start_step": 0, "arrival_step": 1}})),
+    ]
+    for mutate in cases:
+        bad = copy.deepcopy(valid)
+        mutate(bad)
+        with pytest.raises(ContentRecordError):
+            assert_actor_content_schema(bad)
+
+
+# --------------------- pinned ids + ordering permutations (audit 001159 HIGH-2)
+# The fixture is fully content-addressed (no wall-clock/host entropy), so these
+# complete observation ids are stable literals: any schema, ordering, visibility,
+# or identity drift in either view changes them (vectors 13/17/18).
+PINNED_IDS = {
+    "bidirectional": {
+        "actor": "a12162fe77aa1b1215df4a0e341d48f7483f90d4babf69158eba286cd77102c3",
+        "privileged": "7994b29d5c9ede5c2ab0a55fdeaf4d8464275fbafebebab0fd51ec9bc25395aa",
+    },
+    "directed": {
+        "actor": "859d8dadb790906b417223954eedde999a3440d9cf32f0700113674b0525436d",
+        "privileged": "28932147e0f1ecb59cc8fe19a2cae207fe66b4321ea15b659b25665c2045ea30",
+    },
+}
+
+
+@pytest.mark.parametrize("directionality", ["bidirectional", "directed"])
+def test_pinned_observation_ids(directionality):
+    w = _world(directionality)
+    actor, priv = _render(w)
+    assert actor.id == PINNED_IDS[directionality]["actor"]
+    assert priv.id == PINNED_IDS[directionality]["privileged"]
+    # pin the load-bearing content facts alongside the ids
+    c = actor.content["content"]
+    assert c["visible_room_identity"] == w["ids"]["room_A"]
+    assert len(c["observable_state_projection"]["portals"]) == 1
+    assert set(c["visible_entity_identities"]) == {
+        w["ids"]["alice"], w["ids"]["token"], w["ids"]["box"]}
+
+
+def test_closure_row_permutation_invariance():
+    """An adversarially permuted closure argument (reversed portal/room/object/body
+    row order) must render byte-identical artifacts — output order is pinned by the
+    canonical sort rules, never by input order."""
+    w = _world()
+    a1, p1 = _render(w)
+    permuted = {k: list(reversed(v)) for k, v in w["closure"].items()}
+    a2, p2 = render_observation_pair(w["genesis"], w["ids"]["alice"], permuted, w["reg"])
+    assert a2.id == a1.id and p2.id == p1.id
+
+
+def test_registry_insertion_order_independence():
+    """Genuinely different registration sequences (alt_order) => identical ids."""
+    a = _world()
+    b = _world(alt_order=True)
+    (aa, ap), (ba, bp) = _render(a), _render(b)
+    assert aa.id == ba.id and ap.id == bp.id
+
+
+# ------------------- interleaved purity + split differentials (audit 001159 HIGH-2)
+def test_render_purity_interleaved_after_every_consume():
+    """Renders interleaved after EVERY consume produce a byte-identical manifest to
+    an unrendered run (invariant 1, exact rev-3 wording)."""
+    from coliseum.textlab.spatial.scheduler import (ADVANCE, QUIESCENT,
+                                                    SchedulerManifest,
+                                                    initial_scheduler_state,
+                                                    next_step, consume,
+                                                    _mk_transition)
+    def build_script(w):
+        b1, b2 = sorted_eligible(w["genesis"], w["closure"])
+        c1 = candidate_effects(b1, w["genesis"], w["closure"], w["reg"])
+        eff1 = (c1["take"] or c1["move"])[0]
+        s1 = _apply_effect(w["genesis"], eff1, w["reg"], 1)
+        admit_world_state(s1, w["reg"])
+        c2 = candidate_effects(b2, s1, w["closure"], w["reg"])
+        eff2 = (c2["move"] or c2["take"])[0]
+        return [eff1, eff2]
+    # clean run: schedule() with no rendering at all.
+    clean = _world()
+    script_c = build_script(clean)
+    run_c = SchedulerRun(clean["wl"].id, clean["glx"].id,
+                         action_script_commitment(script_c), explicit_stop_position=2)
+    clean["reg"].register(run_c)
+    _, _, m_clean = schedule(run_c, clean["genesis"], script_c, clean["closure"], clean["reg"])
+    # rendered run: drive the SAME canonical loop manually, rendering BOTH observers
+    # after EVERY consume.
+    w = _world()
+    script = build_script(w)
+    run = SchedulerRun(w["wl"].id, w["glx"].id, action_script_commitment(script),
+                       explicit_stop_position=2)
+    w["reg"].register(run)
+    cursor = initial_scheduler_state(run, w["genesis"], w["reg"])
+    chain, transitions, state = [cursor], [], w["genesis"]
+    while cursor.content["scheduler_position"] != 2:
+        step = next_step(cursor, state, w["closure"], w["reg"])
+        assert step != QUIESCENT
+        if step == ADVANCE:
+            t = _mk_transition(state, {"action": "advance_step"}, w["reg"])
+            cursor, state = consume(cursor, state, t, w["closure"], w["reg"])
+            transitions.append(t)
+        elif step.content["outcome_kind"] == "pass":
+            cursor, state = consume(cursor, state, None, w["closure"], w["reg"])
+        else:
+            t = _mk_transition(state, script.pop(0), w["reg"],
+                               actor=step.content["agent_body_id"])
+            cursor, state = consume(cursor, state, t, w["closure"], w["reg"])
+            transitions.append(t)
+        chain.append(cursor)
+        for body in ("alice", "bob"):                    # render after EVERY consume
+            if any(p["entity_id"] == w["ids"][body]
+                   and p["location"]["tag"] == "in_room"
+                   for p in state.content["placements"]):
+                _render(w, body_key=body, state=state)
+    manifest = SchedulerManifest(run.id, chain[0].id, chain[-1].id, len(chain),
+                                 [t.id for t in transitions])
+    assert manifest.id == m_clean.id                     # byte-identical manifest
+
+
+def test_hidden_object_add_remove_differential():
+    """Removing the hidden object from the state entirely (or equivalently, its
+    presence at genesis) never changes the actor id; the privileged id changes."""
+    w = _world()
+    def remove(pl, lf):
+        pl[:] = [p for p in pl if p["entity_id"] != w["ids"]["shadow"]]
+        lf[:] = [e for e in lf if e["entity_id"] != w["ids"]["shadow"]]
+    without = _variant_state(w, remove)
+    (a1, p1) = _render(w)                                # hidden object present
+    (a2, p2) = _render(w, state=without)                 # hidden object absent
+    assert a1.id == a2.id
+    assert p1.id != p2.id
+
+
+def test_container_contents_holder_and_non_holder():
+    """Container contents are invisible to the NON-HOLDER (alice co-located with the
+    box) AND to the HOLDER (alice holding the box): moving the gem out of existence
+    changes neither actor id; both privileged ids change."""
+    w = _world()
+    def drop_gem(pl, lf):
+        pl[:] = [p for p in pl if p["entity_id"] != w["ids"]["gem"]]
+        lf[:] = [e for e in lf if e["entity_id"] != w["ids"]["gem"]]
+    # non-holder: box in room A (genesis) vs same without the gem.
+    (a1, p1) = _render(w)
+    without = _variant_state(w, drop_gem)
+    (a2, p2) = _render(w, state=without)
+    assert a1.id == a2.id and p1.id != p2.id
+    # holder: alice holds the box; gem inside vs gem gone.
+    def hold_box(pl, lf):
+        next(p for p in pl if p["entity_id"] == w["ids"]["box"])["location"] = \
+            {"tag": "held_by", "agent_body_id": w["ids"]["alice"]}
+    held = _variant_state(w, hold_box)
+    def hold_box_no_gem(pl, lf):
+        hold_box(pl, lf); drop_gem(pl, lf)
+    held_no_gem = _variant_state(w, hold_box_no_gem)
+    (a3, p3) = _render(w, state=held)
+    (a4, p4) = _render(w, state=held_no_gem)
+    assert a3.id == a4.id and p3.id != p4.id

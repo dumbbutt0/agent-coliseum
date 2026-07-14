@@ -23,7 +23,7 @@ from __future__ import annotations
 from coliseum.textlab._content_record import ContentRecordError
 from coliseum.textlab.spatial.scheduler import _closure_visible
 from coliseum.textlab.spatial.state import (WorldState, admit_world_state,
-                                            _resolve_spec)
+                                            validate_location, _resolve_spec)
 from coliseum.textlab.spatial.world import SUPPORTED_SPATIAL_SCHEMA_VERSIONS
 from coliseum.textlab.training.observation import observation_artifact
 
@@ -97,6 +97,8 @@ def assert_actor_content_schema(content) -> None:
         if not isinstance(r, dict) or set(r) != {"entity_id", "entity_kind", "location"}:
             raise ContentRecordError(
                 "entities rows must have exactly {entity_id, entity_kind, location}")
+        if not isinstance(r["entity_id"], str) or not r["entity_id"]:
+            raise ContentRecordError("entity_id must be a non-empty string")
         if r["entity_kind"] not in ("agent_body", "object"):
             raise ContentRecordError("unknown entity_kind in actor projection")
         loc = r["location"]
@@ -105,6 +107,14 @@ def assert_actor_content_schema(content) -> None:
                 set(loc) != _ACTOR_LOCATION_KEYS[loc["tag"]]:
             raise ContentRecordError(
                 "actor entity location must be an exact permitted S2A tagged shape")
+        # exact S2A value/type/semantic rules (non-empty string refs; non-negative
+        # int steps; start_step < arrival_step; origin != destination).
+        validate_location(loc)
+        # the S2A kind binding: in_transit is agent_body-only; held_by is object-only.
+        if loc["tag"] == "in_transit" and r["entity_kind"] != "agent_body":
+            raise ContentRecordError("in_transit rows must be agent bodies")
+        if loc["tag"] == "held_by" and r["entity_kind"] != "object":
+            raise ContentRecordError("held_by rows must be objects")
     if [r["entity_id"] for r in rows] != sorted(r["entity_id"] for r in rows):
         raise ContentRecordError("entities rows must be sorted by entity_id")
     ports = proj["portals"]
@@ -114,6 +124,9 @@ def assert_actor_content_schema(content) -> None:
         if not isinstance(p, dict) or set(p) != {"portal_instance_id", "to_room_instance_id"}:
             raise ContentRecordError(
                 "portals rows must have exactly {portal_instance_id, to_room_instance_id}")
+        if any(not isinstance(p[k], str) or not p[k]
+               for k in ("portal_instance_id", "to_room_instance_id")):
+            raise ContentRecordError("portal row references must be non-empty strings")
     keyed = [(p["portal_instance_id"], p["to_room_instance_id"]) for p in ports]
     if keyed != sorted(keyed):
         raise ContentRecordError(
