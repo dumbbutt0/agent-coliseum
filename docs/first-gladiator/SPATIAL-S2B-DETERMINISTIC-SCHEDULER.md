@@ -1,7 +1,12 @@
-# Spatial S2B — Deterministic scheduler (design source, rev 3)
+# Spatial S2B — Deterministic scheduler (design source, rev 4)
 
-**Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Rev 3
-closes audit 001047: (a) every non-initial cursor carries an **authenticated provenance link**
+**Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Rev 4
+closes audit 001053: the scheduler **genesis** is now bound to exactly one authenticated `SchedulerRun` per
+world-line (an authorized run-start state — a root world-line's `logical_step==0` initial state, or a forked
+world-line's `ForkInitialization.materialized_child_initial_state_hash`). `scheduler_run_id` is part of every
+`SchedulerState`/`Activation` identity, an `initial` cursor is valid ONLY at that bound genesis, and every
+cursor's provenance chain must terminate at that unique genesis — so a caller cannot "reset" the scheduler at
+a later admitted state to duplicate/skip owed turns. Rev 3 closes audit 001047: (a) every non-initial cursor carries an **authenticated provenance link**
 (`prev_scheduler_state_hash` + `last_outcome` + `last_applied_transition_hash`) and is canonical ONLY as the
 exact one-step `consume()` successor of a registered predecessor — a content-addressed record with an
 in-range `within_round_index` is no longer trusted, so a forged cursor cannot skip mandatory turns or jump
@@ -22,13 +27,20 @@ choices) ⇒ **byte-identical** sequence + authoritative state, independent of h
 
 | record | literal `_domain` | preimage keys (id self-excluded) |
 | --- | --- | --- |
-| `SchedulerState` | `spatial.scheduler_state.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `round_index`, `within_round_index`, `prev_scheduler_state_hash`(or `null`), `last_outcome`, `last_applied_transition_hash`(or `null`) |
-| `Activation` | `spatial.activation.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `logical_step`, `round_index`, `within_round_index`, `agent_body_id`, `outcome_kind`, `legal_action_kinds` |
+| `SchedulerRun` | `spatial.scheduler_run.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `initial_world_state_hash` |
+| `SchedulerState` | `spatial.scheduler_state.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `round_index`, `within_round_index`, `prev_scheduler_state_hash`(or `null`), `last_outcome`, `last_applied_transition_hash`(or `null`) |
+| `Activation` | `spatial.activation.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `logical_step`, `round_index`, `within_round_index`, `agent_body_id`, `outcome_kind`, `legal_action_kinds` |
 | `RandomStream` | `spatial.random_stream.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `logical_step`, `purpose` |
 | `RandomDraw` | `spatial.random_draw.v1` | `spatial_schema_version`, `random_stream_id`, `draw_position`, `value` |
 
 - `scheduler_version` = frozen `SCHEDULER_VERSION` (unknown fails closed; any ordering/eligibility/tie-break/
   randomness rule change bumps it).
+- `SchedulerRun` is the authenticated **genesis** of a run: it binds `initial_world_state_hash`, which MUST
+  be a registered admitted `WorldState` in `world_line_id` that is an **authorized run-start** — for a ROOT
+  world-line, its `logical_step == 0`; for a FORKED world-line, it equals a registered
+  `ForkInitialization.materialized_child_initial_state_hash` for that world-line (S2A). Any other
+  `initial_world_state_hash` (e.g. a mid-run state at `logical_step > 0`) is refused. `scheduler_run_id` is
+  bound into every `SchedulerState`/`Activation` identity, so cursors of different runs never interoperate.
 - `last_outcome ∈ {initial, activate, pass, advance_arrival, advance_endround}` names the one-step
   transition that produced THIS cursor from `prev_scheduler_state_hash`; `last_applied_transition_hash` is the
   S2A `LocationTransition` id for `activate`/`advance_*` (an S2A edge was applied) and `null` for
@@ -50,8 +62,11 @@ choices) ⇒ **byte-identical** sequence + authoritative state, independent of h
 A **round** is anchored to a `round_start_state` and consumes its frozen queue `Q =
 sorted_eligible(round_start_state)` head-first. A queued body stays `present`+`InRoom` until its own turn (no
 S2A actor action moves or removes another body; `advance_step` only lands `in_transit` bodies, which are not
-in `Q`), so the head is always valid when reached. `initial_scheduler_state(world_state)` binds
-`current = round_start = world_state.id`, `round_index = 0`, `within_round_index = 0`.
+in `Q`), so the head is always valid when reached. `initial_scheduler_state(scheduler_run, world_state)` requires
+`world_state.id == scheduler_run.initial_world_state_hash` (the authorized genesis — §2) and binds
+`scheduler_run_id = scheduler_run.id`, `current = round_start = world_state.id`, `round_index = 0`,
+`within_round_index = 0`, `prev = null`, `last_outcome = "initial"`. A genesis at any non-run-start state is
+refused, so the scheduler cannot be reset mid-run.
 
 `next(scheduler_state, world_state, registry)` — pure/deterministic, fail-closed on an incoherent cursor
 (§5) — dispatches in this **exact, mutually-exclusive order** (QUIESCENT first, so it is never shadowed):
@@ -91,11 +106,14 @@ A cursor's validity is NOT established by content-address + in-range fields alon
 record jump within/across rounds). It is established by **authenticated one-step provenance**: a
 `SchedulerState` `S` is canonical iff EITHER
 - **initial** (`prev_scheduler_state_hash == null`, `last_outcome == "initial"`,
-  `last_applied_transition_hash == null`): `current == round_start` is a registered admitted `WorldState` in
-  this world-line, `round_index == 0`, `within_round_index == 0` — i.e. `S == initial_scheduler_state(that
-  state)`; OR
+  `last_applied_transition_hash == null`): `scheduler_run_id` names a **registered** `SchedulerRun` `R` (a
+  valid authorized genesis, §2), and `current == round_start == R.initial_world_state_hash`, `world_line_id
+  == R.world_line_id`, `round_index == 0`, `within_round_index == 0` — i.e. `S ==
+  initial_scheduler_state(R, that genesis state)`. A registered admitted state that is NOT `R`'s bound
+  genesis cannot anchor an initial cursor, so a mid-run reset is refused; OR
 - **a `consume()` successor**: its `prev_scheduler_state_hash` names a **registered canonical**
-  `SchedulerState` `P`, and `S` is EXACTLY the cursor the §3 rule dispatched from `P` produces for
+  `SchedulerState` `P` with the SAME `scheduler_run_id` (a cursor never changes runs), and `S` is EXACTLY the
+  cursor the §3 rule dispatched from `P` produces for
   `last_outcome`:
   - `activate`: `P`'s head `= sorted_eligible(P.round_start)[P.within]` is the actor of the registered S2A
     edge `last_applied_transition_hash` (`P.current → S.current`, a valid `apply_transition`), `round_start`/
@@ -114,10 +132,13 @@ sorted_eligible(round_start_state)[within_round_index]`, and `outcome_kind`/`leg
 derivation on the current state. `consume(scheduler_state, world_state, applied_transition_or_None,
 registry)` is the ONLY constructor of non-initial cursors: it re-verifies `scheduler_state` is registered
 canonical, dispatches §3, checks the supplied `applied_transition` is the required S2A edge (or `None` for
-`pass`), registers and returns the successor. Because every accepted cursor must exhibit a registered
-canonical predecessor and the exact dispatched delta, a caller-fabricated cursor that **skips a mandatory
-turn** (jumps `within`), **duplicates** a turn, **selects a different round anchor**, or is **stale/
-cross-world** has no valid provenance and is refused; unsupported `scheduler_version` fails closed.
+`pass`), registers and returns the successor (propagating `scheduler_run_id` unchanged). Because every
+accepted cursor must exhibit a registered canonical predecessor with the same `scheduler_run_id` and the
+exact dispatched delta, and every provenance chain terminates at the run's **unique authenticated genesis**
+(the `SchedulerRun`-bound run-start state — not any admitted snapshot), a caller-fabricated cursor that
+**skips a mandatory turn** (jumps `within`), **duplicates** a turn, **selects a different round anchor**,
+**resets the run at a later state** (a non-genesis initial cursor), or is **stale/cross-world** has no valid
+provenance and is refused; unsupported `scheduler_version` fails closed.
 
 ## 6. Deterministic randomness (frozen; the base scheduler consumes none)
 The base engine is fully deterministic (sorted round-robin + pass), so the first slice draws no randomness.
@@ -146,12 +167,18 @@ deferral). No labels/training/weights/T0-B/M14-SC-8/society. No `tools/council` 
 UUID/object-identity/dict-iteration order in any identity or ordering decision.
 
 ## 9. Threat model + identity vectors
-**Identity vectors (byte-pinned):** an `initial` / post-activation / post-pass / post-arrival / new-round
-`SchedulerState` (each with its `prev`/`last_outcome`/`last_applied_transition_hash`); an `activate` and a
-`pass` `Activation`; a `RandomStream`; a `RandomDraw` (incl. its frozen integer draw word).
-**Adversarial (each fails closed):** an **unprovenanced cursor** (a content-addressed `SchedulerState` whose
-`prev_scheduler_state_hash` is null-but-not-initial, unregistered, or not the exact §5 one-step predecessor —
-e.g. a fabricated cursor with `within == len(Q)` that skips every mandatory head); stale/cross-world cursor
+**Identity vectors (byte-pinned):** a `SchedulerRun`; an `initial` / post-activation / post-pass /
+post-arrival / new-round `SchedulerState` (each with its `scheduler_run_id`/`prev`/`last_outcome`/
+`last_applied_transition_hash`); an `activate` and a `pass` `Activation`; a `RandomStream`; a `RandomDraw`
+(incl. its frozen integer draw word).
+**Adversarial (each fails closed):** a **genesis reset** (an `initial` cursor whose `current` is an admitted
+mid-run state, not the `SchedulerRun`-bound run-start — so an acted body cannot be re-activated by resetting;
+a `SchedulerRun` whose `initial_world_state_hash` is not an authorized run-start (root `logical_step!=0`, or
+a forked world-line state that is not a registered `ForkInitialization` materialized child) is itself
+refused); a cursor whose `scheduler_run_id` differs from its predecessor's (cross-run splice); an
+**unprovenanced cursor** (a content-addressed `SchedulerState` whose `prev_scheduler_state_hash` is
+null-but-not-initial, unregistered, or not the exact §5 one-step predecessor — e.g. a fabricated cursor with
+`within == len(Q)` that skips every mandatory head); stale/cross-world cursor
 (`current_world_state_hash`/`world_line` mismatch); forged cursor (wrong `within_round_index`/
 `round_start_state_hash`/`round_index`/`last_outcome`); duplicate turn
 (body not the derived head); skipped mandatory turn (non-head activation); activation onto a due-arrival
