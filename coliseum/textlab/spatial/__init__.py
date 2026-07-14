@@ -23,6 +23,16 @@ from coliseum.textlab.spatial.transition import (LocationTransition,
                                                  apply_transition, replay)
 from coliseum.textlab.spatial.fork import (ForkDecision, ForkInitialization,
                                            materialize_fork)
+from coliseum.textlab.spatial.scheduler import (SCHEDULER_VERSION, Activation,
+                                                RandomDraw, RandomStream,
+                                                SchedulerManifest, SchedulerRun,
+                                                SchedulerState, WorldLineGenesis,
+                                                action_script_commitment,
+                                                legal_action_kinds,
+                                                materialize_fork_closure,
+                                                materialize_root, schedule,
+                                                validate_world_line_genesis,
+                                                verify_manifest)
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
