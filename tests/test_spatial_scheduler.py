@@ -296,17 +296,58 @@ def test_fork_genesis_requires_witness_and_authenticated_parent():
                           fork_logical_step=ts.logical_step,
                           source_fork_decision_hash=D.id)
     reg.register(fg)
-    witness = {"scheduler_state_id": chain[-1].id, "scheduler_manifest_id": manifest.id}
+    witness = {"scheduler_state_id": chain[-1].id, "scheduler_manifest_id": manifest.id,
+               "action_script": script}
     out = validate_world_line_genesis(fg, reg, witness=witness)
     assert _closure_hash(out) == fg.content["topology_closure_hash"]
     with pytest.raises(ContentRecordError, match="witness"):
         validate_world_line_genesis(fg, reg)          # no witness -> refused
-    bad = {"scheduler_state_id": chain[0].id, "scheduler_manifest_id": manifest.id}
-    with pytest.raises(ContentRecordError, match="parent snapshot"):
-        validate_world_line_genesis(fg, reg, witness=bad)  # wrong position -> refused
+    bad = {"scheduler_state_id": chain[0].id, "scheduler_manifest_id": manifest.id,
+           "action_script": script}
+    with pytest.raises(ContentRecordError, match="parent snapshot|position"):
+        validate_world_line_genesis(fg, reg, witness=bad)  # wrong state (genesis) -> refused
 
 
 # ------------------------------------------------------------- randomness
+def test_schedule_rejects_uncommitted_closure():
+    """The scheduler authenticates the run's genesis + binds the closure: a closure
+    that is not the run's committed topology closure is refused (audit 001117)."""
+    w = _world()
+    script = _two_step_script(w)
+    run = _run(w, script)
+    tampered = dict(w["closure"])
+    tampered["objects"] = []          # drop the token -> different closure hash
+    with pytest.raises(ContentRecordError, match="closure"):
+        schedule(run, w["genesis"], script, tampered, w["reg"])
+
+
+def test_schedule_rejects_non_genesis_state():
+    """A supplied initial state that is not the run's authenticated genesis is refused."""
+    w = _world()
+    script = _two_step_script(w)
+    run = _run(w, script)
+    b1, b2 = sorted_eligible(w["genesis"])
+    other = WorldState(w["wl"].id, 0,
+                       [p for p in w["genesis"].content["placements"] if p["entity_id"] != b2],
+                       [e for e in w["genesis"].content["entity_lifecycle"] if e["entity_id"] != b2])
+    admit_world_state(other, w["reg"]); w["reg"].register(other)
+    with pytest.raises(ContentRecordError, match="genesis"):
+        schedule(run, other, script, w["closure"], w["reg"])
+
+
+def test_explicit_stop_with_unconsumed_script_refused():
+    """An explicit stop before the committed script is fully consumed is refused
+    (exclusive terminal rule; audit 001117)."""
+    w = _world()
+    script = _two_step_script(w)
+    # commit a 2-action script but stop at position 1 (only 1 action consumed).
+    run = SchedulerRun(w["wl"].id, w["glx"].id, action_script_commitment(script),
+                       explicit_stop_position=1)
+    w["reg"].register(run)
+    with pytest.raises(ContentRecordError, match="unconsumed"):
+        schedule(run, w["genesis"], script, w["closure"], w["reg"])
+
+
 def test_random_stream_and_draw_frozen():
     w = _world()
     s1 = RandomStream(w["wl"].id, 3, "tie_break")

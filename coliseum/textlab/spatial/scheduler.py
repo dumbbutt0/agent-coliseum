@@ -418,36 +418,50 @@ def validate_world_line_genesis(genesis, registry, witness=None):
             dc["parent_state_hash"] != g["parent_state_hash"] or \
             dc["fork_logical_step"] != g["fork_logical_step"]:
         raise ContentRecordError("ForkDecision does not authorize this parent snapshot")
-    if not isinstance(witness, dict):
-        raise ContentRecordError("fork genesis requires a reachability witness")
+    if not isinstance(witness, dict) or not all(
+            k in witness for k in ("scheduler_state_id", "scheduler_manifest_id",
+                                   "action_script")):
+        raise ContentRecordError(
+            "fork genesis requires a witness {scheduler_state_id, scheduler_manifest_id, "
+            "action_script}")
     ws = registry.get(witness["scheduler_state_id"])
-    wm = registry.get(witness["scheduler_manifest_id"])
-    if ws.domain != "spatial.scheduler_state.v1" or wm.domain != "spatial.scheduler_manifest.v1":
-        raise ContentRecordError("witness records are of the wrong domain")
-    if ws.content["scheduler_run_id"] != wm.content["scheduler_run_id"]:
-        raise ContentRecordError("witness state does not belong to the witness manifest's run")
+    if ws.domain != "spatial.scheduler_state.v1":
+        raise ContentRecordError("witness scheduler_state is of the wrong domain")
     if ws.content["world_line_id"] != g["parent_world_line_id"]:
         raise ContentRecordError("witness is not on the parent world-line")
     if ws.content["current_world_state_hash"] != g["parent_state_hash"]:
         raise ContentRecordError("witness state does not carry the parent snapshot")
-    if ws.content["scheduler_position"] >= wm.content["chain_length"]:
-        raise ContentRecordError("witness position is outside the finalized chain")
-    # parent's own genesis authenticates recursively.
     parent_run = registry.get(ws.content["scheduler_run_id"])
     parent_genesis = registry.get(parent_run.content["world_line_genesis_id"])
-    from coliseum.textlab.spatial.scheduler import validate_world_line_genesis as _v
-    parent_closure = _v(parent_genesis, registry,
-                        witness=witness.get("parent"))
-    # deterministic child state + closure re-derivation (anti-transplant).
-    parent_state = registry.get(g["parent_state_hash"])
-    ps = WorldState(parent_state.content["world_line_id"],
-                    parent_state.content["logical_step"],
-                    parent_state.content["placements"],
-                    parent_state.content["entity_lifecycle"])
+    if parent_genesis.content["world_line_id"] != g["parent_world_line_id"]:
+        raise ContentRecordError("witness run's genesis is not on the parent world-line")
+    # recursively authenticate the parent genesis + get its canonical closure.
+    parent_closure = validate_world_line_genesis(parent_genesis, registry,
+                                                 witness=witness.get("parent"))
+    parent_gs = _rehydrate_world_state(
+        registry.get(parent_genesis.content["initial_world_state_hash"]))
+    # CANONICALLY verify the parent finalized manifest by whole-chain re-derivation,
+    # and require the witness state to be the EXACT state at its position in that chain.
+    chain, _t, canonical = schedule(parent_run, parent_gs, witness["action_script"],
+                                    parent_closure, registry, witness=witness.get("parent"))
+    if canonical.id != witness["scheduler_manifest_id"]:
+        raise ContentRecordError(
+            "witness manifest is not the canonical finalized parent manifest")
+    pos = ws.content["scheduler_position"]
+    if pos >= len(chain) or chain[pos].id != witness["scheduler_state_id"]:
+        raise ContentRecordError(
+            "witness state is not the exact state at its position in the canonical "
+            "parent chain (admitted-but-unreachable parent refused)")
+    # deterministic child state + a REGISTERED ForkInitialization (anti-transplant).
+    ps = _rehydrate_world_state(registry.get(g["parent_state_hash"]))
     child_line = registry.get(wl_id)
-    child_state, _finit = materialize_fork(ps, _as_world_line(child_line), D_as_decision(D), registry)
+    child_state, finit = materialize_fork(ps, _as_world_line(child_line),
+                                          D_as_decision(D), registry)
     if child_state.id != g["initial_world_state_hash"]:
         raise ContentRecordError("fork genesis is not the anti-transplant remap of the parent")
+    if finit.id not in registry:
+        raise ContentRecordError(
+            "the required ForkInitialization binding is not registered")
     child_closure = materialize_fork_closure(parent_closure, wl_id, registry)
     if _closure_hash(child_closure) != g["topology_closure_hash"]:
         raise ContentRecordError("fork genesis topology closure mismatch")
@@ -711,12 +725,42 @@ def _mk_transition(state, effect, registry, actor=None):
                               post.id, effect, actor_body_id=actor)
 
 
-def schedule(scheduler_run, genesis_state, action_script, closure, registry):
-    """Drive a run from its authenticated genesis over the committed action script to
+def _rehydrate_world_state(stored):
+    c = stored.content
+    return WorldState(c["world_line_id"], c["logical_step"], c["placements"],
+                      c["entity_lifecycle"])
+
+
+def _authenticate_run(scheduler_run, genesis_state, closure, registry, witness=None):
+    """Scheduler trust boundary: authenticate the run's bound WorldLineGenesis and
+    require the supplied genesis state + closure to equal the committed, re-derived
+    values. Returns the authenticated canonical closure."""
+    run = scheduler_run.content
+    if run["scheduler_version"] not in SUPPORTED_SCHEDULER_VERSIONS:
+        raise ContentRecordError("unsupported scheduler_version")
+    genesis = registry.get(run["world_line_genesis_id"])
+    if genesis.domain != "spatial.world_line_genesis.v1":
+        raise ContentRecordError("scheduler_run world_line_genesis_id is not a WorldLineGenesis")
+    if genesis.content["world_line_id"] != run["world_line_id"]:
+        raise ContentRecordError("genesis world-line != scheduler_run world-line")
+    authenticated = validate_world_line_genesis(genesis, registry, witness=witness)
+    if genesis_state.id != genesis.content["initial_world_state_hash"]:
+        raise ContentRecordError(
+            "supplied genesis state is not the run's authenticated genesis")
+    if _closure_hash(closure) != genesis.content["topology_closure_hash"] or \
+            _closure_hash(authenticated) != _closure_hash(closure):
+        raise ContentRecordError(
+            "supplied closure is not the run's committed/authenticated topology closure")
+    return authenticated
+
+
+def schedule(scheduler_run, genesis_state, action_script, closure, registry, witness=None):
+    """Drive a run from its AUTHENTICATED genesis over the committed action script to
     the run's EXCLUSIVE terminal (§5). Returns (chain, transitions, manifest)."""
     run = scheduler_run.content
     if action_script_commitment(action_script) != run["action_script_commitment"]:
         raise ContentRecordError("action_script does not match the run's commitment")
+    _authenticate_run(scheduler_run, genesis_state, closure, registry, witness)
     cursor = initial_scheduler_state(scheduler_run, genesis_state, registry)
     chain = [cursor]
     transitions = []
@@ -725,6 +769,9 @@ def schedule(scheduler_run, genesis_state, action_script, closure, registry):
     stop = run["explicit_stop_position"]
     while True:
         if stop is not None and cursor.content["scheduler_position"] == stop:
+            if script:
+                raise ContentRecordError(
+                    "explicit stop reached with unconsumed committed actions")
             break                                        # exclusive explicit stop
         step = next_step(cursor, state, closure, registry)
         if step == QUIESCENT:
@@ -761,16 +808,16 @@ def schedule(scheduler_run, genesis_state, action_script, closure, registry):
 
 
 def verify_manifest(manifest, scheduler_run, genesis_state, action_script, closure,
-                    registry):
-    """Whole-chain re-derivation (§5): re-run the scheduler over the committed script
-    and require the produced manifest content to equal the given manifest exactly.
-    Rejects prefixes, extensions, branches, transition mismatches, and forged
-    terminals — the canonical manifest is a pure function of the run."""
+                    registry, witness=None):
+    """Whole-chain re-derivation (§5): authenticate the run's genesis + closure, re-run
+    the scheduler over the committed script, and require the produced manifest content
+    to equal the given manifest exactly. Rejects prefixes, extensions, branches,
+    transition mismatches, forged terminals, and a non-canonical genesis/closure."""
     m = manifest.content
     if m["scheduler_run_id"] != scheduler_run.id:
         raise ContentRecordError("manifest does not belong to this scheduler_run")
     _chain, _transitions, canonical = schedule(scheduler_run, genesis_state,
-                                               action_script, closure, registry)
+                                               action_script, closure, registry, witness)
     if canonical.content != m:
         raise ContentRecordError(
             "manifest does not match the canonical whole-chain re-derivation")
