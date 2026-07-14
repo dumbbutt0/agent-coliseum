@@ -1,4 +1,4 @@
-# Society live-persona pilot — preregistration + design source (rev 2)
+# Society live-persona pilot — preregistration + design source (rev 3)
 
 Status: council-routed design source under the **OWNER live-persona pilot
 authorization (2026-07-14)** — the first governed live-model experiment on the
@@ -58,8 +58,11 @@ Every value below is committed here; the implementation MUST use exactly these
   pack is `underpowered` (§7) and yields NO behavioral claim.
 - **Versions (frozen literals):** `prompt_version = "society_persona_prompt.v1"`
   (the exact bytes in §3; its `config_hash` is recorded at build and pinned as a
-  regression); `parser_version` = the integrated `parse_llm_response` version in
-  use at the pinned commit (recorded + pinned); `persona_actor_version = "0.1"`.
+  regression); **`persona_parser_version = "society_numeric_menu.v1"`** (the
+  dedicated numeric-menu parser in §5, an EXACT committed literal — NOT the
+  vignette `parse_llm_response`, whose v2/v3 require answer-shaped JSON and
+  therefore reject the bare-number reply this prompt elicits);
+  `persona_actor_version = "0.1"`.
 
 ## 3. Prompt (frozen template) + perception non-interference
 
@@ -108,12 +111,28 @@ construction** — the institution constrains the live agent identically to a
 scripted one. An out-of-menu / unparseable / empty response is a failure (§5),
 never an illegal committed action.
 
-## 5. Parser + preregistered failure taxonomy
+## 5. Parser (`society_numeric_menu.v1`, exact) + preregistered failure taxonomy
 
-`parser_version` frozen. The completion is parsed to a menu id by the integrated
-`parse_llm_response` discipline (strict, versioned). Preregistered failure
-taxonomy (each deterministic, coded, and reported — never silently retried,
-never relabeled as success):
+The completion is parsed by the dedicated, versioned numeric-menu parser
+`society_numeric_menu.v1` (committed here; the vignette `parse_llm_response` is
+NOT reused — it requires answer-shaped JSON with a string `action` id and would
+reject this prompt's bare-number reply, and spatial action ids are canonical
+effect dicts, not simple strings). The live actor reuses the integrated
+`LLMAgent` CAPTURE harness ONLY (prompt->backend->capture), never its parser.
+
+**`society_numeric_menu.v1` exact semantics:** strip any `<think>...</think>`
+block; take the FIRST maximal run of ASCII digits in the remaining text as an
+integer `k`; if `1 <= k <= N` (N = the offered menu length) the choice is menu
+item `k` (1-indexed) -> exactly one society-legal action id; otherwise the
+result is a coded failure (no digits => `parse_failure`; an in-range-shaped but
+out-of-menu number can never occur because the menu is exactly `1..N`; any
+integer outside `1..N` => `illegal_selection`). Deterministic; total; pure.
+Mock regressions (implementation slice) cover: every in-menu number, a
+below/above-range number, a no-digit reply, a `<think>`-wrapped valid reply, and
+byte-identical replay from the captured completion.
+
+Preregistered failure taxonomy (each deterministic, coded, and reported — never
+silently retried, never relabeled as success):
 
 The CANONICAL FALLBACK is fixed: if the integrated society dispatch offers a
 legal `pass` at the current head, the activation takes `pass` (a no-op that
@@ -151,8 +170,13 @@ separate live layers with DISTINCT identity semantics:
 
 The `LiveSourceEvidenceBinding` (domain-separated) binds the spatial six + the
 society files + **`persona.jsonl` ONLY** — `persona_latency.jsonl` is explicitly
-excluded from the binding. Because `persona.jsonl` carries no latency, its
-whole-file digest is stable across runs. **Replay = re-derive from
+excluded from the binding. `persona.jsonl` carries no latency, so its whole-file
+digest is stable ON REPLAY OF THE SAME AUTHENTICATED CAPTURES (re-deriving from a
+given `persona.jsonl` is byte-identical). No cross-run equality is claimed — two
+INDEPENDENT live executions may differ (live-API determinism is never claimed);
+the pilot is ONE governed run, and every pinned pilot identity is produced by the
+deterministic MOCK persona (§9), not by the live model. **Replay = re-derive
+from
 `persona.jsonl` + the scripted controls, NEVER re-invoke the model** (a
 regression asserts the replay path makes zero backend calls); the replay gate
 byte-compares every bound file (persona.jsonl included, latency file excluded).
