@@ -1,4 +1,4 @@
-# Spatial S2C — Perception rendering + non-interference (design source, rev 1)
+# Spatial S2C — Perception rendering + non-interference (design source, rev 2)
 
 Status: council-routed design source for the third perception-track slice (S2C), per the
 owner's binding perception-track directive (2026-07-13) and the master runnable-experiments
@@ -42,11 +42,29 @@ TRS Appendix A shape via the integrated factory `observation_artifact(view_kind,
   Renaming/removing/retyping any content field bumps `RENDERER_VERSION`.
 
 Privileged carriers registered: the spatial privileged view introduces the field names
-`authoritative_placements`, `authoritative_lifecycle`, and `world_state_hash` inside its
-`observable_state_projection`. These names are ADDED to
-`observation.PRIVILEGED_FIELD_NAMES` (an additive, backstop-strengthening edit: it only
-widens what `assert_no_privileged_leak` refuses in ACTOR content; no existing actor content
-uses these names). No other edit to the integrated training module is permitted.
+`authoritative_placements`, `authoritative_lifecycle`, and
+`closure_visible_state_commitment` inside its `observable_state_projection`. These names
+are ADDED to `observation.PRIVILEGED_FIELD_NAMES` (an additive, backstop-strengthening
+edit: it only widens what `assert_no_privileged_leak` refuses in ACTOR content; no existing
+actor content uses these names). No other edit to the integrated training module is
+permitted.
+
+**The canonical `observable_state_projection` container (BOTH views; frozen inner schema).**
+The 7 outer content keys are frozen; `observable_state_projection` is a dict with EXACTLY
+two keys:
+
+- `"entities"` — a list of `{entity_id, entity_kind, location}` rows, sorted by
+  `entity_id`, one row per projected entity (§4 actor scope / §5 privileged scope).
+- `"portals"` — a list of `{portal_instance_id, to_room_instance_id}` rows, sorted by
+  `(portal_instance_id, to_room_instance_id)`: the closure attachment rows departing the
+  observer's current room (§4). Empty (`[]`) for an in-transit observer and whenever the
+  observer's room has no departing attachment rows. Portals are topology, not entities —
+  they never appear in `"entities"`, and no other key may be added without bumping
+  `RENDERER_VERSION`.
+
+Insertion order, registry order, and host/dict order never affect either list; the
+canonical byte content of both views (and hence both observation ids) is pinned by these
+two sort rules for directed AND bidirectional closures alike.
 
 ## 3. Renderer inputs, authentication posture, and refusals
 
@@ -61,13 +79,26 @@ effects), but it MUST fail closed on every locally checkable inconsistency:
 1. `observer_body_id ∈ closure["bodies"]` — an out-of-closure observer is REFUSED
    (perception is a closure capability, not a registry capability).
 2. The observer's registered instance `world_line_id` equals `state.world_line_id`
-   (cross-world refusal), and the state is a registered, admitted `spatial.world_state.v1`.
-3. The observer's lifecycle status in `state` is `present` and it has exactly one placement
+   (cross-world refusal), and the state is a registered `spatial.world_state.v1`.
+3. **Render-time admission revalidation (MANDATORY)**: the renderer calls
+   `admit_world_state(state, registry)` at entry. Registration does NOT persist admission
+   status (`SpatialSpecRegistry.register` never runs S2A admission), so a merely-registered
+   but registry-invalid state — including one with malformed cross-world references
+   anywhere in its placements — MUST be refused here. `admit_world_state` is pure and
+   locally checkable (unlike genesis materialization), so this preserves render purity.
+4. The observer's lifecycle status in `state` is `present` and it has exactly one placement
    (S2A admission guarantees this; the renderer re-checks presence and refuses otherwise).
-4. The resolved `PerceptionRegime.renderer_version ∈ SUPPORTED_RENDERER_VERSIONS`, and its
-   `spatial_schema_version` is supported. Unknown `visibility_behavior` values on any
-   object spec encountered during rendering are REFUSED (fail closed, never "assume
-   hidden" or "assume visible").
+5. **Complete fail-closed regime dispatch**: the integrated `PerceptionRegime` accepts
+   arbitrary non-empty strings for every policy field, so version dispatch MUST bind every
+   field. v0 supports EXACTLY one regime value tuple:
+   `renderer_version ∈ SUPPORTED_RENDERER_VERSIONS = ("0.1",)`,
+   `visibility_policy ∈ ("room_v0",)`, `audibility_policy ∈ ("off_v0",)`,
+   `observation_policy_version ∈ ("1",)`, and a supported `spatial_schema_version`.
+   Each field is checked INDEPENDENTLY; any non-conforming value refuses rendering
+   (`ContentRecordError`) — a regime is never silently approximated as v0, and the regime
+   id is therefore never semantically misleading. Unknown `visibility_behavior` values on
+   any object spec encountered during rendering are likewise REFUSED (fail closed, never
+   "assume hidden" or "assume visible").
 
 Regime resolution v0: the observer body's `AgentBodySpec.default_perception_regime_id`
 (per-body overrides deferred; the regime instance must be registered).
@@ -94,24 +125,27 @@ Observer placed `in_room` R:
   `spatial_two_agent_private_object_v1` relies on. The observer does NOT see its own held
   containers' contents either (uniform rule; revisit with container state, versioned).
 - **Portals**: every closure attachment row with `from_room_instance_id == R`, projected as
-  `{portal_instance_id, to_room_instance_id}` (matching S2B legal-move orientation:
-  a directed portal's reverse row does not exist and is not shown). No mutable portal
-  state exists in v0.
+  `{portal_instance_id, to_room_instance_id}` into the `"portals"` list of the §2 container
+  (matching S2B legal-move orientation: a directed portal's reverse row does not exist and
+  is not shown; a bidirectional portal contributes exactly the rows departing R). No
+  mutable portal state exists in v0.
 - **Nothing else**: no entity in any other room, in transit, or inside any container; no
   counts, no hashes, no lifecycle records of non-visible entities, no negative facts
   ("X is absent" is not represented).
 
 Observer placed `in_transit`: `visible_room_identity = null`; visible entities = the
 observer itself + objects it holds (its inventory travels with it, same visibility rule);
-`observable_state_projection` includes the observer's own full transit descriptor (an agent
-always perceives its own placement exactly). No room, portal, or other-entity visibility.
+the `"entities"` rows include the observer's own full transit descriptor (an agent always
+perceives its own placement exactly) and its held objects; `"portals"` is `[]`. No room,
+portal, or other-entity visibility.
 
 `visible_entity_identities` is the SORTED list of visible entity instance ids.
-`observable_state_projection` is a sorted-by-`entity_id` list of per-entity dicts:
+`observable_state_projection` uses the §2 two-key container: its `"entities"` rows are
 `{entity_id, entity_kind, location}` where `location` is the S2A tagged location as visible
 to the observer: `in_room` rows verbatim; `held_by` rows verbatim (the holder is visible by
 construction); the observer's own placement verbatim (including `in_transit`). No other
-location tags can appear in an actor projection in v0.
+location tags can appear in an actor projection in v0. Its `"portals"` rows are the §2
+portal projection.
 
 The actor content is **positively constructed** from this policy — visible facts are added
 one by one. It is NEVER derived from privileged content by deleting known-secret fields
@@ -123,10 +157,25 @@ one by one. It is NEVER derived from privileged content by deleting known-secret
 Same 7-key content shape. `visible_room_identity` = the observer's room (or `null` in
 transit); `visible_entity_identities` = ALL closure entities present in the state (sorted);
 `observable_state_projection` = `{authoritative_placements, authoritative_lifecycle,
-world_state_hash}` — the closure-visible placements and lifecycle verbatim plus the
-registered state id. The privileged artifact is the analysis-side ground truth for
-leak-differential testing and later matched-twin comparison. The three carrier field names
-are registered privileged names (§2), so their appearance in ANY actor content fails closed.
+closure_visible_state_commitment}` — the closure-visible placements and lifecycle verbatim
+plus the **closure-projected state commitment**:
+
+> `closure_visible_state_commitment` = the `spatial.world_state.v1` content id of the
+> canonically CONSTRUCTED WorldState over the closure-visible restriction — same
+> `world_line_id` and `logical_step`, placements + lifecycle filtered to
+> `closure["bodies"] ∪ closure["objects"]` in their S2A-canonical order. It is a DERIVED
+> commitment computed via content addressing only — the projected state is NOT registered
+> (render purity) and the commitment does NOT assert that a state with this id is on any
+> chain. For every canonical chain state (where `_closure_visible` is the identity) it
+> EQUALS the registered state id; for a state carrying admitted out-of-closure content it
+> commits to the closure-visible truth only, so an out-of-closure addition changes
+> NEITHER view's observation id — this is what makes invariant 5 hold for BOTH views,
+> which the registered full-state id could never satisfy (it content-addresses every
+> placement by construction).
+
+The privileged artifact is the analysis-side ground truth for leak-differential testing and
+later matched-twin comparison. The three carrier field names are registered privileged
+names (§2), so their appearance in ANY actor content fails closed.
 
 ## 6. Non-interference invariants (the heart of S2C; all adversarially tested)
 
@@ -150,7 +199,12 @@ are registered privileged names (§2), so their appearance in ANY actor content 
    a dedicated regression.
 5. **Closure-visibility**: an admitted same-world instance outside the authenticated
    closure changes NEITHER view's artifact id — in the observer's room, holding objects, or
-   in transit (every enumeration in §4/§5 ranges over the closure-visible restriction).
+   in transit (every enumeration in §4/§5 ranges over the closure-visible restriction, and
+   the privileged commitment is the §5 closure-projected commitment, never the registered
+   full-state id, which would re-import out-of-closure content into the privileged id).
+   MANDATORY regression: two admitted same-world states differing ONLY by an
+   out-of-closure entity must yield EXACTLY the closure-only state's actor id AND
+   privileged id (exact-id assertions for both views, not merely "unchanged").
 6. **Observer-boundedness (differential)**: for observers A and B in different rooms, a
    change visible only to B never changes A's actor artifact.
 7. **Determinism/replay**: same (state id, observer, closure, regime, versions) across
@@ -176,14 +230,16 @@ frozen METRICS-v1, run-record schemas, or `tools/council/`.
 | 5 | Other-room entity relocated | observer's actor id unchanged (invariant 6) |
 | 6 | World-state hash (or any chain hash) in actor content | refused via registered names + regression |
 | 7 | Out-of-closure observer | refused (§3.1) |
-| 8 | Out-of-closure same-world instance co-located with observer | BOTH view ids unchanged (invariant 5) |
-| 9 | Cross-world observer/state (or unregistered/unadmitted state) | refused (§3.2) |
-| 10 | Absent/removed observer, or observer without placement | refused (§3.3) |
-| 11 | Unknown `visibility_behavior` / unsupported `renderer_version` / unknown regime | refused fail-closed (§3.4) |
+| 8 | Out-of-closure same-world instance co-located with observer | BOTH view ids EXACTLY equal the closure-only ids (invariant 5 mandatory regression) |
+| 9 | Cross-world observer/state or unregistered state | refused (§3.2) |
+| 10 | Absent/removed observer, or observer without placement | refused (§3.4) |
+| 11 | Unsupported `renderer_version` / non-conforming `visibility_policy`, `audibility_policy`, or `observation_policy_version` (each mutated INDEPENDENTLY) / unknown `visibility_behavior` | refused fail-closed (§3.5); per-field regressions |
 | 12 | Render-time registration or mutation side effect | render purity differential (invariant 1) |
 | 13 | Registry insertion-order / host-order dependence | byte-identical ids across registries (invariant 7) |
 | 14 | Actor/privileged id aliasing | impossible by domain separation; asserted |
 | 15 | In-transit observer sees room content | refused by policy (§4); regression |
+| 16 | Registered but NON-ADMITTED state (structurally valid, registry-invalid) | refused by mandatory render-time `admit_world_state` (§3.3) |
+| 17 | Portal projection ambiguity / ordering drift | pinned actor content + observation ids for a directed AND a bidirectional closure, incl. attachment insertion-order permutations (§2 container sort rules) |
 
 Audit probes follow the owner's audit probe-reroute policy: committed regressions,
 malformed-fixture negative tests, invariant + replay differentials, abstract adversarial
