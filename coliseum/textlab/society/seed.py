@@ -36,6 +36,27 @@ def _pair_key(i, j):
     return f"{i}->{j}"
 
 
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_hex64(v):
+    return isinstance(v, str) and len(v) == 64 and \
+        all(c in "0123456789abcdef" for c in v)
+
+
+def _validate_private_facts(private_facts):
+    """Exactly {holder-agent: {fact-name: bool}} for known agents (empty ok)."""
+    if not isinstance(private_facts, dict):
+        raise ContentRecordError("private_facts must be a dict")
+    for holder, facts in private_facts.items():
+        if holder not in AGENTS or not isinstance(facts, dict):
+            raise ContentRecordError("private_facts keys must be agents -> fact dicts")
+        for name, val in facts.items():
+            if not isinstance(name, str) or not name or not isinstance(val, bool):
+                raise ContentRecordError("each private fact must be name -> bool")
+
+
 # ----------------------------------------------------------------- records
 class SocietyTickState(ContentRecord):
     __slots__ = ()
@@ -55,8 +76,15 @@ class SocietyTickState(ContentRecord):
         if any(not isinstance(v, int) or isinstance(v, bool)
                for v in trust_edges.values()):
             raise ContentRecordError("every trust edge value must be an int")
-        if not isinstance(private_facts, dict):
-            raise ContentRecordError("private_facts must be a dict")
+        if previous_society_tick_hash is not None and (
+                not isinstance(previous_society_tick_hash, str) or
+                len(previous_society_tick_hash) != 64 or
+                any(c not in "0123456789abcdef" for c in previous_society_tick_hash)):
+            raise ContentRecordError(
+                "previous_society_tick_hash must be 64 lowercase hex chars or null")
+        if tick_index >= TICKS:
+            raise ContentRecordError(f"tick_index must be < {TICKS}")
+        _validate_private_facts(private_facts)
         if not isinstance(enforcement_event_count, int) or \
                 isinstance(enforcement_event_count, bool) or enforcement_event_count < 0:
             raise ContentRecordError("enforcement_event_count must be a non-negative int")
@@ -128,6 +156,29 @@ class SocietyOutcomeReport(ContentRecord):
                 "society outcome report must have exactly the closed key set")
         if payload["claim_ceiling"] != CLAIM_CEILING:
             raise ContentRecordError("outcome claim_ceiling must be the fixed ceiling")
+        if payload["society_seed_version"] != SOCIETY_SEED_VERSION:
+            raise ContentRecordError("unsupported society_seed_version")
+        if payload["scenario"] != SCENARIO:
+            raise ContentRecordError("outcome scenario must be the society seed")
+        if not _is_int(payload["seed"]) or payload["seed"] < 0:
+            raise ContentRecordError("seed must be a non-negative int")
+        if payload["ticks"] != TICKS:
+            raise ContentRecordError(f"ticks must be {TICKS}")
+        edges = payload["final_trust_edges"]
+        if set(edges) != {_pair_key(i, j) for i, j in ORDERED_PAIRS} or \
+                any(not _is_int(v) for v in edges.values()):
+            raise ContentRecordError(
+                "final_trust_edges must be the six ordered pairs of ints")
+        for name in ("trust_update_count", "enforcement_event_count"):
+            if not _is_int(payload[name]) or payload[name] < 0:
+                raise ContentRecordError(f"{name} must be a non-negative int")
+        rule = payload["institutional_rule"]
+        if rule is not None and (not isinstance(rule, str) or not rule):
+            raise ContentRecordError("institutional_rule must be null or a string")
+        if not isinstance(payload["token_terminal_location"], str) or \
+                not payload["token_terminal_location"]:
+            raise ContentRecordError("token_terminal_location must be a non-empty string")
+        _validate_private_facts(payload["private_fact"])
         fs = payload["fork_divergence_summary"]
         if not isinstance(fs, dict) or set(fs) != {
                 "intervention_id", "matched_pair_id", "divergence_report_id",
@@ -135,9 +186,20 @@ class SocietyOutcomeReport(ContentRecord):
                 "per_agent_perception_divergence"}:
             raise ContentRecordError(
                 "fork_divergence_summary must carry the canonical fork material")
-        if set(payload["final_trust_edges"]) != {_pair_key(i, j)
-                                                 for i, j in ORDERED_PAIRS}:
-            raise ContentRecordError("final_trust_edges must be the six ordered pairs")
+        if not isinstance(fs["intervention_id"], str) or not fs["intervention_id"] or \
+                not _is_hex64(fs["matched_pair_id"]) or \
+                not _is_hex64(fs["divergence_report_id"]):
+            raise ContentRecordError("fork summary ids must be well-formed")
+        if not _is_int(fs["fork_position"]) or \
+                not _is_int(fs["first_divergent_coordinate"]) or \
+                fs["first_divergent_coordinate"] <= fs["fork_position"]:
+            raise ContentRecordError(
+                "fork summary divergence must be an int beyond the fork position")
+        pad = fs["per_agent_perception_divergence"]
+        if not isinstance(pad, dict) or set(pad) != set(AGENTS) or \
+                any(v is not None and not _is_int(v) for v in pad.values()):
+            raise ContentRecordError(
+                "per_agent_perception_divergence must map every agent to an int or null")
         super().__init__(dict(payload))
 
 

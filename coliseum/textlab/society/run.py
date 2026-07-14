@@ -125,6 +125,11 @@ def _outcome_payload(run_dir, derived, fork_summary):
     }
 
 
+def _report_bytes(outcome):
+    return (canonical_json({"id": outcome.id,
+                            "content": outcome.content}) + "\n").encode("utf-8")
+
+
 def execute_society_seed(seed=SEED, out_root=None):
     """Run the seed end to end: spatial run + the authenticated fork + society
     derivation + validated society evidence."""
@@ -134,26 +139,24 @@ def execute_society_seed(seed=SEED, out_root=None):
     run_dir = os.path.join(out_root, spatial["run_id"])
     assert_script_rule_clean(run_dir)
     derived = derive_society(run_dir)
-
     # the ONE authenticated counterfactual fork (integrated calibration machinery).
     treatment = execute_spatial_run(SCENARIO, seed, out_root=out_root,
                                     intervention=FORK_INTERVENTION,
                                     control_run_dir=run_dir)
     treatment_dir = os.path.join(out_root, treatment["run_id"])
     fork_summary = _fork_summary(run_dir, treatment_dir)
-
     society_bytes, manifest = _society_jsonl_bytes(
         run_dir, derived, spatial["manifest_id"])
+    outcome = SocietyOutcomeReport(_outcome_payload(run_dir, derived, fork_summary))
     with open(os.path.join(run_dir, "society.jsonl"), "wb") as fh:
         fh.write(society_bytes)
-    outcome = SocietyOutcomeReport(_outcome_payload(run_dir, derived, fork_summary))
     with open(os.path.join(run_dir, "society_report.json"), "wb") as fh:
-        fh.write((canonical_json({"id": outcome.id,
-                                  "content": outcome.content}) + "\n").encode("utf-8"))
+        fh.write(_report_bytes(outcome))
+    treatment_run_id = treatment["run_id"]
     binding = SocietySourceEvidenceBinding(
         run_id=spatial["run_id"], evidence_file_hashes=_eight_file_hashes(run_dir))
     return {"run_id": spatial["run_id"], "run_dir": run_dir, "spatial": spatial,
-            "treatment_run_id": treatment["run_id"], "treatment_dir": treatment_dir,
+            "treatment_run_id": treatment_run_id, "treatment_dir": treatment_dir,
             "society_run_manifest_id": manifest.id,
             "society_source_evidence_id": binding.id,
             "society_outcome_report_id": outcome.id,
@@ -168,29 +171,47 @@ def _eight_file_hashes(run_dir):
 
 
 def assert_society_evidence_canonical(run_dir):
-    """Refuse counterfeit society evidence: the persisted society.jsonl must
-    byte-equal the canonical re-derivation from the spatial evidence, and
-    society_report.json must byte-equal the canonical outcome record. Called at
-    every society-evidence consumer boundary (bindings are commitments, not
-    verification)."""
+    """The society-evidence consumer boundary (cheap; no fork re-run). Refuses
+    counterfeit society evidence by three independent checks:
+
+    (1) society.jsonl must byte-equal its canonical re-derivation from the
+        spatial evidence (manifest + tick chain + provenance-carrying trust
+        updates + enforcement trace);
+    (2) society_report.json must be a SELF-CONSISTENT closed SocietyOutcomeReport
+        — its persisted id must equal ``SocietyOutcomeReport(content).id`` (so the
+        id binds EVERY field, incl. the fork summary) and the record passes full
+        closed validation;
+    (3) every CONTROL-derivable report field (trust, enforcement, terminal,
+        scenario/seed/ticks/private-fact/claim/rule/update-count) must equal the
+        canonical derivation.
+
+    The AUTHENTICITY of the fork material (that those fork ids are the real fork
+    of this control) is established by the eight-file REPLAY GATE
+    (``replay_society_seed``), which re-executes the fork and byte-compares
+    society_report.json — a coordinated fork-summary forgery with a recomputed id
+    survives (2)+(3) but is refused there (regression-covered)."""
     run_json = _read(run_dir, "run.json")
     derived = derive_society(run_dir)
     society_bytes, _m = _society_jsonl_bytes(run_dir, derived, run_json["manifest_id"])
-    persisted = open(os.path.join(run_dir, "society.jsonl"), "rb").read()
-    if persisted != society_bytes:
+    if open(os.path.join(run_dir, "society.jsonl"), "rb").read() != society_bytes:
         raise ContentRecordError(
             "society.jsonl is not the canonical re-derivation — refused")
-    # the report's fork material is verified by the replay gate (which re-runs the
-    # fork); here we canonically re-check everything the report derives from the
-    # control evidence alone (trust, enforcement, terminal, claim ceiling).
-    report = json.loads(open(os.path.join(run_dir, "society_report.json"),
-                             encoding="utf-8").read())
-    c = report["content"]
-    if c["final_trust_edges"] != derived["trust"] or \
-            c["enforcement_event_count"] != len(derived["enforcement"]) or \
-            c["claim_ceiling"] != CLAIM_CEILING:
+    persisted = json.loads(open(os.path.join(run_dir, "society_report.json"),
+                                encoding="utf-8").read())
+    if set(persisted) != {"id", "content"}:
+        raise ContentRecordError("society_report.json must be {id, content}")
+    outcome = SocietyOutcomeReport(persisted["content"])       # full closed validation
+    if persisted["id"] != outcome.id:
         raise ContentRecordError(
-            "society_report.json is not consistent with the canonical derivation")
+            "society_report.json id is not self-consistent with its content — refused")
+    canonical_control = _outcome_payload(run_dir, derived,
+                                         persisted["content"]["fork_divergence_summary"])
+    for k, v in canonical_control.items():
+        if k == "fork_divergence_summary":
+            continue                                           # authenticated by replay
+        if persisted["content"][k] != v:
+            raise ContentRecordError(
+                f"society_report.json field {k!r} is not the canonical value — refused")
     return derived
 
 

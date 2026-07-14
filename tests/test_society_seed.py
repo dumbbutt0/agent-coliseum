@@ -184,14 +184,77 @@ def test_vector1_counterfeit_society_chain_refused(pack):
         assert_society_evidence_canonical(bad)
 
 
-def test_vector2_trust_is_perception_scoped(pack, tmp_path):
-    """An UNWITNESSED take moves no trust: mutating a HIDDEN placement (relocating
-    an out-of-view agent) leaves the derived trust matrix identical — trust
-    derives only from recorded actor-view rows."""
-    d = derive_society(pack["run_dir"])
-    # baseline trust changes ONLY via the (witnessed) give — no witnessed take.
-    assert all(u["kind"] == "give" for u in d["trust_updates"])
-    assert d["trust"] == PINS["outcome_trust"]
+def test_vector2_trust_is_perception_scoped(pack):
+    """Trust derives ONLY from recorded actor-view rows: varying a PRIVILEGED-only
+    fact (relocating the private gem, which never enters any actor view) in the
+    observations' privileged content leaves the derived trust matrix IDENTICAL.
+    (This is a neutral perception-scope variation, not an attack: it proves the
+    trust bookkeeping ignores privileged-only state.)"""
+    base = derive_society(pack["run_dir"])
+    variant = _copy(pack["root"], pack["run_dir"], "v2")
+    ids = pack["s"]["spatial"]["instance_ids"]
+    rooms = [ids[k] for k in ids if k.startswith("room_")]
+    obs_path = os.path.join(variant, "observations.jsonl")
+    rows = [json.loads(l) for l in open(obs_path)]
+    for r in rows:
+        proj = r["privileged_content"]["content"]["observable_state_projection"]
+        for p in proj["authoritative_placements"]:
+            if p["entity_id"] == ids["gem"] and p["location"]["tag"] == "inside":
+                # relocate the hidden gem onto a room floor (privileged-only; the
+                # gem is never in any actor view, so no actor row changes).
+                p["location"] = {"tag": "in_room", "room_instance_id": rooms[0]}
+    with open(obs_path, "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    variant_trust = derive_society(variant)["trust"]
+    assert variant_trust == base["trust"]                # unchanged by hidden state
+    assert all(u["kind"] == "give" for u in base["trust_updates"])  # no witnessed take
+
+
+def test_vector_build_time_institutional_refusal():
+    """The EXACT society build-time institutional refusal: a society script whose
+    intended move is only institutionally-blocked-resolvable (a token holder in
+    room A intending to move out) refuses during construction via the frozen
+    above-substrate filter — the auditor's specified regression."""
+    orig = scn._society_seed_intents
+
+    def blocked(fact=True):
+        d = dict(orig(fact))
+        # ada: take the token in A, then (holding it) intend to move out to B.
+        d["ada"] = [("move", "room_B"), ("move", "room_A"), ("take", "token"),
+                    ("move", "room_B"), ("move", "room_A"), ("move", "room_B"),
+                    ("move", "room_A"), ("move", "room_B")]
+        return d
+    scn._society_seed_intents = blocked
+    try:
+        with pytest.raises(ContentRecordError, match="not a legal candidate"):
+            build_scenario("society_seed_v1", SpatialSpecRegistry(), 42)
+    finally:
+        scn._society_seed_intents = orig
+
+
+def test_vector_coordinated_fork_forgery_refused_by_replay(pack):
+    """A coordinated fork-summary forgery with a recomputed self-consistent id
+    survives the cheap consumer boundary but is REFUSED by the eight-file replay
+    gate (which re-executes the fork and byte-compares society_report.json)."""
+    from coliseum.textlab.society.seed import SocietyOutcomeReport
+    bad_root = os.path.join(pack["root"], "vforge_root")
+    bad = _copy(bad_root, pack["run_dir"], os.path.basename(pack["run_dir"]))
+    rep = json.loads(open(os.path.join(bad, "society_report.json")).read())
+    forged = dict(rep["content"])
+    fs = dict(forged["fork_divergence_summary"])
+    fs["per_agent_perception_divergence"] = {"ada": 99, "bo": 99, "cy": 99}
+    forged["fork_divergence_summary"] = fs
+    outcome = SocietyOutcomeReport(forged)                   # recompute a valid id
+    with open(os.path.join(bad, "society_report.json"), "w") as fh:
+        fh.write(json.dumps({"id": outcome.id, "content": forged}) + "\n")
+    # the cheap boundary passes (self-consistent id + control fields match)...
+    assert_society_evidence_canonical(bad)
+    # ...but the replay gate re-runs the real fork and refuses the forged summary.
+    ok, detail = replay_society_seed(os.path.basename(pack["run_dir"]),
+                                     out_root=bad_root,
+                                     scratch_root=os.path.join(pack["root"], "vforge_s"))
+    assert not ok and "society_report.json" in detail
 
 
 def test_vector3_committed_blocked_move_refused(pack):
