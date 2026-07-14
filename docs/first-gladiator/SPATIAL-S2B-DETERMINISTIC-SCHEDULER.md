@@ -1,8 +1,12 @@
-# Spatial S2B — Deterministic scheduler (design source, rev 9)
+# Spatial S2B — Deterministic scheduler (design source, rev 10)
 
 **Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Adopts the
-owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 9 closes
-audit 001083: (a) `take_out` is enumerated over objects `Inside` accessible containers (not held), matching
+owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 10 closes
+audit 001089: the closure's attachment relation is **DIRECTED with normative orientation expansion** — a
+`bidirectional` portal entry materializes as TWO directed attachments (`{portal, A, B}` and `{portal, B, A}`),
+so both legal orientations are committed and enumerated and a legal reverse traversal can never be
+misclassified as `pass` (incl. repeated-room-spec cases; implementation regression coverage required for
+forward + reverse traversal). Rev 9 closes audit 001083: (a) `take_out` is enumerated over objects `Inside` accessible containers (not held), matching
 the S2A precondition so a legal `take_out` is never misclassified as `pass`; (b) the committed concrete
 effect at an `activate` must be an EXACT member of the closure-**and-attachment**-bounded candidate set (not
 merely S2A-valid), and the closure now commits the portal **attachment relation**, so a topology-illegal move
@@ -105,9 +109,14 @@ world-bound instance ids, which do not exist at spec time). `materialize_root(wo
   materialized instance ids);
 - emits a content-addressed **topology closure** artifact `{"rooms": [room_instance_id …] (sorted),
   "portals": [{"portal_instance_id","from_room_instance_id","to_room_instance_id"} …] (sorted, the
-  **attachment relation**), "objects": [object_instance_id …] (sorted), "bodies": [agent_body_id …]
-  (sorted)}` for this world-line. `topology_closure_hash = config_hash` of that artifact — it commits both
-  membership AND the portal attachments used by §4.
+  **DIRECTED attachment relation**), "objects": [object_instance_id …] (sorted), "bodies": [agent_body_id …]
+  (sorted)}` for this world-line. **Orientation expansion (normative):** each `initial_layout` portal entry
+  materializes as ONE directed attachment `{portal, from, to}` when its `PortalSpec.directionality ==
+  "directed"`, and as TWO canonically-sorted directed attachments `{portal, from, to}` AND `{portal, to,
+  from}` when `"bidirectional"` — so both legal orientations are committed and §4's move enumeration (entries
+  whose `from_room_instance_id` is the body's room) always contains every S2A-legal traversal, including the
+  reverse leg of a bidirectional portal and repeated-room-spec cases. `topology_closure_hash = config_hash`
+  of that artifact — it commits membership AND the directed attachments used by §4.
 
 `WorldLineGenesis.topology_closure_hash` binds this closure, and **`next()`/`verify_manifest`/`legal_action_kinds`
 resolve instances ONLY within the committed closure** (an instance outside it — a smuggled extra portal — is
