@@ -459,6 +459,51 @@ def _room_of_import():
     return _room_of
 
 
+def test_out_of_closure_in_transit_body_does_not_change_dispatch():
+    """An admitted same-world body OUTSIDE closure['bodies'] that is IN TRANSIT —
+    including with an arrival due — must not change the QUIESCENT/ADVANCE/Activation
+    dispatch classification or the activation's legal context (audit 001129)."""
+    from coliseum.textlab.spatial.instance import AgentBodyInstance
+    w = _world()
+    reg, closure = w["reg"], w["closure"]
+    bs_id = reg.get(closure["bodies"][0]).content["agent_body_spec_id"]
+    ghost = AgentBodyInstance(bs_id, w["wl"].id, "ghost_transit"); reg.register(ghost)
+    a_row = closure["portals"][0]
+    g = w["genesis"].content
+    # ghost mid-transit at step 0 with arrival due at step 1 (start 0 <= 0 < 1).
+    placements = list(g["placements"]) + [
+        {"entity_id": ghost.id, "entity_kind": "agent_body",
+         "location": {"tag": "in_transit",
+                      "portal_instance_id": a_row["portal_instance_id"],
+                      "origin_room_instance_id": a_row["from_room_instance_id"],
+                      "destination_room_instance_id": a_row["to_room_instance_id"],
+                      "start_step": 0, "arrival_step": 1}}]
+    lifecycle = list(g["entity_lifecycle"]) + [
+        {"entity_id": ghost.id, "entity_kind": "agent_body", "status": "present"}]
+    ghost_state = WorldState(w["wl"].id, 0, placements, lifecycle)
+    admit_world_state(ghost_state, reg); reg.register(ghost_state)   # S2A ADMITS it
+    run = _run(w, _two_step_script(w))
+    cursor = initial_scheduler_state(run, w["genesis"], reg)
+    clean_step = next_step(cursor, w["genesis"], closure, reg)
+    ghost_cursor = SchedulerState(
+        cursor.content["scheduler_run_id"], 0, None, w["wl"].id, ghost_state.id,
+        ghost_state.id, 0, 0, "initial")
+    reg.register(ghost_cursor)
+    ghost_step = next_step(ghost_cursor, ghost_state, closure, reg)
+    # SAME classification: Activation (not ADVANCE forced by the ghost's due arrival),
+    # same head body, same legal context.
+    assert isinstance(clean_step, Activation) and isinstance(ghost_step, Activation)
+    assert ghost_step.content["agent_body_id"] == clean_step.content["agent_body_id"]
+    assert ghost_step.content["legal_action_kinds"] == clean_step.content["legal_action_kinds"]
+    assert ghost_step.content["outcome_kind"] == clean_step.content["outcome_kind"]
+    # and with ONLY the ghost in transit (no eligible closure bodies... construct the
+    # complementary check): a state whose only transit entity is out-of-closure and
+    # whose closure bodies are all in-room still dispatches by rule 2, never rule 1.
+    from coliseum.textlab.spatial.scheduler import _arrival_due, _transit_bodies
+    assert _transit_bodies(ghost_state, closure) == []
+    assert _arrival_due(ghost_state, closure) is False
+
+
 # ------------------------------ malformed portal layout (audit 001123 finding 2)
 def _portal_layout_world(portal_specs, portal_entries, room_specs, room_entries):
     """Build + materialize_root a world with the given portal/room layout; return the

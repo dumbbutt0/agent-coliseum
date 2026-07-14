@@ -516,6 +516,24 @@ def _room_of(state, body_id):
     return None
 
 
+def _closure_visible(state, closure):
+    """The closure-visible restriction of an admitted state: placements + lifecycle
+    filtered to the authenticated closure's bodies/objects. IDENTITY for canonical
+    chain states (which contain exactly the closure members), so replay is
+    unchanged; for a state carrying admitted same-world content OUTSIDE the closure,
+    every scheduler predicate — including the S2A precondition trial — is evaluated
+    on this restriction, so out-of-closure content cannot alter dispatch or legality."""
+    members = set(closure["bodies"]) | set(closure["objects"])
+    placements = state.content["placements"]
+    lifecycle = state.content["entity_lifecycle"]
+    vp = [p for p in placements if p["entity_id"] in members]
+    vl = [e for e in lifecycle if e["entity_id"] in members]
+    if len(vp) == len(placements) and len(vl) == len(lifecycle):
+        return state                       # canonical fast path: nothing projected
+    return WorldState(state.content["world_line_id"], state.content["logical_step"],
+                      vp, vl)
+
+
 def _effect_applies(state, effect, registry):
     """True iff the concrete effect satisfies its S2A precondition + admission at
     ``state`` (the normative S2A binding: try the pure application)."""
@@ -539,6 +557,10 @@ def candidate_effects(body_id, state, closure, registry, kinds=_ACTOR_KINDS):
     object_set = set(closure["objects"])
     if body_id not in body_set:
         return out
+    # Evaluate ALL legality — enumeration AND the S2A precondition trial — on the
+    # closure-visible restriction (identity for canonical chain states), so an
+    # out-of-closure placement can never veto or admit a candidate.
+    state = _closure_visible(state, closure)
     room = _room_of(state, body_id)
     placements = state.content["placements"]
     held = [p["entity_id"] for p in placements
@@ -625,12 +647,21 @@ def legal_action_kinds(body_id, state, closure, registry) -> list:
 
 
 # ------------------------------------------------------------- the turn engine
-def _arrival_due(state):
-    for p in state.content["placements"]:
-        loc = p["location"]
-        if loc["tag"] == "in_transit" and loc["arrival_step"] == state.logical_step + 1:
-            return True
-    return False
+def _transit_bodies(state, closure):
+    """Present in-transit bodies that are members of the authenticated closure —
+    the ONLY transit domain dispatch may see. An admitted same-world body outside
+    closure['bodies'] must not change QUIESCENT/ADVANCE/Activation dispatch."""
+    bodies = set(closure["bodies"])
+    life = {e["entity_id"]: e["status"] for e in state.content["entity_lifecycle"]}
+    return [p for p in state.content["placements"]
+            if p["location"]["tag"] == "in_transit"
+            and p["entity_id"] in bodies
+            and life.get(p["entity_id"]) == "present"]
+
+
+def _arrival_due(state, closure):
+    return any(p["location"]["arrival_step"] == state.logical_step + 1
+               for p in _transit_bodies(state, closure))
 
 
 def initial_scheduler_state(scheduler_run, genesis_state, registry):
@@ -655,11 +686,10 @@ def next_step(scheduler_state, world_state, closure, registry):
     if c["current_world_state_hash"] != world_state.id:
         raise ContentRecordError("stale cursor: current_world_state_hash != state id")
     eligible_now = sorted_eligible(world_state, closure)
-    in_transit = any(p["location"]["tag"] == "in_transit"
-                     for p in world_state.content["placements"])
+    in_transit = bool(_transit_bodies(world_state, closure))
     if not eligible_now and not in_transit:                     # rule 0: quiescent
         return QUIESCENT
-    if _arrival_due(world_state):                               # rule 1: arrivals first
+    if _arrival_due(world_state, closure):                      # rule 1: arrivals first
         return ADVANCE
     round_start = registry.get(c["round_start_state_hash"]).content
     body_set = set(closure["bodies"])
@@ -697,7 +727,7 @@ def consume(scheduler_state, world_state, applied_transition, closure, registry)
             raise ContentRecordError("ADVANCE requires an advance_step transition")
         post = apply_transition(world_state, applied_transition, registry)
         registry.register(post)
-        arrival = _arrival_due(world_state)
+        arrival = _arrival_due(world_state, closure)
         if arrival:   # same round continues
             nxt = SchedulerState(c["scheduler_run_id"], pos, scheduler_state.id,
                                  c["world_line_id"], post.id,
