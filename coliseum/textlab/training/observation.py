@@ -18,6 +18,11 @@ VIEW_KINDS = ("actor", "privileged")
 #: registry as new privileged carriers are introduced.
 PRIVILEGED_FIELD_NAMES = frozenset({
     "facts", "hidden_effects", "state_after", "hidden_research_objective",
+    # spatial S2C privileged carriers (design §2, integrated 001154) — additive,
+    # backstop-strengthening only: these are the spatial privileged inner-schema
+    # keys and may never appear in ANY actor content.
+    "authoritative_placements", "authoritative_lifecycle",
+    "closure_visible_state_commitment",
 })
 
 

@@ -33,6 +33,10 @@ from coliseum.textlab.spatial.scheduler import (SCHEDULER_VERSION, Activation,
                                                 materialize_root, schedule,
                                                 validate_world_line_genesis,
                                                 verify_manifest)
+from coliseum.textlab.spatial.perception import (RENDERER_VERSION,
+                                                 assert_actor_content_schema,
+                                                 closure_visible_state_commitment,
+                                                 render_observation_pair)
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
@@ -45,4 +49,7 @@ __all__ = [
     "WorldState", "admit_world_state", "validate_location",
     "LocationTransition", "apply_transition", "replay",
     "ForkDecision", "ForkInitialization", "materialize_fork",
+    # S2C perception
+    "RENDERER_VERSION", "assert_actor_content_schema",
+    "closure_visible_state_commitment", "render_observation_pair",
 ]
