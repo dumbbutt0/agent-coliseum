@@ -1,4 +1,4 @@
-# Spatial Butterfly calibration MVP — scripted baseline (design source, rev 2)
+# Spatial Butterfly calibration MVP — scripted baseline (design source, rev 3)
 
 Status: council-routed design source for phase 3 of the owner's post-R3 sequence
 (2026-07-14): *"Run Butterfly MVP on those scenarios to establish a behavioral
@@ -58,10 +58,14 @@ post-fork behavior at a golden scenario's designated fork point:
   > agent_key, parent_world_line_id, parent_source_evidence_id, fork_position,
   > fork_state_hash, attempt_index}` — computed BEFORE the treatment run
   > executes, recorded in the treatment `run.json`, and re-verified by the
-  > matched-pair constructor. `attempt_index` is a deterministic non-negative
-  > integer (0 for the baseline; a re-attempt after a FailureRecord increments
-  > it). A realization therefore cannot be reused across seeds, scenarios,
-  > agents, parent states/positions, source evidence, or attempts.
+  > matched-pair constructor. **`attempt_index` is FIXED at `0` in this MVP**:
+  > the scripted baseline is deterministic, so re-attempt allocation does not
+  > arise; the field exists so the preimage shape is forward-stable, and any
+  > non-zero value REFUSES. Cross-attempt allocation, its runner/CLI/replay
+  > carriage, and FailureRecord lineage binding belong to the gated
+  > adaptive-trainer phase and are OUT OF SCOPE here — this MVP makes no
+  > cross-attempt claim. A realization therefore cannot be reused across
+  > seeds, scenarios, agents, parent states/positions, or source evidence.
 
 ## 3. The matched spatial pair (one new record)
 
@@ -139,28 +143,47 @@ witness, and fork-genesis validation REFUSES without one):
 - Interventions are preregistered in a CLOSED map `INTERVENTIONS = {name: spec}`
   (mirroring `SCENARIOS`; no DSL). Each spec names its scenario, seed, agent,
   and substituted intent tail.
-- `build_treatment_scenario(intervention_name, registry)` (new, in
-  `spatial/calibration.py`): rebuilds the control scenario; runs the canonical
-  `schedule()` to obtain the parent chain + finalized manifest; constructs
+- **Control-first orchestration (explicit)**: the baseline driver executes (or
+  is given) the CONTROL run first; its completed six-file run directory is the
+  treatment builder's input. `build_treatment_scenario(intervention_name,
+  registry, control_run_dir)` (new, in `spatial/calibration.py`): (1) VALIDATES
+  the control directory — re-hashes all six evidence files and re-derives the
+  `SpatialSourceEvidenceBinding` (this is how `parent_source_evidence_id`
+  exists BEFORE treatment execution), then rebuilds the control scenario and
+  re-runs the canonical `schedule()`, cross-checking the control `run.json`'s
+  run_id, manifest_id, world_line_id, fork_position, and fork_state_hash
+  against the freshly re-derived parent chain + manifest (ANY mismatch
+  refuses); (2) constructs
   `ForkDecision` -> forked `WorldLine` -> `materialize_fork` ->
   `materialize_fork_closure` -> fork `WorldLineGenesis`; assembles the WITNESS
   `{scheduler_state_id, scheduler_manifest_id, action_script}` from the parent
-  chain at `fork_position`; derives the child script from the substituted
+  chain at `fork_position`; (3) derives the child script from the substituted
   intents via the SAME `_derive_script` simulation over the child line; and
-  returns a scenario dict of the SAME shape `build_scenario` returns, plus
-  `{witness, execution_instance_id, treatment_bindings}`.
-- `execute_spatial_run(scenario, seed, out_root, intervention=None)` (additive
-  keyword): when `intervention` is given, the runner dispatches to
-  `build_treatment_scenario`, passes `witness=` through BOTH `schedule()` AND
-  `verify_manifest()` (their existing keyword), and records
-  `{intervention_id, execution_instance_id, treatment_bindings (parent run/
-  evidence/fork ids), witness ids}` in `run.json` (evidence schema bump to
-  0.3, additive). Control runs are byte-identical to today (`intervention`
-  absent -> identical code path and evidence).
-- CLI: `spatial-run --scenario X --seed N [--intervention NAME]`;
-  `spatial-replay` reconstructs a treatment by re-executing
-  `(scenario, seed, intervention)` from `run.json` — same six-file
-  byte-comparison; `spatial-inspect` unchanged.
+  (4) returns a scenario dict of the SAME shape `build_scenario` returns, plus
+  `{witness, execution_instance_id (derived from the validated parent binding),
+  treatment_bindings}`.
+- `execute_spatial_run(scenario, seed, out_root, intervention=None,
+  control_run_dir=None)` (additive keywords; `control_run_dir` REQUIRED
+  whenever `intervention` is given, refused otherwise): the runner dispatches
+  to `build_treatment_scenario`, passes `witness=` through BOTH `schedule()`
+  AND `verify_manifest()` (their existing keyword), and records
+  `{intervention_id, execution_instance_id, treatment_bindings (parent run id
+  + source-evidence id + manifest/line/fork ids), witness ids}` in `run.json`.
+  **Evidence versioning: a TREATMENT run stamps schema `0.3` (= `0.2` plus the
+  treatment fields); a CONTROL run remains schema `0.2` and is byte-identical
+  to today** (`intervention` absent -> identical code path and evidence, so
+  every existing golden/corpus pin stays byte-exact).
+- **Trajectory-projector extension (part of THIS implementation contract)**:
+  `spatial_trajectory_projection._SUPPORTED_RUN_SCHEMAS` becomes
+  `("0.2", "0.3")` with STRICT 0.3 validation (the treatment fields must be
+  present, well-formed, and consistent with the recorded execution instance;
+  a 0.3 run missing them refuses); 0.2 behavior is preserved unchanged for
+  byte-identical controls.
+- CLI: `spatial-run --scenario X --seed N [--intervention NAME
+  --control-run <run_id>]`; `spatial-replay` reconstructs a treatment by
+  re-executing `(scenario, seed, intervention)` against the SAME control run
+  directory named in the treatment `run.json` (validated again on replay) —
+  same six-file byte-comparison; `spatial-inspect` unchanged.
 
 Execute control + treatment through this one runner path, project both through
 the trajectory corpus, emit the pair + divergence report, and PIN the report
@@ -183,7 +206,7 @@ replayable, content-addressed measurement.
 
 ## 7. Compatibility
 
-Additive only: new `spatial/calibration.py` (INTERVENTIONS map + `build_treatment_scenario` + pair + report constructors + baseline driver) + the additive `execute_spatial_run(..., intervention=None)` keyword with witness propagation + evidence schema 0.3 (additive treatment fields; control evidence byte-unchanged) + the additive `--intervention` CLI flag + tests + docs. No change to the
+Additive only: new `spatial/calibration.py` (INTERVENTIONS map + control-validating `build_treatment_scenario` + pair + report constructors + control-first baseline driver) + the additive `execute_spatial_run(..., intervention=None, control_run_dir=None)` keywords with witness propagation + treatment-only evidence schema 0.3 (control runs REMAIN 0.2 byte-unchanged; every existing pin intact) + the version-dispatched trajectory-projector extension (0.2 + strictly-validated 0.3) + the additive `--intervention/--control-run` CLI flags + tests + docs. No change to the
 integrated Intervention/registry, the v1 or spatial TRS records, the golden
 pins, the S2B fork machinery, or any council schema. Version-dispatched; fail
 closed on unknown versions. The adaptive-trainer protocol, hidden suites, and
