@@ -65,7 +65,7 @@ def _world(directionality="bidirectional", entity_order=None):
 
 def _two_step_script(w):
     """A deterministic 2-activation script (head acts, then the other body)."""
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     c1 = candidate_effects(b1, w["genesis"], w["closure"], w["reg"])
     eff1 = (c1["take"] or c1["move"])[0]
     s1 = _apply_effect(w["genesis"], eff1, w["reg"], 1)
@@ -116,7 +116,7 @@ def test_replay_is_insertion_order_independent():
 def test_bidirectional_forward_and_reverse_with_repeated_room_spec():
     w = _world("bidirectional")
     assert len(w["closure"]["portals"]) == 2       # orientation expansion
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     # both bodies (in rooms sharing ONE room spec) have a move candidate.
     for b in (b1, b2):
         assert candidate_effects(b, w["genesis"], w["closure"], w["reg"])["move"]
@@ -127,7 +127,7 @@ def test_directed_portal_exposes_only_declared_orientation():
     assert len(w["closure"]["portals"]) == 1
     a_row = w["closure"]["portals"][0]
     # the body in the destination room has NO move candidate (no reverse row).
-    bodies = sorted_eligible(w["genesis"])
+    bodies = sorted_eligible(w["genesis"], w["closure"])
     from coliseum.textlab.spatial.scheduler import _room_of
     for b in bodies:
         room = _room_of(w["genesis"], b)
@@ -142,7 +142,7 @@ def test_wrong_attachment_move_refused():
     """A committed move whose (portal, from, to) is not a closure attachment row is
     refused at consume — even though S2A's spec-endpoint check would accept it."""
     w = _world("directed")
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     a_row = w["closure"]["portals"][0]
     from coliseum.textlab.spatial.scheduler import _room_of
     rev_body = next(b for b in (b1, b2)
@@ -228,7 +228,7 @@ def test_stale_and_crossworld_cursor_refused():
 def test_swapped_actor_refused():
     """A transition whose actor is not the activated head body is refused."""
     w = _world()
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     run = _run(w, [], stop=1)
     cursor = initial_scheduler_state(run, w["genesis"], w["reg"])
     act = next_step(cursor, w["genesis"], w["closure"], w["reg"])
@@ -260,7 +260,7 @@ def test_root_genesis_validation_and_forgery_refused():
     closure = validate_world_line_genesis(w["glx"], w["reg"])
     assert _closure_hash(closure) == w["glx"].content["topology_closure_hash"]
     # forged root genesis: a different admitted step-0 snapshot is NOT the genesis.
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     other = WorldState(w["wl"].id, 0,
                        [p for p in w["genesis"].content["placements"]
                         if p["entity_id"] != b2],
@@ -326,7 +326,7 @@ def test_schedule_rejects_non_genesis_state():
     w = _world()
     script = _two_step_script(w)
     run = _run(w, script)
-    b1, b2 = sorted_eligible(w["genesis"])
+    b1, b2 = sorted_eligible(w["genesis"], w["closure"])
     other = WorldState(w["wl"].id, 0,
                        [p for p in w["genesis"].content["placements"] if p["entity_id"] != b2],
                        [e for e in w["genesis"].content["entity_lifecycle"] if e["entity_id"] != b2])
@@ -398,3 +398,126 @@ def test_scheduler_state_position_prev_invariants():
     with pytest.raises(ContentRecordError):
         SchedulerState("r" * 64, 0, "p" * 64, w["wl"].id, "h" * 64, "h" * 64, 0, 0,
                        "initial")                     # pos 0 with prev
+
+
+# ------------------------------- closure-visibility (audit 001123 finding 1)
+def test_out_of_closure_instances_are_scheduler_invisible():
+    """A registered SAME-WORLD instance outside the authenticated topology closure
+    must not enter eligibility, legal actions, dispatch, or replay (rev-11
+    closure visibility). S2A admissibility does NOT confer scheduler visibility."""
+    from coliseum.textlab.spatial.instance import AgentBodyInstance, ObjectInstance
+    w = _world()
+    reg, closure = w["reg"], w["closure"]
+    a_room = _room_of_import()(w["genesis"], sorted_eligible(w["genesis"], closure)[0])
+    # extra same-world body + object, admissible at S2A but NOT in the closure.
+    bs_id = reg.get(closure["bodies"][0]).content["agent_body_spec_id"]
+    os_id = reg.get(closure["objects"][0]).content["object_spec_id"]
+    ghost_body = AgentBodyInstance(bs_id, w["wl"].id, "ghost_body"); reg.register(ghost_body)
+    ghost_obj = ObjectInstance(os_id, w["wl"].id, "ghost_obj"); reg.register(ghost_obj)
+    g = w["genesis"].content
+    placements = list(g["placements"]) + [
+        {"entity_id": ghost_body.id, "entity_kind": "agent_body",
+         "location": {"tag": "in_room", "room_instance_id": a_room}},
+        {"entity_id": ghost_obj.id, "entity_kind": "object",
+         "location": {"tag": "in_room", "room_instance_id": a_room}}]
+    lifecycle = list(g["entity_lifecycle"]) + [
+        {"entity_id": ghost_body.id, "entity_kind": "agent_body", "status": "present"},
+        {"entity_id": ghost_obj.id, "entity_kind": "object", "status": "present"}]
+    ghost_state = WorldState(w["wl"].id, 0, placements, lifecycle)
+    admit_world_state(ghost_state, reg); reg.register(ghost_state)   # S2A ADMITS it
+    # eligibility is unchanged: the ghost body never becomes eligible.
+    assert sorted_eligible(ghost_state, closure) == sorted_eligible(w["genesis"], closure)
+    ghost_ids = {ghost_body.id, ghost_obj.id}
+    for body in sorted_eligible(ghost_state, closure):
+        base = candidate_effects(body, w["genesis"], closure, reg)
+        with_ghost = candidate_effects(body, ghost_state, closure, reg)
+        assert legal_action_kinds(body, ghost_state, closure, reg) == \
+               legal_action_kinds(body, w["genesis"], closure, reg)
+        # no candidate effect references a ghost, and the effect universe is unchanged.
+        assert with_ghost == base
+        for effs in with_ghost.values():
+            for eff in effs:
+                assert not (set(eff.values()) & ghost_ids)
+    # dispatch/Activation from the ghost-bearing state ignores the ghost entirely.
+    run = _run(w, _two_step_script(w))
+    cursor = initial_scheduler_state(run, w["genesis"], reg)
+    # next_step over the ghost state yields the same activation identity as the clean
+    # state (same head body, kinds) — the ghost never becomes head or recipient.
+    clean_step = next_step(cursor, w["genesis"], closure, reg)
+    # rebuild a cursor anchored at the ghost state at the same logical position
+    ghost_cursor = SchedulerState(
+        cursor.content["scheduler_run_id"], 0, None, w["wl"].id, ghost_state.id,
+        ghost_state.id, 0, 0, "initial")
+    reg.register(ghost_cursor)
+    ghost_step = next_step(ghost_cursor, ghost_state, closure, reg)
+    assert ghost_step.content["agent_body_id"] == clean_step.content["agent_body_id"]
+    assert ghost_step.content["legal_action_kinds"] == clean_step.content["legal_action_kinds"]
+
+
+def _room_of_import():
+    from coliseum.textlab.spatial.scheduler import _room_of
+    return _room_of
+
+
+# ------------------------------ malformed portal layout (audit 001123 finding 2)
+def _portal_layout_world(portal_specs, portal_entries, room_specs, room_entries):
+    """Build + materialize_root a world with the given portal/room layout; return the
+    call so a test can assert success or a fail-closed refusal."""
+    reg = SpatialSpecRegistry()
+    pr = PerceptionRegime("r", "los", "adj", "o"); reg.register(pr)
+    bs = AgentBodySpec("humanoid", pr.id, None); reg.register(bs)
+    for rs in room_specs:
+        reg.register(rs)
+    for ps in portal_specs:
+        reg.register(ps)
+    layout = {"rooms": room_entries, "portals": portal_entries,
+              "entities": [{"entity_kind": "agent_body", "spec_id": bs.id,
+                            "logical_key": "alice",
+                            "location": {"tag": "in_room",
+                                         "room_logical_key": room_entries[0]["room_logical_key"]}}]}
+    world = SpatialWorldSpec([rs.id for rs in room_specs], [ps.id for ps in portal_specs],
+                             [], [bs.id], pr.id, layout)
+    reg.register(world)
+    wl = WorldLine.root(world.id, "init"); reg.register(wl)
+    return lambda: materialize_root(wl, reg)
+
+
+def test_materialize_root_rejects_duplicate_portal_logical_key_across_specs():
+    """Two portals sharing a logical key but bound to DIFFERENT specs derive distinct
+    instance ids; the duplicate must be refused by logical key, not by id."""
+    rs = RoomSpec("room", ["x"], None, "los", "adj", ["n"])
+    ps1 = PortalSpec(rs.id, rs.id, "bidirectional", 0, "open")
+    ps2 = PortalSpec(rs.id, rs.id, "bidirectional", 1, "open")   # different spec/id
+    assert ps1.id != ps2.id
+    rooms = [{"room_spec_id": rs.id, "room_logical_key": "A"},
+             {"room_spec_id": rs.id, "room_logical_key": "B"}]
+    portals = [{"portal_spec_id": ps1.id, "portal_logical_key": "AB",
+                "from_room_logical_key": "A", "to_room_logical_key": "B"},
+               {"portal_spec_id": ps2.id, "portal_logical_key": "AB",   # same logical key
+                "from_room_logical_key": "A", "to_room_logical_key": "B"}]
+    call = _portal_layout_world([ps1, ps2], portals, [rs], rooms)
+    with pytest.raises(ContentRecordError, match="duplicate portal logical key"):
+        call()
+
+
+def test_materialize_root_bidirectional_endpoint_multiplicity():
+    """A bidirectional portal with DISTINCT declared endpoint specs must be refused
+    when attached to two rooms of only ONE endpoint spec; the valid one-of-each case
+    (and the valid repeated-endpoint-spec case) must still pass."""
+    rx = RoomSpec("rx", ["x"], None, "los", "adj", ["n"])
+    ry = RoomSpec("ry", ["y"], None, "los", "adj", ["n"])
+    ps = PortalSpec(rx.id, ry.id, "bidirectional", 0, "open")     # distinct endpoints
+    # malformed: both attached rooms are rx (endpoint ry absent).
+    bad_rooms = [{"room_spec_id": rx.id, "room_logical_key": "A"},
+                 {"room_spec_id": rx.id, "room_logical_key": "B"}]
+    bad_portals = [{"portal_spec_id": ps.id, "portal_logical_key": "AB",
+                    "from_room_logical_key": "A", "to_room_logical_key": "B"}]
+    with pytest.raises(ContentRecordError, match="do not match its spec endpoints"):
+        _portal_layout_world([ps], bad_portals, [rx, ry], bad_rooms)()
+    # valid: one room of each declared endpoint spec (multiplicity 1/1) passes.
+    ok_rooms = [{"room_spec_id": rx.id, "room_logical_key": "A"},
+                {"room_spec_id": ry.id, "room_logical_key": "B"}]
+    ok_portals = [{"portal_spec_id": ps.id, "portal_logical_key": "AB",
+                   "from_room_logical_key": "A", "to_room_logical_key": "B"}]
+    genesis, closure = _portal_layout_world([ps], ok_portals, [rx, ry], ok_rooms)()
+    assert len(closure["portals"]) == 2       # bidirectional orientation expansion

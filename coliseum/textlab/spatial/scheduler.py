@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import Counter
 
 from coliseum.textlab._content_record import (ContentRecord, ContentRecordError,
                                               content_id)
@@ -279,14 +280,17 @@ def materialize_root(world_line, registry):
         rooms[key] = inst.id
 
     attachments = []
-    portal_ids = []
+    portal_keys = set()
     for p in layout["portals"]:
         key = p["portal_logical_key"]
+        # Fail closed on duplicate LOGICAL identity independently of portal spec/id:
+        # two portals sharing a logical key but bound to different specs derive
+        # distinct instance ids, so an id-based check would miss the collision.
+        if key in portal_keys:
+            raise ContentRecordError(f"duplicate portal logical key {key!r}")
+        portal_keys.add(key)
         inst = PortalInstance(p["portal_spec_id"], world_line_id, key)
         registry.register(inst)
-        if inst.id in portal_ids:
-            raise ContentRecordError(f"duplicate portal logical key {key!r}")
-        portal_ids.append(inst.id)
         frm = rooms.get(p["from_room_logical_key"])
         to = rooms.get(p["to_room_logical_key"])
         if frm is None or to is None:
@@ -301,7 +305,13 @@ def materialize_root(world_line, registry):
                                 "from_room_instance_id": frm,
                                 "to_room_instance_id": to})
         else:  # bidirectional -> TWO directed attachment rows (orientation expansion)
-            if {f_spec, t_spec} - {pspec["origin_room_spec_id"], pspec["destination_room_spec_id"]}:
+            # Multiplicity-aware endpoint equality: the attached room specs must be
+            # exactly the PortalSpec endpoint specs as a MULTISET. A subset test would
+            # accept two rooms of one endpoint spec when the endpoints are distinct;
+            # the multiset test preserves the valid repeated-endpoint-spec case
+            # (origin == destination => both attached rooms share that one spec).
+            if Counter((f_spec, t_spec)) != Counter(
+                    (pspec["origin_room_spec_id"], pspec["destination_room_spec_id"])):
                 raise ContentRecordError("portal attachment rooms do not match its spec endpoints")
             attachments.append({"portal_instance_id": inst.id,
                                 "from_room_instance_id": frm,
@@ -484,11 +494,16 @@ def D_as_decision(stored):
 
 
 # ------------------------------------------------------ eligibility + legality
-def sorted_eligible(state: "WorldState") -> list:
+def sorted_eligible(state: "WorldState", closure) -> list:
+    """Eligible = present, in-room agent bodies that are members of the authenticated
+    topology closure. An admitted same-world body OUTSIDE the closure is not
+    scheduler-visible and must never enter eligibility, dispatch, or replay."""
+    bodies = set(closure["bodies"])
     life = {e["entity_id"]: e for e in state.content["entity_lifecycle"]}
     out = []
     for p in state.content["placements"]:
-        if p["entity_kind"] == "agent_body" and p["location"]["tag"] == "in_room" \
+        if p["entity_kind"] == "agent_body" and p["entity_id"] in bodies \
+                and p["location"]["tag"] == "in_room" \
                 and life[p["entity_id"]]["status"] == "present":
             out.append(p["entity_id"])
     return sorted(out)
@@ -516,23 +531,34 @@ def candidate_effects(body_id, state, closure, registry, kinds=_ACTOR_KINDS):
     """The finite, closure-and-attachment-bounded candidate effect set (§4) for
     ``body_id`` at ``state``, per kind, filtered by the S2A precondition."""
     out = {k: [] for k in kinds}
+    # Every candidate domain is bounded to the authenticated closure: an instance
+    # outside closure['bodies']/closure['objects'] is not scheduler-visible and must
+    # not alter legal_action_kinds, Activation, or replay — even if it is an admissible
+    # same-world placement in the WorldState.
+    body_set = set(closure["bodies"])
+    object_set = set(closure["objects"])
+    if body_id not in body_set:
+        return out
     room = _room_of(state, body_id)
     placements = state.content["placements"]
     held = [p["entity_id"] for p in placements
             if p["location"]["tag"] == "held_by"
-            and p["location"]["agent_body_id"] == body_id]
+            and p["location"]["agent_body_id"] == body_id
+            and p["entity_id"] in object_set]
     co_objects = [p["entity_id"] for p in placements
                   if p["entity_kind"] == "object"
+                  and p["entity_id"] in object_set
                   and p["location"]["tag"] == "in_room"
                   and p["location"]["room_instance_id"] == room]
     co_bodies = [p["entity_id"] for p in placements
                  if p["entity_kind"] == "agent_body" and p["entity_id"] != body_id
+                 and p["entity_id"] in body_set
                  and p["location"]["tag"] == "in_room"
                  and p["location"]["room_instance_id"] == room]
     # accessible containers: objects with container_capability in the body's room or held.
     containers = []
     for p in placements:
-        if p["entity_kind"] != "object":
+        if p["entity_kind"] != "object" or p["entity_id"] not in object_set:
             continue
         loc = p["location"]
         accessible = (loc["tag"] == "in_room" and loc["room_instance_id"] == room) or \
@@ -583,7 +609,8 @@ def candidate_effects(body_id, state, closure, registry, kinds=_ACTOR_KINDS):
         for cont in containers:
             inside = [p["entity_id"] for p in placements
                       if p["location"]["tag"] == "inside"
-                      and p["location"]["object_instance_id"] == cont]
+                      and p["location"]["object_instance_id"] == cont
+                      and p["entity_id"] in object_set]
             for obj in inside:
                 eff = {"action": "take_out", "agent_body_id": body_id,
                        "object_instance_id": obj, "container_object_instance_id": cont}
@@ -627,7 +654,7 @@ def next_step(scheduler_state, world_state, closure, registry):
         raise ContentRecordError("cursor is cross-world")
     if c["current_world_state_hash"] != world_state.id:
         raise ContentRecordError("stale cursor: current_world_state_hash != state id")
-    eligible_now = sorted_eligible(world_state)
+    eligible_now = sorted_eligible(world_state, closure)
     in_transit = any(p["location"]["tag"] == "in_transit"
                      for p in world_state.content["placements"])
     if not eligible_now and not in_transit:                     # rule 0: quiescent
@@ -635,8 +662,10 @@ def next_step(scheduler_state, world_state, closure, registry):
     if _arrival_due(world_state):                               # rule 1: arrivals first
         return ADVANCE
     round_start = registry.get(c["round_start_state_hash"]).content
+    body_set = set(closure["bodies"])
     q = sorted(p["entity_id"] for p in round_start["placements"]
-               if p["entity_kind"] == "agent_body" and p["location"]["tag"] == "in_room")
+               if p["entity_kind"] == "agent_body" and p["entity_id"] in body_set
+               and p["location"]["tag"] == "in_room")
     # (round_start entities are present by admission; sorted_eligible over the stored
     # content — reconstruct minimal eligibility from the stored round-start snapshot.)
     life = {e["entity_id"]: e["status"] for e in round_start["entity_lifecycle"]}
