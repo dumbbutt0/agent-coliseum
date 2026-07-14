@@ -7,6 +7,7 @@ venv/
 # Run outputs — regenerable from logs (which are regenerable from seed). Folders kept via .gitkeep.
 logs/*.jsonl
 logs/runs/
+logs/spatial-runs/
 derived/*.json
 checkpoints/*
 wandb/
