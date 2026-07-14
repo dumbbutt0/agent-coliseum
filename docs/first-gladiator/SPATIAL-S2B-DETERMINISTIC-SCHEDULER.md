@@ -1,11 +1,14 @@
-# Spatial S2B — Deterministic scheduler (design source, rev 5)
+# Spatial S2B — Deterministic scheduler (design source, rev 6)
 
-**Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Rev 5
-adopts the owner's architecture decision (2026-07-13) closing audit 001059's two HIGH findings: (1) the
-scheduler is a **pure linear replay chain** finalized by a `SchedulerManifest` — no mutable/CAS "current
-pointer" enters the scientific identity substrate; (2) genesis is an **immutable authenticated
-`WorldLineGenesis` commitment** that the run manifest authorizes uniquely per world-line. A CAS-backed
-live-turn service may exist LATER only as an operational projection, never as replay evidence.
+**Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Adopts the
+owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 6 closes
+audit 001065's two HIGH findings within that architecture: (1) a run's canonical manifest is made **unique
+and terminal-bound** — the `SchedulerRun` commits the complete authorized action script (and an explicit
+stop, if any), so there is exactly ONE canonical `SchedulerManifest` per run and an arbitrary non-quiescent
+prefix / competing extension / branch is refused; (2) a **root** genesis is normatively **materialized**
+from the `SpatialWorldSpec.initial_layout` + the world-line, so each root world-line has exactly one
+re-derivable canonical genesis `WorldState` (no chosen-snapshot ambiguity); forks require **recursive**
+parent-genesis authentication. (Rev 5 adopted the linear-chain + WorldLineGenesis architecture.)
 
 ## 1. Purpose and boundary
 S2B is the **deterministic turn engine**: a pure function of the authoritative `WorldState` + a
@@ -21,7 +24,7 @@ perception (S2C), no labels/training/weights, no `tools/council` change. The can
 | record | literal `_domain` | preimage keys (id self-excluded) |
 | --- | --- | --- |
 | `WorldLineGenesis` | `spatial.world_line_genesis.v1` | `spatial_schema_version`, `world_line_id`, `initial_world_state_hash`, `root_or_fork`, `parent_world_line_id`(or `null`), `parent_state_hash`(or `null`), `fork_logical_step`(or `null`), `source_fork_decision_hash`(or `null`) |
-| `SchedulerRun` | `spatial.scheduler_run.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `world_line_genesis_id` |
+| `SchedulerRun` | `spatial.scheduler_run.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `world_line_genesis_id`, `action_script_commitment`, `explicit_stop_position`(or `null`) |
 | `SchedulerState` | `spatial.scheduler_state.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `scheduler_position`, `previous_scheduler_state_hash`(or `null`), `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `round_index`, `within_round_index`, `last_outcome`, `last_applied_transition_hash`(or `null`) |
 | `Activation` | `spatial.activation.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `scheduler_position`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `logical_step`, `round_index`, `within_round_index`, `agent_body_id`, `outcome_kind`, `legal_action_kinds` |
 | `SchedulerManifest` | `spatial.scheduler_manifest.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `genesis_scheduler_state_hash`, `terminal_scheduler_state_hash`, `chain_length`, `ordered_s2a_transition_hashes` |
@@ -38,20 +41,42 @@ perception (S2C), no labels/training/weights, no `tools/council` change. The can
 - `outcome_kind ∈ {activate, pass}`; `legal_action_kinds` = sorted legal S2A actor kinds for the body at
   `current_world_state_hash` (§4); empty ⇒ `pass`.
 
-### 2.1 WorldLineGenesis — the immutable authenticated genesis commitment
-`WorldLineGenesis` binds a world-line to its ONE authoritative initial `WorldState`. It does not
-redefine the integrated S1 `world_line_id` (immutable); it BINDS that id to a genesis and is authorized +
-made unique by the run manifest (§5). Validity (else refused):
+### 2.1 WorldLineGenesis — the immutable authenticated, UNIQUE genesis commitment
+`WorldLineGenesis` binds a world-line to its ONE authoritative, **re-derivable** initial `WorldState`. It
+does not redefine the integrated S1 `world_line_id` (immutable); it BINDS that id to a genesis that is
+uniquely determined by S1/S2A inputs (so two different snapshots cannot both be genesis). Validity (else
+refused):
 - `initial_world_state_hash` is a registered, `admit_world_state`-valid `WorldState` in `world_line_id`.
 - **root** (`root_or_fork == "root"`, fork fields `null`): `world_line_id` is a registered S1 root
-  `WorldLine`; `initial_world_state.logical_step == 0`.
+  `WorldLine`, and `initial_world_state_hash == materialize_root_initial_state(world_line, registry).id`
+  (§2.2) — the ONE canonical genesis deterministically materialized from the `SpatialWorldSpec.initial_layout`.
+  Any other admitted `logical_step==0` snapshot is NOT the genesis and is refused, so root genesis is unique.
 - **fork** (`root_or_fork == "fork"`): `parent_world_line_id`/`parent_state_hash`/`fork_logical_step`/
   `source_fork_decision_hash` re-verify the S2A **anti-transplant** — there is a registered `ForkDecision`
   `D` (`D.id == source_fork_decision_hash`) authorizing exactly `parent_state_hash` + `fork_logical_step` on
   `parent_world_line_id`, a registered `ForkInitialization` binding `child_world_line_id == world_line_id` +
-  `materialized_child_initial_state_hash == initial_world_state_hash`, and re-running `materialize_fork`'s
-  deterministic remap on `parent_state_hash` reproduces exactly `initial_world_state_hash` (a `ForkInitialization`
-  is NEVER self-authenticating; the parent line must itself have an authenticated `WorldLineGenesis`).
+  `materialized_child_initial_state_hash == initial_world_state_hash`, re-running `materialize_fork`'s
+  deterministic remap on `parent_state_hash` reproduces exactly `initial_world_state_hash`, **AND the parent
+  world-line itself has a registered valid `WorldLineGenesis` (recursively to an authenticated root)** — a
+  `ForkInitialization` is NEVER self-authenticating. Uniqueness: the fork genesis is fully determined by
+  (authenticated parent snapshot + authorized `ForkDecision`), so at most one valid `WorldLineGenesis` exists
+  per forked line.
+
+### 2.2 Deterministic root-genesis materialization
+For a scheduler-eligible ROOT world-line, `SpatialWorldSpec.initial_layout` is NORMATIVE (not opaque): a
+dict `{"entities": [ … ]}` whose entries are canonically sorted and each is
+`{"entity_kind": "agent_body"|"object", "spec_id": <S0 spec id>, "logical_key": <str>, "location": <layout
+location>}`, where a layout location references rooms/containers by *spec* coordinates
+(`{"tag":"in_room","room_spec_id":…,"room_logical_key":…}`, `held_by`/`inside` analogously) — never by
+world-bound instance ids (which do not exist at spec time). `materialize_root_initial_state(world_line,
+registry)` is a **pure deterministic** function: for each entity it derives the S1 instance
+`instance(spec_id, world_line_id, logical_key)` (registering it), resolves each layout location to the
+corresponding in-world instance id, and assembles the `WorldState` at `logical_step 0` with every entity
+`present`. Its id is therefore a deterministic function of the `SpatialWorldSpec` (which contains
+`initial_layout`) + `world_line_id` — one canonical genesis per root world-line. A malformed/ambiguous
+`initial_layout` (duplicate entity, unresolvable location, cross-spec reference) fails closed; such a world
+is simply not scheduler-eligible until it has a conforming layout. (S0's `SpatialWorldSpec` is unchanged;
+S2B additively requires this structure for scheduler eligibility.)
 
 ## 3. The deterministic turn model (queue anchored to the round-start state)
 Eligibility, the sorted-by-`agent_body_id` frozen round queue, and the numbered dispatch are as in rev 3/4
@@ -69,28 +94,39 @@ a non-quiescent state; `QUIESCENT` only when no eligible AND no in-transit body)
 `legal_action_kinds(body, world_state, registry)` = the sorted S2A actor kinds whose S2A precondition is
 satisfiable for `body` at the current state (DERIVED, bound into the `Activation` id). (Unchanged from rev 2.)
 
-## 5. Pure linear chain + finalized manifest (the canonical truth)
-There is **no mutable current pointer**. The authoritative artifact of a run is its finalized
-`SchedulerManifest`, and truth is established by **whole-chain re-derivation**, not by any single cursor:
+## 5. Pure linear chain + UNIQUE finalized manifest (the canonical truth)
+There is **no mutable current pointer**. The `SchedulerRun` **commits the whole run**: its
+`action_script_commitment` `= config_hash` of the ordered list of the run's authorized actor decisions — one
+per `activate` step, in order, each the canonical chosen S2A effect for that turn — and an optional
+`explicit_stop_position` (an authenticated early stop). Because the scheduler interleaves `pass`/`advance`
+deterministically, the ENTIRE chain is a pure function of `(genesis, action_script, explicit_stop)`; the
+`SchedulerRun` id therefore commits to exactly ONE canonical chain and manifest. Truth is established by
+**whole-chain re-derivation from that commitment**:
 
 - `genesis`: `SchedulerRun.world_line_genesis_id` names a valid `WorldLineGenesis` `G` (§2.1); the genesis
   `SchedulerState` is `initial_scheduler_state(SchedulerRun, G.initial_world_state)` at `scheduler_position 0`.
-- `consume(scheduler_state, world_state, applied_transition_or_None, registry)` is the ONLY constructor of
-  non-genesis cursors: it verifies the predecessor is canonical, dispatches §3, checks the supplied
-  `applied_transition` is the required S2A edge (or `None` for `pass`), and returns the successor with
-  `scheduler_position += 1`, `previous_scheduler_state_hash = predecessor.id`, same `scheduler_run_id`.
+- `consume(...)` is the ONLY constructor of non-genesis cursors (verifies the predecessor, dispatches §3,
+  checks the supplied S2A edge or `None` for `pass`, returns the `+1`-position successor). At each `activate`
+  it MUST apply the next committed action from the script, in order — no other action is canonical there.
 - **Finalization + verification:** a `SchedulerManifest` commits `genesis_scheduler_state_hash`,
-  `terminal_scheduler_state_hash`, `chain_length = N+1`, and `ordered_s2a_transition_hashes`. `verify_manifest`
-  reconstructs the chain `S0..S_N` and fails closed unless: `S0` is the genesis; for each `i`, `S_{i+1}` is
-  the EXACT `consume()` successor of `S_i` (correct `scheduler_position = i+1`, `previous_scheduler_state_hash
-  == S_i.id`, dispatched `last_outcome`, and — for `activate`/`advance_*` — `last_applied_transition_hash`
-  equals `ordered_s2a_transition_hashes[k]` applied `S_i.current → S_{i+1}.current`); `S_N ==
-  terminal_scheduler_state_hash`. It **rejects gaps** (non-contiguous positions), **duplicates** (a repeated
-  position/state), **backlinks** (a `previous` that is not `S_{i}`), **transition mismatches**, and
-  **multiple successors** inside the canonical chain (each `S_i` has exactly one recorded successor). Because
-  truth is the linear manifest, **reusing an old cursor** merely produces a candidate BRANCH that cannot
-  extend the finalized run — persisting a branch requires a distinct authorized `WorldLineGenesis`/
-  `SchedulerRun` (an owner-authorized fork), never a splice into the committed chain.
+  `terminal_scheduler_state_hash`, `chain_length = N+1`, and `ordered_s2a_transition_hashes`.
+  `verify_manifest` reconstructs `S0..S_N` from the genesis by re-running the scheduler over the
+  `SchedulerRun`'s committed `action_script`, and fails closed unless: `S0` is the genesis; each `S_{i+1}` is
+  the EXACT `consume()` successor of `S_i` (contiguous `scheduler_position`, `previous == S_i.id`, dispatched
+  `last_outcome`, and for `activate` the applied edge is the next committed script action; for `advance_*`
+  the required `advance_step`); the `ordered_s2a_transition_hashes` equal the applied edges in order; and —
+  the **terminal rule** — `S_N` is a **legitimate stop**: either `next(S_N) == QUIESCENT` (the run drove to
+  quiescence and the script is exactly exhausted) OR `S_N.scheduler_position == explicit_stop_position`.
+  A **non-quiescent prefix** (a `chain_length=1` genesis-only manifest, or any early cut that is neither
+  QUIESCENT nor the committed stop) is refused; a **competing extension or alternative branch** for the same
+  `SchedulerRun` cannot exist because the run's committed script + terminal rule determine the one canonical
+  manifest. It also rejects gaps, duplicates, backlinks, transition mismatches, and multiple successors.
+  **Cross-manifest uniqueness:** the canonical manifest is a pure function of the `SchedulerRun` id, so any
+  two valid finalized manifests for one run are byte-identical; a genuinely different action script is a
+  DIFFERENT `SchedulerRun` (different id), and a different genesis is a different `WorldLineGenesis` — an
+  alternative branch must derive its own authorized `SchedulerRun` before a genesis cursor exists, never
+  splice into a committed run. Per-world-line, the run manifest references exactly one `WorldLineGenesis`
+  (§2.1 makes root/fork genesis unique), so there is one authenticated genesis per line within a run's scope.
 - Every cursor still fails closed individually on stale/cross-world (`current_world_state_hash`/`world_line`
   mismatch), a foreign `scheduler_run_id`, a non-genesis `initial` cursor, an ineligible/non-head body, an
   activation onto a due-arrival step, or an unsupported `scheduler_version`; but forgery resistance is
@@ -121,15 +157,18 @@ that is a separate S1-touching decision). No wall-clock/PID/UUID/object-identity
 **Identity vectors (byte-pinned):** a root + a fork `WorldLineGenesis`; a `SchedulerRun`; a genesis /
 post-activate / post-pass / post-arrival / new-round `SchedulerState` (with `scheduler_position`/`previous`);
 an `activate` + `pass` `Activation`; a `SchedulerManifest`; a `RandomStream`; a `RandomDraw`.
-**Adversarial (each fails closed):** an unauthenticated genesis (a root `WorldLineGenesis` at
-`logical_step!=0`; a fork whose parent line lacks a `WorldLineGenesis`, or whose materialized child hash is
-not the deterministic anti-transplant remap of the stated parent snapshot; a second `WorldLineGenesis` /
-`SchedulerRun` claiming an existing line but committed as the run's unique genesis — refused by the manifest
-uniqueness rule); a **manifest with a gap / duplicate / backlink / transition mismatch / branch** (two
-successors of one `S_i`) in the reconstructed `0..N` chain; a **reused/old cursor** spliced onto a finalized
-run (rejected — it is a non-extending branch); a stale/cross-world cursor; a cross-run `scheduler_run_id`
-splice; a non-genesis `initial` cursor; a duplicate/skipped/ineligible/due-arrival activation; a `RandomDraw`
-value `!= int(digest[:16],16)`; unsupported `scheduler_version`. **Determinism:** identical inputs → identical
+**Adversarial (each fails closed):** an unauthenticated/non-unique genesis (a root `WorldLineGenesis` whose
+`initial_world_state_hash != materialize_root_initial_state(...)` — incl. a second admitted `logical_step==0`
+snapshot; a fork whose parent line lacks a `WorldLineGenesis` (recursively), or whose materialized child hash
+is not the deterministic anti-transplant remap of the stated parent snapshot; a malformed `initial_layout`);
+a **truncated / prefix manifest** (a `chain_length=1` genesis-only or any early cut whose terminal is neither
+`QUIESCENT` nor `explicit_stop_position`); a **competing extension or alternative branch** finalized for the
+same `SchedulerRun` (impossible — the committed action_script + terminal rule fix one canonical manifest); a
+manifest whose `ordered_s2a_transition_hashes` diverge from the committed `action_script`; a **manifest with a
+gap / duplicate / backlink / transition mismatch / branch** in the reconstructed `0..N` chain; a **reused/old
+cursor** spliced onto a finalized run; a stale/cross-world cursor; a cross-run `scheduler_run_id` splice; a
+non-genesis `initial` cursor; a duplicate/skipped/ineligible/due-arrival activation; a `RandomDraw` value
+`!= int(digest[:16],16)`; unsupported `scheduler_version`. **Determinism:** identical inputs → identical
 manifest across two independent runs and across shuffled registry/dict orderings. **Liveness:** every
 non-quiescent admitted state yields a step (activate/pass/advance); a fully quiescent state yields `QUIESCENT`.
 
