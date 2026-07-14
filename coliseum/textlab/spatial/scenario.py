@@ -39,6 +39,13 @@ def _select_effect(cands, intent, ids):
             return eff
         if kind in ("take", "drop") and eff["object_instance_id"] == ids[intent[1]]:
             return eff
+        if kind == "give" and eff["object_instance_id"] == ids[intent[1]] \
+                and eff["recipient_agent_body_id"] == ids[intent[2]]:
+            return eff
+        if kind in ("put_inside", "take_out") \
+                and eff["object_instance_id"] == ids[intent[1]] \
+                and eff["container_object_instance_id"] == ids[intent[2]]:
+            return eff
     raise ContentRecordError(
         f"scenario intent {intent!r} is not a legal candidate at this state "
         "(state-dependent legality refused it)")
@@ -186,8 +193,197 @@ def _two_agent_private_object_v1(registry, seed):
     }
 
 
+# ---------------------------------------------------------------- golden suite
+# (owner directive 2026-07-14: a handful of experiments stressing every major
+# subsystem, becoming permanent regression tests. Quality over quantity; no DSL.)
+
+def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_rows,
+              intents, fork_after_intent, private_object_key=None):
+    """Shared golden-suite assembler. One room spec; template object specs
+    ('token' = portable exclusive takeable, 'box' = immobile container); every
+    identity auto-derived; the script derived by dispatch simulation."""
+    pr = PerceptionRegime("0.1", "room_v0", "off_v0", "1"); registry.register(pr)
+    rs = RoomSpec("plain-room", [name], None, "los", "adj", ["n"])
+    registry.register(rs)
+    portal_specs = {}
+    portal_layout = []
+    for key, frm, to, direction in portal_rows:
+        ps = PortalSpec(rs.id, rs.id, direction, 0, "open")
+        if ps.id not in portal_specs:
+            registry.register(ps)
+            portal_specs[ps.id] = ps
+        portal_layout.append({"portal_spec_id": ps.id, "portal_logical_key": key,
+                              "from_room_logical_key": frm,
+                              "to_room_logical_key": to})
+    templates = {
+        "token": ObjectSpec("token", True, False, "visible", True, False, [], ["take"]),
+        "box": ObjectSpec("box", False, True, "visible", False, False, [], []),
+    }
+    used = {}
+    entities = []
+    for key, kind, location in object_rows:
+        spec = templates[kind]
+        if spec.id not in used:
+            registry.register(spec)
+            used[spec.id] = spec
+        entities.append({"entity_kind": "object", "spec_id": spec.id,
+                         "logical_key": key, "location": location})
+    bs = AgentBodySpec("humanoid", pr.id, None); registry.register(bs)
+    for key, room_key in body_rows:
+        entities.insert(0, {"entity_kind": "agent_body", "spec_id": bs.id,
+                            "logical_key": key,
+                            "location": {"tag": "in_room",
+                                         "room_logical_key": room_key}})
+    layout = {"rooms": [{"room_spec_id": rs.id, "room_logical_key": k}
+                        for k in room_keys],
+              "portals": portal_layout,
+              "entities": entities}
+    world = SpatialWorldSpec([rs.id], sorted(portal_specs), sorted(used), [bs.id],
+                             pr.id, layout)
+    registry.register(world)
+    wl = WorldLine.root(world.id, name); registry.register(wl)
+    genesis, closure = materialize_root(wl, registry)
+    glx = WorldLineGenesis(wl.id, genesis.id, _closure_hash(closure), "root")
+    registry.register(glx)
+    ids = {}
+    for iid in closure["bodies"] + closure["objects"]:
+        ids[registry.get(iid).content["deterministic_logical_instance_key"]] = iid
+    for iid in closure["rooms"]:
+        ids["room_" + registry.get(iid).content["deterministic_logical_instance_key"]] = iid
+    key_of = {ids[k]: k for k, _ in body_rows}
+    script, stop, fork_position, fork_state_hash = _derive_script(
+        genesis, closure, registry, wl.id, glx, intents, key_of, ids,
+        fork_after_intent=fork_after_intent)
+    run = SchedulerRun(wl.id, glx.id, action_script_commitment(script),
+                       explicit_stop_position=stop)
+    registry.register(run)
+    stream = RandomStream(wl.id, 0, f"scenario-seed-{seed}")
+    registry.register(stream)
+    return {
+        "scenario": name,
+        "scenario_schema_version": SPATIAL_SCENARIO_SCHEMA_VERSION,
+        "seed": seed,
+        "world_line": wl, "genesis": genesis, "closure": closure,
+        "world_line_genesis": glx, "run": run, "script": script,
+        "explicit_stop_position": stop,
+        "fork_position": fork_position, "fork_state_hash": fork_state_hash,
+        "random_stream": stream,
+        "observers": [k for k, _ in body_rows],
+        "private_object_key": private_object_key,
+        "ids": ids,
+    }
+
+
+def _nav_exploration_v1(registry, seed):
+    """Navigation + exploration: a 4-room chain A-B-C-D; one agent walks out to
+    the far end and back (routes over multiple portals; REVISITING B, C, and the
+    home room A — object permanence of place across a round trip)."""
+    return _assemble(
+        registry, seed, "spatial_nav_exploration_v1",
+        room_keys=("A", "B", "C", "D"),
+        portal_rows=[("AB", "A", "B", "bidirectional"),
+                     ("BC", "B", "C", "bidirectional"),
+                     ("CD", "C", "D", "bidirectional")],
+        object_rows=[],
+        body_rows=[("alice", "A")],
+        intents={"alice": [("move", "room_B"), ("move", "room_C"),
+                           ("move", "room_D"), ("move", "room_C"),
+                           ("move", "room_B"), ("move", "room_A")]},
+        fork_after_intent=3)                     # fork point: the far end
+
+
+def _object_pipeline_v1(registry, seed):
+    """Object interaction: every v0 action kind in one deterministic pipeline —
+    take, GIVE (a direct trade), put_inside, take_out, drop x2, moves — with
+    exclusive possession preserved throughout."""
+    return _assemble(
+        registry, seed, "spatial_object_pipeline_v1",
+        room_keys=("A", "B"),
+        portal_rows=[("AB", "A", "B", "bidirectional")],
+        object_rows=[("token1", "token", {"tag": "in_room", "room_logical_key": "A"}),
+                     ("token2", "token", {"tag": "in_room", "room_logical_key": "A"}),
+                     ("box", "box", {"tag": "in_room", "room_logical_key": "A"})],
+        body_rows=[("alice", "A"), ("bob", "A")],
+        intents={
+            "alice": [("take", "token1"), ("give", "token1", "bob"),
+                      ("move", "room_B"), ("move", "room_A"), ("take", "token1")],
+            "bob": [("take", "token2"), ("put_inside", "token2", "box"),
+                    ("take_out", "token2", "box"), ("drop", "token1"),
+                    ("drop", "token2")],
+        },
+        fork_after_intent=4)                     # fork point: mid-pipeline
+
+
+def _info_asymmetry_v1(registry, seed):
+    """Information asymmetry: alice carries a container holding a private gem on
+    a tour past bob (3-room chain); fog-of-war (room scoping) hides distant
+    agents; the PRIVATE INVENTORY (container contents) is invisible in every
+    actor view at every position — including whenever bob and alice are
+    co-located and bob can see alice AND the box; the privileged observer sees
+    everything throughout."""
+    return _assemble(
+        registry, seed, "spatial_info_asymmetry_v1",
+        room_keys=("A", "B", "C"),
+        portal_rows=[("AB", "A", "B", "bidirectional"),
+                     ("BC", "B", "C", "bidirectional")],
+        object_rows=[("box", "box", {"tag": "held_by", "holder_logical_key": "alice"}),
+                     ("gem", "token", {"tag": "inside", "container_logical_key": "box"})],
+        body_rows=[("alice", "A"), ("bob", "C")],
+        intents={
+            "alice": [("move", "room_B"), ("move", "room_C"),
+                      ("move", "room_B"), ("move", "room_A")],
+            "bob": [("move", "room_B"), ("move", "room_C"),
+                    ("move", "room_B"), ("move", "room_C")],
+        },
+        fork_after_intent=2,
+        private_object_key="gem")
+
+
+def _scarce_resource_v1(registry, seed):
+    """Coordination + conflict over ONE scarce exclusive resource: alice wins the
+    take deterministically (round order); bob yields, then possession transfers
+    by a drop/take floor relay — conflict first, cooperation after, deterministic
+    settlement throughout."""
+    return _assemble(
+        registry, seed, "spatial_scarce_resource_v1",
+        room_keys=("A", "B"),
+        portal_rows=[("AB", "A", "B", "bidirectional")],
+        object_rows=[("token", "token", {"tag": "in_room", "room_logical_key": "A"})],
+        body_rows=[("alice", "A"), ("bob", "A")],
+        intents={
+            "alice": [("take", "token"), ("drop", "token"), ("move", "room_B")],
+            "bob": [("move", "room_B"), ("move", "room_A"), ("take", "token")],
+        },
+        fork_after_intent=1)                     # fork point: contention settled
+
+
+_LONG_MARCH_LEGS = 120                           # 120 moves -> a ~240+ state chain
+
+
+def _long_march_v1(registry, seed):
+    """Long trajectory: one agent ping-pongs A<->B for 120 legs — dozens of
+    rounds exposing scheduler/state-management drift that short chains hide;
+    the whole chain must verify + replay byte-identically."""
+    legs = [("move", "room_B") if i % 2 == 0 else ("move", "room_A")
+            for i in range(_LONG_MARCH_LEGS)]
+    return _assemble(
+        registry, seed, "spatial_long_march_v1",
+        room_keys=("A", "B"),
+        portal_rows=[("AB", "A", "B", "bidirectional")],
+        object_rows=[],
+        body_rows=[("alice", "A")],
+        intents={"alice": legs},
+        fork_after_intent=_LONG_MARCH_LEGS // 2)
+
+
 SCENARIOS = {
     "spatial_two_agent_private_object_v1": _two_agent_private_object_v1,
+    # the golden suite (owner directive 2026-07-14)
+    "spatial_nav_exploration_v1": _nav_exploration_v1,
+    "spatial_object_pipeline_v1": _object_pipeline_v1,
+    "spatial_info_asymmetry_v1": _info_asymmetry_v1,
+    "spatial_scarce_resource_v1": _scarce_resource_v1,
+    "spatial_long_march_v1": _long_march_v1,
 }
 
 
