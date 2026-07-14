@@ -1,4 +1,4 @@
-# Society live-persona pilot — preregistration + design source (rev 5)
+# Society live-persona pilot — preregistration + design source (rev 6)
 
 Status: council-routed design source under the **OWNER live-persona pilot
 authorization (2026-07-14)** — the first governed live-model experiment on the
@@ -206,43 +206,92 @@ byte-identical replay from the captured completion.
 Preregistered failure taxonomy (each deterministic, coded, and reported — never
 silently retried, never relabeled as success):
 
-The CANONICAL FALLBACK is fixed: if the integrated society dispatch offers a
-legal `pass` at the current head, the activation takes `pass` (a no-op that
-advances the schedule); if `pass` is NOT available (the head must act), the run
-TERMINATES at that scheduler position with the coded termination below. Every
-code has a TOTAL action-or-termination resolution:
+**No `pass` fallback exists for a failed live decision (substrate fact).** A live
+decision is requested ONLY on a scheduler `activate` outcome with a NON-EMPTY menu
+(§3, §4); the integrated scheduler emits `outcome_kind = pass` EXCLUSIVELY when the
+head has no legal action — in which case NO model decision is requested — and
+`pass` is not one of the six `candidate_effects` action kinds. Synthesizing a
+selectable `pass` would EXPAND the frozen six-kind action vocabulary, which is an
+owner-authorized substrate change and OUT OF SCOPE for this bounded pilot.
+Therefore **every coded failure on a requested live decision TERMINATES the run at
+that scheduler position** under the unchanged substrate — there is no fallback
+no-op — and the captures up to that position are preserved as an `incomplete` pack
+(§7). (A scheduler-emitted `pass` at a no-legal-action head is a different thing:
+it triggers NO model request; a regression asserts this.)
 
-Every code's trigger is re-derived on replay from the ONE persona.jsonl row that
-the actor writes for that requested decision (§6): each row carries a closed
-`call_outcome` marker plus deterministic nullable response fields, so no model
-call and no wall-clock timing is needed to reclassify.
+Classification is a TOTAL, MUTUALLY-EXCLUSIVE function of the ONE persona.jsonl row
+(§6), evaluated in a FIXED PRECEDENCE so identical captured bytes always yield the
+same code, terminal coding, and per-code count — with no model call and no
+re-timing:
 
-| code | trigger (re-derived from the decision's persona.jsonl row) | action | terminal coding (when pass unavailable) |
+**Step 0 — partition by `call_outcome`:** `deadline_exceeded` → code
+`deadline_exceeded`; `backend_exception` → code `backend_failure_midrun`;
+`responded` → step 1.
+
+**Step 1 — `responded` rows, fixed precedence (FIRST match wins):**
+1. **Valid selection present** — run `society_numeric_menu.v1` on `raw_completion`;
+   if it yields an in-range `k` (`1<=k<=N`) → outcome `ok`, committed action =
+   menu[`k`]. Truncation is IRRELEVANT here: the parser reads only the FIRST digit
+   run, so a `completion_reason=="length"`/`eval_count>=256` tail AFTER that digit
+   cannot change the selection (a truncated tail never corrupts an already-emitted
+   choice).
+2. **Else truncated** — no valid `k` AND (`completion_reason=="length"` OR
+   `eval_count>=256`) → code `budget_exhausted`. Rationale: truncation is the
+   PRIMARY cause of the missing/ill-formed choice, so it takes precedence over the
+   parser's failure codes.
+3. **Else parser failure** — no digit run → code `parse_failure`; a digit run
+   outside `1..N` → code `illegal_selection`.
+
+Every `responded` row thus maps to EXACTLY ONE of `{ok, budget_exhausted,
+parse_failure, illegal_selection}`; every non-responded row to exactly one of
+`{deadline_exceeded, backend_failure_midrun}`. The terminal coding is reached
+DIRECTLY (no pass branch):
+
+| call_outcome | precedence step | code | terminal coding |
 |---|---|---|---|
-| `parse_failure` | `call_outcome == responded` AND no menu number extractable from `raw_completion` | canonical fallback | `parse_failure_termination` |
-| `illegal_selection` | `call_outcome == responded` AND a well-formed number outside `1..N` | canonical fallback | `invalid_action_termination` |
-| `budget_exhausted` | `call_outcome == responded` AND (`completion_reason == "length"` OR `eval_count >= 256`) — token/reason fields are IDENTITY, so this re-derives on replay | canonical fallback | `externally_imposed_truncation` |
-| `deadline_exceeded` | `call_outcome == deadline_exceeded` (the actor sets this marker when the 120000 ms per-call deadline is hit; the marker is IDENTITY, the latency duration is not, so replay reclassifies without re-timing) | canonical fallback | `externally_imposed_truncation` |
-| `backend_unavailable` | endpoint/model/DIGEST verification failure BEFORE the first live decision | hard abort — no run identity or partial pack minted (no evidence) | — |
-| `backend_failure_midrun` | `call_outcome == backend_exception` (an HTTP/backend exception on a call AFTER run start) | canonical fallback | `infrastructure_failure` |
+| responded | 1: parser yields in-range `k` | `ok` (committed action) | — (advances the schedule) |
+| responded | 2: no valid `k` AND (`completion_reason=="length"` OR `eval_count>=256`) | `budget_exhausted` | `externally_imposed_truncation` |
+| responded | 3a: no valid `k`, not truncated, no digit run | `parse_failure` | `parse_failure_termination` |
+| responded | 3b: no valid `k`, not truncated, digit run outside `1..N` | `illegal_selection` | `invalid_action_termination` |
+| deadline_exceeded | step 0 | `deadline_exceeded` | `externally_imposed_truncation` |
+| backend_exception | step 0 | `backend_failure_midrun` | `infrastructure_failure` |
+| (pre-run) | digest/endpoint verification failure before the first decision | `backend_unavailable` | hard abort — no run identity, no row, no evidence |
 
-Every model-call outcome is thus totally resolved AND recorded as exactly one
-persona.jsonl row (§6). `backend_unavailable` is the ONLY pre-run abort (no
-evidence, no row). Every other outcome — including a timeout or a mid-run backend
-exception — writes its own identity row at its scheduler position, so replay
-re-derives the exact position, classification, and fallback/termination purely
-from the captures, with no model call and no re-timing. A `deadline_exceeded` or
-`backend_exception` row NEVER discards prior captures; it resolves to the legal
-`pass` fallback if available, else terminates the run at that position (coded as
-above) and preserves all prior rows as an incomplete pack.
+**Empty actor-safe menu (pre-call terminal):** if the institutional + actor-safe
+filters (§4) leave ZERO offered actions at a would-be live activation (ada
+perceives no legal action), NO model call is made and the run terminates at that
+position coded `no_actor_safe_action`, preserving prior rows. A regression asserts
+this NEVER triggers in `society_seed_v1` (ada always has at least one actor-safe
+action — movement through a visible portal or an action over the visible token —
+at every activation); the code exists only to keep the contract total.
+
+`backend_unavailable` is the ONLY pre-run, no-row, no-evidence abort. Every other
+outcome — a truncation, a parse/selection failure, a timeout, a mid-run backend
+exception, or an empty actor-safe menu — writes (or is preceded by) its identity
+row(s) and terminates the run at its position WITHOUT discarding prior captures;
+replay re-derives the exact position, code, and terminal coding purely from the
+rows via the fixed precedence above, with no model call and no re-timing.
 
 A run that terminates before eight ticks via any coded termination is an
 `incomplete` pack (§7): the captures + coded termination are preserved and
 reported; NO behavioral departure claim is made (never relabeled as success).
 
+**Taxonomy regressions (implementation slice):** with `N=3`, assert a single
+pinned code + single terminal coding + stable per-code count + zero-call replay for
+each of: (a) `completion_reason=="length"` + no digits → `budget_exhausted`; (b)
+`length` + out-of-range digit (`"9"`) → `budget_exhausted`; (c) `length` + in-menu
+digit (`"2"`) → `ok` (precedence step 1 beats truncation); (d) non-truncated no
+digits → `parse_failure`; (e) non-truncated out-of-range digit → `illegal_selection`;
+(f) `call_outcome==deadline_exceeded` → `deadline_exceeded`; (g)
+`call_outcome==backend_exception` → `backend_failure_midrun`. Separately assert a
+scheduler-emitted `pass` (no-legal-action head) causes NO model request, and that
+every failed `activate` decision follows its preregistered TERMINAL path with NO
+synthetic action kind added.
+
 Failures are counted in the effective-sample accounting (§6) and coded into the
-`DecisionRecord.termination_kind` taxonomy. The canonical fallback is fixed and
-preregistered so a failure never becomes a free unscripted action.
+`DecisionRecord.termination_kind` taxonomy. Because classification is a
+fixed-precedence total function of the captured row, a failure never becomes a free
+unscripted action and never admits a second possible code.
 
 ## 6. Evidence contract (CAPTURE-REPLAY; live-API determinism never claimed)
 
