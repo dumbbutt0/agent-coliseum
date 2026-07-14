@@ -152,6 +152,21 @@ def test_source_evidence_binds_every_file(corpus):
         assert binding["run_id"] == corpus[name]["summary"]["run_id"]
 
 
+def test_v1_binding_contract_documented_accurately():
+    """Audit 001183: the v1 SourceEvidenceBinding's run_id is DESCRIPTIVE — any
+    non-empty string is accepted (the gap-report G1 rationale is the fixed
+    two-file preimage shape, never a run-id format restriction). This regression
+    pins the actual v1 contract so the documented finding stays accurate."""
+    from coliseum.textlab.training.trajectory import SourceEvidenceBinding
+    v1 = SourceEvidenceBinding("neutral-scenario-shaped-run-id", "a" * 64, "b" * 64)
+    assert v1.content["run_id"] == "neutral-scenario-shaped-run-id"
+    # the ACTUAL v1 limitation: its preimage holds exactly the two vignette file
+    # hashes — no field exists for the other four spatial evidence files.
+    assert set(v1.content) == {"schema_version", "run_id",
+                               "run_json_content_hash",
+                               "decisions_jsonl_content_hash"}
+
+
 def test_pre_02_evidence_refused(corpus, tmp_path):
     """A run dir whose schema predates the activation stream is REFUSED (the
     projector never approximates behavior-policy support)."""

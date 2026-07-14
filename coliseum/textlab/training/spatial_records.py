@@ -3,10 +3,12 @@
 
 Phase-2 verification found the v1 training-readiness records PARTLY
 architecture-neutral: ObservationArtifact and TrajectoryManifest are reused as-is
-by the spatial producer, but SourceEvidenceBinding (hex run-id + vignette file
-fields), BehaviorPolicySpec (requires vignette comparison/agent regime ids), and
-LegalActionSet (cardinality >= 2; DecisionRecord is type-bound to it) cannot
-represent a scripted spatial trajectory without fabrication. These ADDITIVE,
+by the spatial producer, but SourceEvidenceBinding (its preimage binds EXACTLY
+the two vignette evidence files; its run_id is descriptive and accepts any
+non-empty string — that part is NOT a gap), BehaviorPolicySpec (requires vignette
+comparison/agent regime ids), and LegalActionSet (cardinality >= 2;
+DecisionRecord is type-bound to it) cannot represent a scripted spatial
+trajectory without fabrication. These ADDITIVE,
 domain-separated spatial variants carry the SAME semantics with honest fields —
 never a fabricated regime id, never a blank placeholder identity. Documented in
 SPATIAL-TRAJECTORY-CORPUS-GAPS.md; a future owner-approved records rev may fold
@@ -27,8 +29,10 @@ def _require_str(name, value):
 
 
 class SpatialSourceEvidenceBinding(ContentRecord):
-    """Content-addresses the EXACT spatial-run evidence: the run id (descriptive,
-    scenario-shaped, not hex) + the content hash of every evidence file."""
+    """Content-addresses the EXACT spatial-run evidence: the descriptive run id +
+    the content hash of EVERY spatial evidence file (the v1 binding's preimage
+    holds exactly the two vignette file hashes, which cannot bind the six-file
+    spatial evidence set — that fixed shape, not the run-id contract, is gap G1)."""
     __slots__ = ()
     DOMAIN = "trs.source_evidence.spatial.v1"
     ID_FIELD = "source_evidence_id"
