@@ -1,4 +1,4 @@
-# Society live-persona pilot — preregistration + design source (rev 4)
+# Society live-persona pilot — preregistration + design source (rev 5)
 
 Status: council-routed design source under the **OWNER live-persona pilot
 authorization (2026-07-14)** — the first governed live-model experiment on the
@@ -50,9 +50,12 @@ Every value below is committed here; the implementation MUST use exactly these
   unsupported seed is recorded, not faked). These enter the run's regime
   identity.
 - **Budgets (exact):** at most ONE model call per live-agent activation; at most
-  `8` live decisions (one per tick); per-call wall-clock deadline
-  `120000 ms` (non-identity metadata, §6). No identity-changing retries — a
-  failed/timed-out call resolves through the total failure taxonomy (§5).
+  `8` live decisions (one per tick); per-call wall-clock deadline `120000 ms`. The
+  deadline DURATION is non-identity metadata (§6), but the deadline OUTCOME is
+  captured as the identity `call_outcome == deadline_exceeded` marker so replay
+  reclassifies without re-timing (§5–§6). No identity-changing retries — a
+  failed/timed-out call resolves through the total failure taxonomy (§5), each
+  requested decision writing exactly one persona.jsonl row.
 - **Effective-N floor (exact):** `6` of `8` live decisions must parse to a legal
   action for a behavioral departure quantity to be reported; below the floor the
   pack is `underpowered` (§7) and yields NO behavioral claim.
@@ -96,15 +99,23 @@ the legal-action menu ids — never from privileged state.
 free text ever enters the prompt, so no escaping is required beyond the
 canonical JSON the substrate already emits):**
 
-- **Menu order (total, canonical):** the offered menu is the society-legal
-  candidate set at the state (§4) FLATTENED to concrete effects and SORTED
-  ASCENDING by each effect's canonical action id
+- **Menu order (total, canonical) over the ACTOR-SAFE projection:** the offered
+  menu is the **actor-safe** action set at the state (§4) FLATTENED to concrete
+  effects and SORTED ASCENDING by each effect's canonical action id
   `canonical_effect_id(effect) = canonical_json(effect)` — exactly the ordering
   the integrated `activations.jsonl` `candidate_universe` already uses. Menu
   position `k` (1-indexed, `k = 1..N`) is the k-th effect in that sorted order.
-  The menu is always non-empty when a live activation is offered (an agent with
-  no legal action is not a head that must act; a legal `pass`, when the dispatch
-  offers it, is menu position 1 and rendered as `pass`).
+  The actor-safe set is the society-legal candidate set filtered so that EVERY
+  entity/object/container/portal/room id and every location in an offered
+  effect's canonical serialization is present in ada's own S2C actor content
+  (its body id, its `visible_room`, the `entities` list, the `portals` list); any
+  candidate naming an id absent from that content is REFUSED (withheld from the
+  menu) — so a `take_out` of a container's hidden contents, or any action over an
+  entity ada cannot perceive, is never rendered. This is a strict partial-
+  observability restriction: ada may only act on what it perceives (§4). The menu
+  is always non-empty when a live activation is offered (a legal `pass`, when the
+  dispatch offers it, is menu position 1 and rendered as `pass`; `pass` names no
+  entity and is always actor-safe).
 - **`{visible_room}`:** the room instance id; the literal `none` if the observer
   is in transit (never occurs for ada in this scenario).
 - **`{visible_entities_block}`:** one line per entity in the actor content's
@@ -124,22 +135,53 @@ actor observation + the closure + the scenario position; the ASSEMBLED-prompt
 the frozen template's `config_hash` + these serializer rules are pinned. Any
 drift refuses. `prompt_version` enters the regime.
 
-**Leakage check (mandatory):** the prompt string is built exclusively by an
-allowlist projection of the actor content + the legal-action ids; a regression
-runs `assert_no_privileged_leak`-style structural checks on the assembled prompt
-and asserts that mutating any privileged-only world fact never changes the
-prompt bytes. A privileged token appearing in a prompt fails closed.
+**Leakage check (mandatory; two-part, blocks the pilot):** the prompt string is
+built exclusively by an allowlist projection of the actor content + the actor-safe
+menu ids. (1) **Privileged-invariance:** a regression constructs two ADMITTED
+states with byte-identical S2C actor content but DIFFERENT privileged hidden
+containment (e.g. the gem inside the box vs. inside the token) and asserts the
+assembled prompt bytes AND the menu ids are byte-identical — proving both the
+observation block and the menu are a pure function of actor content, so mutating
+any privileged-only world fact never changes the prompt. (2) **No-unseen-entity:**
+a regression asserts no rendered action row (nor observation row) names any
+entity/id absent from ada's permitted actor projection, while every accepted menu
+selection still maps uniquely to a society-legal concrete effect (§4). A
+privileged token appearing in a prompt, or an actor-safe action's availability
+proving to depend on hidden state, fails closed — the pilot does not run until
+both regressions pass.
 
 ## 4. Legal-action enforcement (institution preserved)
 
-The menu offered to the model is the **society-legal candidate set** at the
-current state: the integrated S2B `candidate_effects` for the live body, filtered
-by the frozen `institutional_filter` (a token-holder's blocked move-out is
-removed). The model returns a choice; the parser (§5) maps it to exactly one
-menu id. **The committed action is therefore always society-legal by
-construction** — the institution constrains the live agent identically to a
-scripted one. An out-of-menu / unparseable / empty response is a failure (§5),
-never an illegal committed action.
+The menu offered to the model is the **actor-safe society-legal action set** at
+the current state, derived by TWO filters over the integrated S2B
+`candidate_effects` for the live body, in this order:
+
+1. **Institutional filter (legality):** the frozen `institutional_filter` removes
+   any institutionally-blocked candidate (a token-holder's blocked move-out).
+2. **Actor-safe filter (partial observability):** every remaining candidate whose
+   canonical serialization names ANY entity/object/container/portal/room id or
+   location absent from ada's S2C actor content is REFUSED. What survives is
+   exactly the set of legal actions ada could form from what it perceives.
+
+Each surviving effect is offered verbatim as a menu item (the mapping is
+identity: menu position `k` → that exact concrete legal effect); the parser (§5)
+maps the model's number to exactly one such effect. **The committed action is
+therefore always both society-legal AND actor-derivable by construction** — the
+institution constrains the live agent identically to a scripted one, and ada can
+never commit (or even see) an action over an entity it cannot perceive. An
+out-of-menu / unparseable / empty response is a failure (§5), never an illegal
+committed action.
+
+**Honest consequence (reported, not hidden):** because the two scripted CONTROLS
+(`bo`, `cy`) execute privileged scripted intents while ada is restricted to its
+actor-safe projection, ada's action space at a given state may be a STRICT SUBSET
+of the privileged baseline's — ada genuinely cannot select an action referencing
+a hidden entity (e.g. a `take_out` of the gem it cannot perceive) even where the
+scripted ada-baseline could. Any live-vs-baseline divergence attributable to an
+action that is unavailable under the actor-safe projection is LABELED as an
+observability-restriction divergence in the departure report (§7), never claimed
+as a behavioral departure. This is the correct partial-observability semantics,
+not a limitation to paper over.
 
 ## 5. Parser (`society_numeric_menu.v1`, exact) + preregistered failure taxonomy
 
@@ -170,21 +212,29 @@ advances the schedule); if `pass` is NOT available (the head must act), the run
 TERMINATES at that scheduler position with the coded termination below. Every
 code has a TOTAL action-or-termination resolution:
 
-| code | trigger (re-derivable from captures) | action | terminal coding (when pass unavailable) |
-|---|---|---|---|
-| `parse_failure` | no menu number extractable from `raw_completion` | canonical fallback | `parse_failure_termination` |
-| `illegal_selection` | a well-formed number outside `1..N` | canonical fallback | `invalid_action_termination` |
-| `budget_exhausted` | `completion_reason == "length"` OR `eval_count >= 256` OR the 120000 ms deadline (deadline is metadata; the token/reason fields are IDENTITY, so the classification re-derives on replay from `persona.jsonl`) | canonical fallback | `externally_imposed_truncation` |
-| `backend_unavailable` | endpoint/model/DIGEST verification failure BEFORE the first live decision | hard abort — no run identity or partial pack minted (no evidence) | — |
-| `backend_failure_midrun` | an HTTP/backend exception on a call AFTER run start | canonical fallback | `infrastructure_failure` |
+Every code's trigger is re-derived on replay from the ONE persona.jsonl row that
+the actor writes for that requested decision (§6): each row carries a closed
+`call_outcome` marker plus deterministic nullable response fields, so no model
+call and no wall-clock timing is needed to reclassify.
 
-Every model-call outcome is thus totally resolved. `backend_unavailable` is the
-ONLY pre-run abort (no evidence); `backend_failure_midrun` occurs after captures
-exist and NEVER discards them — it resolves to the legal `pass` fallback if
-available, else terminates the run at that position as `infrastructure_failure`
-and preserves all prior captures. Because `completion_reason`/`eval_count` are
-captured (§6), the parser/classifier re-derives `budget_exhausted` on replay
-with no model call.
+| code | trigger (re-derived from the decision's persona.jsonl row) | action | terminal coding (when pass unavailable) |
+|---|---|---|---|
+| `parse_failure` | `call_outcome == responded` AND no menu number extractable from `raw_completion` | canonical fallback | `parse_failure_termination` |
+| `illegal_selection` | `call_outcome == responded` AND a well-formed number outside `1..N` | canonical fallback | `invalid_action_termination` |
+| `budget_exhausted` | `call_outcome == responded` AND (`completion_reason == "length"` OR `eval_count >= 256`) — token/reason fields are IDENTITY, so this re-derives on replay | canonical fallback | `externally_imposed_truncation` |
+| `deadline_exceeded` | `call_outcome == deadline_exceeded` (the actor sets this marker when the 120000 ms per-call deadline is hit; the marker is IDENTITY, the latency duration is not, so replay reclassifies without re-timing) | canonical fallback | `externally_imposed_truncation` |
+| `backend_unavailable` | endpoint/model/DIGEST verification failure BEFORE the first live decision | hard abort — no run identity or partial pack minted (no evidence) | — |
+| `backend_failure_midrun` | `call_outcome == backend_exception` (an HTTP/backend exception on a call AFTER run start) | canonical fallback | `infrastructure_failure` |
+
+Every model-call outcome is thus totally resolved AND recorded as exactly one
+persona.jsonl row (§6). `backend_unavailable` is the ONLY pre-run abort (no
+evidence, no row). Every other outcome — including a timeout or a mid-run backend
+exception — writes its own identity row at its scheduler position, so replay
+re-derives the exact position, classification, and fallback/termination purely
+from the captures, with no model call and no re-timing. A `deadline_exceeded` or
+`backend_exception` row NEVER discards prior captures; it resolves to the legal
+`pass` fallback if available, else terminates the run at that position (coded as
+above) and preserves all prior rows as an incomplete pack.
 
 A run that terminates before eight ticks via any coded termination is an
 `incomplete` pack (§7): the captures + coded termination are preserved and
@@ -199,18 +249,32 @@ preregistered so a failure never becomes a free unscripted action.
 The pilot run directory is a spatial evidence set PLUS a society layer PLUS TWO
 separate live layers with DISTINCT identity semantics:
 
-- **`persona.jsonl` (IDENTITY — behavioral captures, NO latency):** per live
-  decision, exactly `{tick, scheduler_position, prompt_hash, raw_completion,
-  model_id, model_digest, decoding, completion_reason, eval_count,
-  prompt_eval_count, parsed_menu_id, parse_status}`. `completion_reason` (the
-  Ollama `done_reason`, e.g. `stop`/`length`) and `eval_count`/`prompt_eval_count`
-  (generated/prompt token counts) are captured from the RAW Ollama response — the
-  live actor's capture layer records them explicitly (the base LLMAgent Ollama
-  path discards them, so the pilot actor extends the capture). They are IDENTITY
-  fields (deterministic given the captured completion) and make `budget_exhausted`
-  RE-DERIVABLE on replay without re-invoking the model: `budget_exhausted` iff
-  `completion_reason == "length"` OR `eval_count >= num_predict (256)`. This is
-  the behavioral capture that determines the derived run.
+- **`persona.jsonl` (IDENTITY — behavioral captures, NO latency):** EXACTLY ONE
+  row per REQUESTED live decision (including a timed-out or backend-failed call),
+  each exactly `{tick, scheduler_position, prompt_hash, call_outcome, model_id,
+  model_digest, decoding, raw_completion, completion_reason, eval_count,
+  prompt_eval_count, parsed_menu_id, parse_status}`. `call_outcome` is a CLOSED
+  identity enum `{responded, deadline_exceeded, backend_exception}` recording the
+  transport result of the single call:
+  - When `call_outcome == responded`: `raw_completion` is the captured text and
+    `completion_reason` (the Ollama `done_reason`, e.g. `stop`/`length`),
+    `eval_count`/`prompt_eval_count` (generated/prompt token counts) are captured
+    from the RAW Ollama response — the live actor's capture layer records them
+    explicitly (the base LLMAgent Ollama path discards them, so the pilot actor
+    extends the capture); `parsed_menu_id`/`parse_status` are the §5 parser result.
+    These make `budget_exhausted` RE-DERIVABLE without re-invoking the model
+    (`completion_reason == "length"` OR `eval_count >= num_predict (256)`).
+  - When `call_outcome ∈ {deadline_exceeded, backend_exception}`: there is no
+    model response, so `raw_completion`, `completion_reason`, `eval_count`,
+    `prompt_eval_count`, `parsed_menu_id`, `parse_status` are all deterministically
+    `null`; the row still authenticates `tick`/`scheduler_position`/`prompt_hash`/
+    `model_id`/`model_digest`/`decoding` and the `call_outcome` marker, which is
+    sufficient to re-derive the exact §5 classification and fallback/termination.
+
+  Every field except latency is IDENTITY; the per-decision row is the behavioral
+  capture that determines the derived run, and its presence for EVERY requested
+  decision is what lets replay re-derive where and why a failure occurred without
+  any external fact.
 - **`persona_latency.jsonl` (NON-IDENTITY metadata):** per live decision
   `{scheduler_position, latency_ms, wall_clock_note}`. Recorded for accounting;
   NOT bound into identity and NOT byte-compared on replay.
@@ -244,7 +308,14 @@ replay-from-captures).
   divergence coordinate; the resulting trust-matrix delta, enforcement-count
   delta, and token-terminal-location delta vs. the pinned baseline; and the
   effective-sample summary. A privileged report + a closed-schema actor-safe
-  report as in the seed.
+  report as in the seed. **Each divergence is classified:** a divergence at a tick
+  whose scripted-baseline action was NOT in ada's actor-safe menu (§4) is coded
+  `observability_restricted` — ada could not have chosen the baseline action
+  because it cannot perceive the entity involved — and is EXCLUDED from any
+  behavioral-departure claim; only divergences where the baseline action WAS
+  actor-safe (both actions were available to ada) count as behavioral departures.
+  The report states both counts separately so the observability restriction is
+  never silently read as behavior.
 - **Result audit:** the run + report are council-audited like every slice
   (result verdict), under the audit probe-reroute policy.
 
@@ -270,8 +341,9 @@ integration (the digest verified against the preregistration). Stop after it.
 
 | # | Vector | Refusal / invariant |
 |---|---|---|
-| 1 | Privileged content in the prompt | allowlist-only prompt build + leakage regression (mutating hidden state never changes the prompt) |
-| 2 | Illegal / out-of-menu committed action | menu = society-legal set; parser maps to a menu id or fails to the taxonomy — no illegal commit possible |
+| 1 | Privileged content in the prompt (incl. hidden state leaking via a `take_out`/action id in the MENU) | menu = actor-safe projection (§4): candidates naming any id absent from ada's S2C content are refused; two-part leakage regression (§3) — two states with identical actor content but different hidden containment produce byte-identical prompt AND menu; no rendered row names an unseen entity |
+| 2 | Illegal / out-of-menu committed action | menu = actor-safe society-legal set; parser maps to a menu id or fails to the taxonomy — no illegal, and no unobservable, commit possible |
+| 2b | A timed-out or backend-failed call leaving no capture to re-derive the failure | EXACTLY ONE persona.jsonl identity row per requested decision, carrying a closed `call_outcome` marker + null response fields; replay re-derives the position, §5 classification, and fallback/termination with no model call and no re-timing |
 | 3 | Silent model swap / repull | pinned-digest verification aborts before compute |
 | 4 | Re-invoking the model on replay (non-determinism leaking into identity) | replay re-derives from captures only; a regression asserts replay makes no backend call |
 | 5 | Failure relabeled as success | coded failure taxonomy + effective-sample accounting; a failed decision is never a success or a free action |
