@@ -131,7 +131,19 @@ def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT,
     registry = SpatialSpecRegistry()
     witness = None
     if intervention is not None:
-        from coliseum.textlab.spatial.calibration import build_treatment_scenario
+        from coliseum.textlab.spatial.calibration import (INTERVENTIONS,
+                                                          build_treatment_scenario)
+        # fail CLOSED on caller identity: the treatment's scenario and seed are
+        # the closed intervention's bindings, never the caller's arguments — a
+        # mismatch refuses rather than recording inconsistent metadata.
+        spec = INTERVENTIONS.get(intervention)
+        if spec is None:
+            raise ContentRecordError(f"unknown intervention {intervention!r}")
+        if scenario != spec["scenario"] or seed != spec["seed"]:
+            raise ContentRecordError(
+                f"caller scenario/seed ({scenario!r}, {seed}) do not match the "
+                f"closed intervention bindings ({spec['scenario']!r}, "
+                f"{spec['seed']}) — refused")
         sc = build_treatment_scenario(intervention, registry, control_run_dir)
         witness = sc["witness"]
     else:

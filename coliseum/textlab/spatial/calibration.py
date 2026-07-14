@@ -351,7 +351,16 @@ def _normalizer(run_json, run_dir):
     logical key is preserved across the fork remap; world-line ids are dropped
     by the normalize step). Portal instance ids are not in instance_ids; they
     normalize via their closure attachment rows (endpoint room keys are remap-
-    stable), so cross-line portal references compare structurally."""
+    stable), so cross-line portal references compare structurally.
+
+    SPEC-IDENTITY INVARIANT (enforced at the comparator boundary): logical keys
+    alone are only sound because build_divergence_report accepts EXCLUSIVELY
+    pairs constructed by build_matched_pair, whose treatment is a WITNESSED fork
+    of this exact control — and materialize_fork/materialize_fork_closure mint
+    every child instance from (parent spec_id, SAME logical key), so equal keys
+    imply equal specs for every pair that can reach this comparator. Arbitrary
+    same-key/different-spec runs cannot form a pair (the fork bindings refuse),
+    so they can never be compared here."""
     subst = {iid: "@" + key for key, iid in run_json["instance_ids"].items()}
     with open(os.path.join(run_dir, "closure.json"), encoding="utf-8") as fh:
         closure = json.load(fh)
@@ -451,6 +460,13 @@ def build_matched_pair(intervention_name, control_run_dir, treatment_run_dir):
     tb = treatment_json.get("treatment_bindings")
     if not tb or treatment_json.get("intervention_id") != iv.intervention_id:
         raise ContentRecordError("treatment run does not record this intervention")
+    # the AUTHENTICATED treatment's own scenario/seed must equal the closed
+    # intervention bindings (fail closed even if a runner variant recorded
+    # caller-supplied identity).
+    if treatment_json["scenario"] != spec["scenario"] or             treatment_json["seed"] != spec["seed"]:
+        raise ContentRecordError(
+            "authenticated treatment scenario/seed do not match the closed "
+            "intervention bindings — refusing")
     if tb["control_run_id"] != control_json["run_id"] or \
             tb["control_source_evidence_id"] != control_binding.id or \
             tb["fork_position"] != spec["fork_position"] or \

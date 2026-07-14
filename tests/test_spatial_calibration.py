@@ -213,3 +213,64 @@ def test_intervention_records_registry_admitted():
         assert spec["fork_position"] is not None and spec["fork_state_hash"]
         assert spec["substituted_intents"]
         assert iv.cls == "policy" and iv.kind == "spatial_intent_substitution_v1"
+
+
+def test_caller_identity_fail_closed(baseline, tmp_path):
+    """Audit 001219 HIGH-1: treatment execution refuses caller scenario/seed
+    values inconsistent with the closed intervention — separately for scenario
+    and for seed — and the pair constructor re-checks the authenticated
+    treatment's own identity against the canonical spec."""
+    cdir = baseline["iv_private_object_relinquish_v1"]["control_dir"]
+    with pytest.raises(ContentRecordError, match="do not match the closed"):
+        execute_spatial_run("spatial_nav_exploration_v1", 42,
+                            out_root=str(tmp_path),
+                            intervention="iv_private_object_relinquish_v1",
+                            control_run_dir=cdir)
+    with pytest.raises(ContentRecordError, match="do not match the closed"):
+        execute_spatial_run("spatial_two_agent_private_object_v1", 777,
+                            out_root=str(tmp_path),
+                            intervention="iv_private_object_relinquish_v1",
+                            control_run_dir=cdir)
+
+
+def test_projection_0_3_canonical_consistency(baseline, tmp_path):
+    """Audit 001219 HIGH-2: schema-0.3 projection refuses a well-formed-but-
+    inconsistent execution_instance_id, a malformed one, and non-canonical
+    treatment_bindings — presence alone never suffices."""
+    import shutil
+    from coliseum.textlab.training.spatial_trajectory_projection import (
+        project_spatial_trajectory)
+    b = baseline["iv_private_object_relinquish_v1"]
+
+    def mutate(name, fn):
+        d = tmp_path / name
+        shutil.copytree(b["treatment_dir"], d)
+        rj = json.load(open(d / "run.json"))
+        fn(rj)
+        (d / "run.json").write_text(json.dumps(rj))
+        return str(d)
+
+    # malformed value
+    bad1 = mutate("m1", lambda rj: rj.update(
+        {"execution_instance_id": "not-a-canonical-execution-instance"}))
+    with pytest.raises(ContentRecordError, match="does not re-derive"):
+        project_spatial_trajectory(bad1)
+    # well-formed (64-hex) but inconsistent value
+    bad2 = mutate("m2", lambda rj: rj.update({"execution_instance_id": "a" * 64}))
+    with pytest.raises(ContentRecordError, match="does not re-derive"):
+        project_spatial_trajectory(bad2)
+    # binding value drift (the instance no longer re-derives)
+    bad3 = mutate("m3", lambda rj: rj["treatment_bindings"].update(
+        {"fork_position": 3}))
+    with pytest.raises(ContentRecordError, match="does not re-derive"):
+        project_spatial_trajectory(bad3)
+    # non-canonical binding key set
+    bad4 = mutate("m4", lambda rj: rj["treatment_bindings"].update(
+        {"extra_key": "x"}))
+    with pytest.raises(ContentRecordError, match="canonical"):
+        project_spatial_trajectory(bad4)
+    # identity drift (scenario not the intervention's)
+    bad5 = mutate("m5", lambda rj: rj.update(
+        {"scenario": "spatial_nav_exploration_v1"}))
+    with pytest.raises(ContentRecordError):
+        project_spatial_trajectory(bad5)

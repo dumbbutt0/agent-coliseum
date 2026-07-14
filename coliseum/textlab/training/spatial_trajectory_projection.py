@@ -67,12 +67,40 @@ def project_spatial_trajectory(run_dir: str) -> dict:
             f"{_SUPPORTED_RUN_SCHEMAS}) — evidence without the activation stream "
             "must be refused, never approximated")
     if schema == "0.3":
-        # strict 0.3 validation: a treatment run must carry every treatment
-        # field, well-formed; a 0.3 run missing them is refused.
+        # strict 0.3 validation: every treatment field present, well-formed,
+        # AND canonically consistent — the recorded execution_instance_id must
+        # RE-DERIVE from the closed intervention + the recorded bindings (a
+        # well-formed-but-inconsistent or malformed value refuses).
         for field in _TREATMENT_FIELDS:
             if not run_json.get(field):
                 raise ContentRecordError(
                     f"schema-0.3 treatment evidence is missing {field!r} — refused")
+        from coliseum.textlab.spatial.calibration import (
+            derive_execution_instance_id, intervention_record)
+        tb = run_json["treatment_bindings"]
+        required_tb = {"intervention_id", "control_run_id",
+                       "control_source_evidence_id", "control_manifest_id",
+                       "parent_world_line_id", "fork_position",
+                       "fork_state_hash", "fork_decision_id", "fork_genesis_id"}
+        if not isinstance(tb, dict) or set(tb) != required_tb:
+            raise ContentRecordError(
+                "schema-0.3 treatment_bindings must have exactly the canonical "
+                "key set — refused")
+        iv = intervention_record(run_json["intervention_id"])
+        spec = iv.canonical_spec
+        if run_json["scenario"] != spec["scenario"] or                 run_json["seed"] != spec["seed"]:
+            raise ContentRecordError(
+                "schema-0.3 treatment scenario/seed do not match the closed "
+                "intervention bindings — refused")
+        expected = derive_execution_instance_id(
+            iv.intervention_id, spec["scenario"], spec["seed"],
+            spec["agent_key"], tb["parent_world_line_id"],
+            tb["control_source_evidence_id"], tb["fork_position"],
+            tb["fork_state_hash"])
+        if run_json["execution_instance_id"] != expected:
+            raise ContentRecordError(
+                "schema-0.3 execution_instance_id does not re-derive from the "
+                "closed intervention + recorded bindings — refused")
     observations = _load(run_dir, "observations.jsonl")
     activations = _load(run_dir, "activations.jsonl")
 
