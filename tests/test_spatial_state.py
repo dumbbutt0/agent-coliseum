@@ -71,6 +71,36 @@ def _mk(ids, state, effect, actor=None):
 
 
 # ------------------------------------------------------------- WorldState / admission
+def test_record_preimage_keys_match_contract():
+    """WorldState + LocationTransition content-address preimages are EXACTLY the rev-6
+    §3 key set (no extra record-local schema_version) — byte-pinned identity."""
+    ids = _base()
+    st = _state(ids, 0, [_in_room(ids["body"].id, "agent_body", ids["rA"].id)],
+                [_life(ids["body"].id, "agent_body")])
+    assert set(st.content) == {"spatial_schema_version", "world_line_id",
+                               "logical_step", "placements", "entity_lifecycle"}
+    t = LocationTransition(ids["wl"].id, 1, st.id, st.id, {"action": "advance_step"})
+    assert set(t.content) == {"spatial_schema_version", "world_line_id", "logical_step",
+                              "prior_state_hash", "resulting_state_hash",
+                              "actor_body_id", "effect"}
+
+
+def test_apply_transition_refuses_unadmitted_prior():
+    """An effect may not repair a registry-invalid (over-capacity) prior into an
+    accepted edge: admission runs on the PRIOR before any fold."""
+    ids = _base(cap=1)
+    reg = ids["reg"]
+    b2 = AgentBodyInstance(ids["bs"].id, ids["wl"].id, "body#1"); reg.register(b2)
+    over = _state(ids, 0, [_in_room(ids["body"].id, "agent_body", ids["rA"].id),
+                           _in_room(b2.id, "agent_body", ids["rA"].id)],
+                  [_life(ids["body"].id, "agent_body"), _life(b2.id, "agent_body")])
+    eff = {"action": "remove", "entity_id": b2.id, "entity_kind": "agent_body"}
+    post = _apply_effect(over, eff, reg, 1); admit_world_state(post, reg)
+    t = LocationTransition(ids["wl"].id, 1, over.id, post.id, eff)
+    with pytest.raises(ContentRecordError, match="capacity"):
+        apply_transition(over, t, reg)
+
+
 def test_world_state_order_independent_identity():
     ids = _base()
     b, o = ids["body"].id, ids["obj"].id

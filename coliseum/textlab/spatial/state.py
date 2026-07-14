@@ -95,9 +95,10 @@ class WorldState(ContentRecord):
         placements = self._canonical_placements(placements)
         entity_lifecycle = self._canonical_lifecycle(entity_lifecycle)
         self._check_agreement(placements, entity_lifecycle, logical_step)
+        # preimage keys are EXACTLY the rev-6 Appendix/§3 set (no extra record-local
+        # schema_version) so ids are byte-pinned to the normative contract.
         super().__init__({
             "spatial_schema_version": ver,
-            "schema_version": WORLD_STATE_SCHEMA_VERSION,
             "world_line_id": world_line_id,
             "logical_step": logical_step,
             "placements": placements,

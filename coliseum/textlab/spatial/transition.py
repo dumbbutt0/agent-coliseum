@@ -67,9 +67,10 @@ class LocationTransition(ContentRecord):
         _validate_effect_shape(effect)
         if actor_body_id is not None and (not isinstance(actor_body_id, str) or not actor_body_id):
             raise ContentRecordError("actor_body_id must be null or a non-empty string")
+        # preimage keys are EXACTLY the rev-6 §3 set (no extra record-local
+        # schema_version) so ids are byte-pinned to the normative contract.
         super().__init__({
             "spatial_schema_version": ver,
-            "schema_version": LOCATION_TRANSITION_SCHEMA_VERSION,
             "world_line_id": world_line_id,
             "logical_step": logical_step,
             "prior_state_hash": prior_state_hash,
@@ -291,6 +292,10 @@ def apply_transition(state, transition, registry):
     """Fail-closed pure transition (§6). Returns the admitted post-state."""
     if not isinstance(state, WorldState) or not isinstance(transition, LocationTransition):
         raise ContentRecordError("apply_transition needs a WorldState + LocationTransition")
+    # the PRIOR state must itself be admissible before any fold (§5/§7) — an effect
+    # may not "repair" a registry-invalid (e.g. over-capacity) prior snapshot into an
+    # accepted history edge.
+    admit_world_state(state, registry)
     c = transition.content
     if c["world_line_id"] != state.world_line_id:
         raise ContentRecordError("transition world_line_id != state world_line_id")
