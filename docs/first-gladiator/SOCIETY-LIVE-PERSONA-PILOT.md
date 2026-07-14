@@ -1,4 +1,4 @@
-# Society live-persona pilot — preregistration + design source (rev 3)
+# Society live-persona pilot — preregistration + design source (rev 4)
 
 Status: council-routed design source under the **OWNER live-persona pilot
 authorization (2026-07-14)** — the first governed live-model experiment on the
@@ -90,9 +90,39 @@ Reply with only the number of your chosen action.
 ```
 
 The substitution points are filled ONLY from the actor observation content and
-the legal-action menu ids — never from privileged state. The template's
-`config_hash` is committed as a pinned regression at build; any drift refuses.
-`prompt_version` enters the regime.
+the legal-action menu ids — never from privileged state.
+
+**Exact deterministic serializers (committed; all values inserted verbatim — no
+free text ever enters the prompt, so no escaping is required beyond the
+canonical JSON the substrate already emits):**
+
+- **Menu order (total, canonical):** the offered menu is the society-legal
+  candidate set at the state (§4) FLATTENED to concrete effects and SORTED
+  ASCENDING by each effect's canonical action id
+  `canonical_effect_id(effect) = canonical_json(effect)` — exactly the ordering
+  the integrated `activations.jsonl` `candidate_universe` already uses. Menu
+  position `k` (1-indexed, `k = 1..N`) is the k-th effect in that sorted order.
+  The menu is always non-empty when a live activation is offered (an agent with
+  no legal action is not a head that must act; a legal `pass`, when the dispatch
+  offers it, is menu position 1 and rendered as `pass`).
+- **`{visible_room}`:** the room instance id; the literal `none` if the observer
+  is in transit (never occurs for ada in this scenario).
+- **`{visible_entities_block}`:** one line per entity in the actor content's
+  `entities` list (already sorted by `entity_id`), each exactly
+  `- {entity_id}: {entity_kind}: {canonical_json(location)}`; an EMPTY list
+  renders the single literal line `- (none)`.
+- **`{visible_portals_block}`:** one line per portal in the actor content's
+  `portals` list (already sorted by `(portal_instance_id, to_room_instance_id)`),
+  each exactly `- {portal_instance_id} -> {to_room_instance_id}`; an EMPTY list
+  renders the single literal line `- (none)`.
+- **`{numbered_menu_block}`:** one line per menu position, each exactly
+  `{k}. {action_id}` for `k = 1..N` in the canonical menu order above.
+
+The assembled prompt bytes are therefore a pure deterministic function of the
+actor observation + the closure + the scenario position; the ASSEMBLED-prompt
+`config_hash` at each of the eight positions is pinned as a mock regression, and
+the frozen template's `config_hash` + these serializer rules are pinned. Any
+drift refuses. `prompt_version` enters the regime.
 
 **Leakage check (mandatory):** the prompt string is built exclusively by an
 allowlist projection of the actor content + the legal-action ids; a regression
@@ -140,14 +170,23 @@ advances the schedule); if `pass` is NOT available (the head must act), the run
 TERMINATES at that scheduler position with the coded termination below. Every
 code has a TOTAL action-or-termination resolution:
 
-| code | trigger | action | terminal coding (when pass unavailable) |
+| code | trigger (re-derivable from captures) | action | terminal coding (when pass unavailable) |
 |---|---|---|---|
-| `parse_failure` | no menu number extractable | canonical fallback | `parse_failure_termination` |
-| `illegal_selection` | a well-formed number outside the offered menu | canonical fallback | `invalid_action_termination` |
-| `budget_exhausted` | 120000 ms deadline or 256-token cap hit | canonical fallback | `externally_imposed_truncation` |
-| `backend_unavailable` | endpoint/model/digest verification failure | hard abort BEFORE any run identity or partial pack is written (no evidence minted) | — |
+| `parse_failure` | no menu number extractable from `raw_completion` | canonical fallback | `parse_failure_termination` |
+| `illegal_selection` | a well-formed number outside `1..N` | canonical fallback | `invalid_action_termination` |
+| `budget_exhausted` | `completion_reason == "length"` OR `eval_count >= 256` OR the 120000 ms deadline (deadline is metadata; the token/reason fields are IDENTITY, so the classification re-derives on replay from `persona.jsonl`) | canonical fallback | `externally_imposed_truncation` |
+| `backend_unavailable` | endpoint/model/DIGEST verification failure BEFORE the first live decision | hard abort — no run identity or partial pack minted (no evidence) | — |
+| `backend_failure_midrun` | an HTTP/backend exception on a call AFTER run start | canonical fallback | `infrastructure_failure` |
 
-A run that terminates before eight ticks via any coded termination is a
+Every model-call outcome is thus totally resolved. `backend_unavailable` is the
+ONLY pre-run abort (no evidence); `backend_failure_midrun` occurs after captures
+exist and NEVER discards them — it resolves to the legal `pass` fallback if
+available, else terminates the run at that position as `infrastructure_failure`
+and preserves all prior captures. Because `completion_reason`/`eval_count` are
+captured (§6), the parser/classifier re-derives `budget_exhausted` on replay
+with no model call.
+
+A run that terminates before eight ticks via any coded termination is an
 `incomplete` pack (§7): the captures + coded termination are preserved and
 reported; NO behavioral departure claim is made (never relabeled as success).
 
@@ -162,8 +201,16 @@ separate live layers with DISTINCT identity semantics:
 
 - **`persona.jsonl` (IDENTITY — behavioral captures, NO latency):** per live
   decision, exactly `{tick, scheduler_position, prompt_hash, raw_completion,
-  model_id, model_digest, decoding, parsed_menu_id, parse_status}`. This is the
-  behavioral capture that determines the derived run.
+  model_id, model_digest, decoding, completion_reason, eval_count,
+  prompt_eval_count, parsed_menu_id, parse_status}`. `completion_reason` (the
+  Ollama `done_reason`, e.g. `stop`/`length`) and `eval_count`/`prompt_eval_count`
+  (generated/prompt token counts) are captured from the RAW Ollama response — the
+  live actor's capture layer records them explicitly (the base LLMAgent Ollama
+  path discards them, so the pilot actor extends the capture). They are IDENTITY
+  fields (deterministic given the captured completion) and make `budget_exhausted`
+  RE-DERIVABLE on replay without re-invoking the model: `budget_exhausted` iff
+  `completion_reason == "length"` OR `eval_count >= num_predict (256)`. This is
+  the behavioral capture that determines the derived run.
 - **`persona_latency.jsonl` (NON-IDENTITY metadata):** per live decision
   `{scheduler_position, latency_ms, wall_clock_note}`. Recorded for accounting;
   NOT bound into identity and NOT byte-compared on replay.
