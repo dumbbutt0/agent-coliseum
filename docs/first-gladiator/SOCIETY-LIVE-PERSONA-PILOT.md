@@ -1,4 +1,4 @@
-# Society live-persona pilot — preregistration + design source (rev 6)
+# Society live-persona pilot — preregistration + design source (rev 7)
 
 Status: council-routed design source under the **OWNER live-persona pilot
 authorization (2026-07-14)** — the first governed live-model experiment on the
@@ -112,10 +112,14 @@ canonical JSON the substrate already emits):**
   candidate naming an id absent from that content is REFUSED (withheld from the
   menu) — so a `take_out` of a container's hidden contents, or any action over an
   entity ada cannot perceive, is never rendered. This is a strict partial-
-  observability restriction: ada may only act on what it perceives (§4). The menu
-  is always non-empty when a live activation is offered (a legal `pass`, when the
-  dispatch offers it, is menu position 1 and rendered as `pass`; `pass` names no
-  entity and is always actor-safe).
+  observability restriction: ada may only act on what it perceives (§4). A live
+  activation, and therefore a menu and a model call, exists ONLY for a scheduler
+  `activate` outcome (a non-empty candidate set); a scheduler `pass` outcome (the
+  substrate emits it EXCLUSIVELY when the head has no legal action) has an empty
+  candidate set and produces NO prompt and NO model request — `pass` is not one of
+  the six `candidate_effects` kinds and is never a menu item (§5). When a menu IS
+  rendered it is always non-empty (the pre-call `no_actor_safe_action` terminal in
+  §5 covers the degenerate case where the actor-safe filter would empty it).
 - **`{visible_room}`:** the room instance id; the literal `none` if the observer
   is in transit (never occurs for ada in this scenario).
 - **`{visible_entities_block}`:** one line per entity in the actor content's
