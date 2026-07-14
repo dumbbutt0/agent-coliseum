@@ -1,8 +1,15 @@
-# Spatial S2B — Deterministic scheduler (design source, rev 8)
+# Spatial S2B — Deterministic scheduler (design source, rev 9)
 
 **Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Adopts the
-owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 8 closes
-audit 001077: (a) the fork reachability proof is a VERIFICATION witness, NOT a `WorldLineGenesis` identity
+owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 9 closes
+audit 001083: (a) `take_out` is enumerated over objects `Inside` accessible containers (not held), matching
+the S2A precondition so a legal `take_out` is never misclassified as `pass`; (b) the committed concrete
+effect at an `activate` must be an EXACT member of the closure-**and-attachment**-bounded candidate set (not
+merely S2A-valid), and the closure now commits the portal **attachment relation**, so a topology-illegal move
+with the wrong portal attachment (despite matching room specs) is refused; (c) the fork child closure is
+produced by an additive S2B `materialize_fork_closure` that remaps EVERY parent-closure instance (incl.
+unused rooms/portals + attachments), not the state-only `materialize_fork`; (d) the `RandomStream` preimage
+is one normative definition (table = formula, incl. `spatial_schema_version`). Rev 8 closed audit 001077: (a) the fork reachability proof is a VERIFICATION witness, NOT a `WorldLineGenesis` identity
 input, so a given authorized (child line, parent snapshot, decision) has exactly ONE genesis id regardless of
 which reachable occurrence witnesses it; (b) `WorldLineGenesis` binds a deterministically-materialized
 `topology_closure_hash` (all rooms/portals/objects/bodies from the normative `initial_layout`), and
@@ -96,8 +103,11 @@ world-bound instance ids, which do not exist at spec time). `materialize_root(wo
   consistently with its `PortalSpec`), and every entity instance, registering each;
 - assembles the genesis `WorldState` at `logical_step 0` (every entity `present`, locations resolved to the
   materialized instance ids);
-- emits a content-addressed **topology closure**: the sorted set of every materialized instance id (rooms,
-  portals, objects, bodies) for this world-line. `topology_closure_hash = config_hash` of that sorted set.
+- emits a content-addressed **topology closure** artifact `{"rooms": [room_instance_id …] (sorted),
+  "portals": [{"portal_instance_id","from_room_instance_id","to_room_instance_id"} …] (sorted, the
+  **attachment relation**), "objects": [object_instance_id …] (sorted), "bodies": [agent_body_id …]
+  (sorted)}` for this world-line. `topology_closure_hash = config_hash` of that artifact — it commits both
+  membership AND the portal attachments used by §4.
 
 `WorldLineGenesis.topology_closure_hash` binds this closure, and **`next()`/`verify_manifest`/`legal_action_kinds`
 resolve instances ONLY within the committed closure** (an instance outside it — a smuggled extra portal — is
@@ -105,9 +115,14 @@ not scheduler-visible). The genesis `WorldState` id and the closure are thus pur
 `SpatialWorldSpec` (which contains `initial_layout`) + `world_line_id` — one canonical genesis + one topology
 per root world-line, fully committed to replay. A malformed `initial_layout` (duplicate room/portal/entity
 logical key, unresolvable/cross-spec reference, a portal whose endpoints disagree with its `PortalSpec`)
-fails closed. For a FORK, the child topology is the deterministic remap of the parent closure (via
-`materialize_fork`), and `topology_closure_hash` binds the remapped child closure. (S0's `SpatialWorldSpec`
-is unchanged; S2B additively requires this `initial_layout` structure for scheduler eligibility.)
+fails closed. For a FORK, the child closure is produced by an **additive S2B helper `materialize_fork_closure`**
+(NOT the state-only S2A `materialize_fork`, which remaps only instances referenced by the parent
+`WorldState`): it remaps EVERY instance in the parent's committed topology closure — including unoccupied
+rooms and unused portals **and their attachment relation** — via `(spec_id, deterministic_logical_instance_key)
+→ instance(spec_id, child_world_line_id, logical_key)` (re-registering each), producing the complete child
+closure; `topology_closure_hash` binds it. This helper is defined + tested in the separately-routed S2B
+implementation; it does not alter the integrated `materialize_fork` (state) contract. (S0's `SpatialWorldSpec`
+is unchanged; S2B additively requires this `initial_layout` structure + closure for scheduler eligibility.)
 
 ## 3. The deterministic turn model — normative dispatch (self-contained)
 **Eligibility:** a body is eligible iff lifecycle `present` AND location `InRoom` (an `in_transit`/`absent`/
@@ -156,12 +171,15 @@ capacity/inventory/accessibility/containment, and the resulting-state `admit_wor
 NORMATIVELY by the **integrated S2A design source** (`docs/first-gladiator/SPATIAL-S2A-MUTABLE-LOCATION-STATE.md`
 §4/§5/§6, at its integrated commit `7cd99122`) — that immutable contract is the single source of truth, and
 this document binds it by reference rather than restating (and risking divergence from) it. The candidate
-enumeration domain per kind is finite and closure-bounded: `move` over the portals in the closure leaving the
-body's room; `take` over objects co-located with the body; `give` over co-located recipients × held objects;
-`put_inside`/`take_out` over held objects × accessible containers; `drop` over held objects. A kind is in
-`legal_action_kinds` iff its enumeration contains ≥1 candidate whose S2A precondition holds. It is DERIVED
-(never authoritative) and bound into the `Activation` id, so a forged legal context yields a different id.
-Empty ⇒ `outcome_kind = pass`.
+enumeration domain per kind is finite and **closure-and-attachment-bounded** (§2.2): `move` over the
+portal-attachment entries in the closure whose `from_room_instance_id` is the body's current room (so a
+candidate's `(portal, from_room, to_room)` is exactly a closure attachment — STRICTER than S2A's
+room-*spec*-endpoint check, disambiguating repeated room specs); `take` over objects co-located with the
+body; `give` over co-located recipients × held objects; `put_inside` over **held** objects × accessible
+containers; `take_out` over objects **`Inside`** each accessible container (NOT held objects — matching the
+S2A `take_out` precondition); `drop` over held objects. A kind is in `legal_action_kinds` iff its enumeration
+contains ≥1 candidate whose S2A precondition holds. It is DERIVED (never authoritative) and bound into the
+`Activation` id, so a forged legal context yields a different id. Empty ⇒ `outcome_kind = pass`.
 
 ## 5. Pure linear chain + UNIQUE finalized manifest (the canonical truth)
 There is **no mutable current pointer**. The `SchedulerRun` **commits the whole run**: its
@@ -176,7 +194,11 @@ deterministically, the ENTIRE chain is a pure function of `(genesis, action_scri
   `SchedulerState` is `initial_scheduler_state(SchedulerRun, G.initial_world_state)` at `scheduler_position 0`.
 - `consume(...)` is the ONLY constructor of non-genesis cursors (verifies the predecessor, dispatches §3,
   checks the supplied S2A edge or `None` for `pass`, returns the `+1`-position successor). At each `activate`
-  it MUST apply the next committed action from the script, in order — no other action is canonical there.
+  it MUST apply the next committed action from the script, in order; and that concrete effect MUST be an
+  EXACT member of the closure-and-attachment-bounded candidate set for that body+state (§4) — not merely an
+  S2A-valid effect of a listed kind — so a topology-illegal move (e.g. a portal used with the wrong
+  attachment despite matching room specs) is refused even though S2A alone would accept it. No other action
+  is canonical at that position.
 - **Finalization + verification:** a `SchedulerManifest` commits `genesis_scheduler_state_hash`,
   `terminal_scheduler_state_hash`, `chain_length = N+1`, and `ordered_s2a_transition_hashes`.
   `verify_manifest` reconstructs `S0..S_N` from the genesis by re-running the scheduler over the
@@ -207,8 +229,9 @@ deterministically, the ENTIRE chain is a pure function of `(genesis, action_scri
   ultimately the manifest re-derivation, not any record's mere content-address.
 
 ## 6. Deterministic randomness (frozen; the base scheduler consumes none)
-Unchanged from rev 3: `RandomStream` id `= config_hash({_domain:"spatial.random_stream.v1",
-scheduler_version, world_line_id, logical_step, purpose})`; a draw's authoritative value is the frozen
+`RandomStream` id `= config_hash({_domain:"spatial.random_stream.v1", spatial_schema_version,
+scheduler_version, world_line_id, logical_step, purpose})` — the preimage is EXACTLY the §2 table's
+`RandomStream` keys (incl. `spatial_schema_version`), one normative definition; a draw's authoritative value is the frozen
 integer word `value = int(config_hash({_domain:"spatial.random_draw.v1", random_stream_id,
 draw_position})[:16], 16)` (`0 ≤ value < 2**64`, exact JSON integer; uniform `= value/2**64` derived, never
 stored); a `RandomDraw` whose stored `value` disagrees is refused. No global RNG / wall-clock / host entropy;
