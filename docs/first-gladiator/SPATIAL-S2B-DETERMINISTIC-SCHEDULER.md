@@ -5,8 +5,11 @@ owner's architecture decision (pure linear replay chain + authenticated `WorldLi
 audit 001089: the closure's attachment relation is **DIRECTED with normative orientation expansion** — a
 `bidirectional` portal entry materializes as TWO directed attachments (`{portal, A, B}` and `{portal, B, A}`),
 so both legal orientations are committed and enumerated and a legal reverse traversal can never be
-misclassified as `pass` (incl. repeated-room-spec cases; implementation regression coverage required for
-forward + reverse traversal). Rev 9 closes audit 001083: (a) `take_out` is enumerated over objects `Inside` accessible containers (not held), matching
+misclassified as `pass` (incl. repeated-room-spec cases). **Mandatory implementation regression coverage
+(binding on the S2B implementation slice):** (a) forward AND reverse traversal candidates for a bidirectional
+portal, including distinct room instances sharing a repeated room spec; (b) a `directed` portal exposes ONLY
+its declared orientation (no reverse candidate); (c) exact wrong-attachment refusal is retained (a committed
+move whose `(portal, from, to)` is not a closure attachment row is refused). Rev 9 closes audit 001083: (a) `take_out` is enumerated over objects `Inside` accessible containers (not held), matching
 the S2A precondition so a legal `take_out` is never misclassified as `pass`; (b) the committed concrete
 effect at an `activate` must be an EXACT member of the closure-**and-attachment**-bounded candidate set (not
 merely S2A-valid), and the closure now commits the portal **attachment relation**, so a topology-illegal move
