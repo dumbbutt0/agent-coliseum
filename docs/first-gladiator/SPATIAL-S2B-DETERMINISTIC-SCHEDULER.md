@@ -1,7 +1,13 @@
-# Spatial S2B — Deterministic scheduler (design source, rev 6)
+# Spatial S2B — Deterministic scheduler (design source, rev 7)
 
 **Status:** design source for council review. No production code. Builds on integrated S0/S1/S2A. Adopts the
-owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 6 closes
+owner's architecture decision (pure linear replay chain + authenticated `WorldLineGenesis`). Rev 7 closes
+audit 001071: (a) the explicit-stop terminal rule is now **exclusive** (a run with `explicit_stop_position`
+finalizes ONLY at that reachable position; a run without one finalizes ONLY at QUIESCENT with the script
+exhausted — the cases cannot both validate); (b) a fork's `parent_state_hash` must be a canonically
+**reachable** state on the parent's authenticated scheduler run (bound `parent_scheduler_run_id` +
+`parent_scheduler_position`), recursively to an authenticated root — not merely an admitted state on a line
+with a genesis; (c) §3 dispatch + §4 legal actions are now inlined (self-contained). Rev 6 closes
 audit 001065's two HIGH findings within that architecture: (1) a run's canonical manifest is made **unique
 and terminal-bound** — the `SchedulerRun` commits the complete authorized action script (and an explicit
 stop, if any), so there is exactly ONE canonical `SchedulerManifest` per run and an arbitrary non-quiescent
@@ -23,7 +29,7 @@ perception (S2C), no labels/training/weights, no `tools/council` change. The can
 
 | record | literal `_domain` | preimage keys (id self-excluded) |
 | --- | --- | --- |
-| `WorldLineGenesis` | `spatial.world_line_genesis.v1` | `spatial_schema_version`, `world_line_id`, `initial_world_state_hash`, `root_or_fork`, `parent_world_line_id`(or `null`), `parent_state_hash`(or `null`), `fork_logical_step`(or `null`), `source_fork_decision_hash`(or `null`) |
+| `WorldLineGenesis` | `spatial.world_line_genesis.v1` | `spatial_schema_version`, `world_line_id`, `initial_world_state_hash`, `root_or_fork`, `parent_world_line_id`(or `null`), `parent_state_hash`(or `null`), `fork_logical_step`(or `null`), `source_fork_decision_hash`(or `null`), `parent_scheduler_run_id`(or `null`), `parent_scheduler_position`(or `null`) |
 | `SchedulerRun` | `spatial.scheduler_run.v1` | `spatial_schema_version`, `scheduler_version`, `world_line_id`, `world_line_genesis_id`, `action_script_commitment`, `explicit_stop_position`(or `null`) |
 | `SchedulerState` | `spatial.scheduler_state.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `scheduler_position`, `previous_scheduler_state_hash`(or `null`), `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `round_index`, `within_round_index`, `last_outcome`, `last_applied_transition_hash`(or `null`) |
 | `Activation` | `spatial.activation.v1` | `spatial_schema_version`, `scheduler_version`, `scheduler_run_id`, `scheduler_position`, `world_line_id`, `current_world_state_hash`, `round_start_state_hash`, `logical_step`, `round_index`, `within_round_index`, `agent_body_id`, `outcome_kind`, `legal_action_kinds` |
@@ -56,11 +62,17 @@ refused):
   `D` (`D.id == source_fork_decision_hash`) authorizing exactly `parent_state_hash` + `fork_logical_step` on
   `parent_world_line_id`, a registered `ForkInitialization` binding `child_world_line_id == world_line_id` +
   `materialized_child_initial_state_hash == initial_world_state_hash`, re-running `materialize_fork`'s
-  deterministic remap on `parent_state_hash` reproduces exactly `initial_world_state_hash`, **AND the parent
-  world-line itself has a registered valid `WorldLineGenesis` (recursively to an authenticated root)** — a
-  `ForkInitialization` is NEVER self-authenticating. Uniqueness: the fork genesis is fully determined by
-  (authenticated parent snapshot + authorized `ForkDecision`), so at most one valid `WorldLineGenesis` exists
-  per forked line.
+  deterministic remap on `parent_state_hash` reproduces exactly `initial_world_state_hash`, **AND
+  `parent_state_hash` is a canonically REACHABLE state on the parent world-line's authenticated scheduler
+  run** — the fork additionally binds `parent_scheduler_run_id` + `parent_scheduler_position`, and
+  verification requires that the parent's finalized `SchedulerManifest` (whose `SchedulerRun` references the
+  parent's own valid `WorldLineGenesis`) has, at that position, a `SchedulerState` whose
+  `current_world_state_hash == parent_state_hash`. Applied **recursively**: the parent line's
+  `WorldLineGenesis` must itself be authenticated (root by §2.2 materialization; fork by this same
+  reachable-parent rule) down to an authenticated root. A `ForkInitialization` is NEVER self-authenticating,
+  and a parent snapshot that is merely admitted-but-not-reachable-on-the-parent-run is refused. Uniqueness:
+  the fork genesis is fully determined by (reachable authenticated parent state + authorized `ForkDecision`),
+  so at most one valid `WorldLineGenesis` exists per forked line.
 
 ### 2.2 Deterministic root-genesis materialization
 For a scheduler-eligible ROOT world-line, `SpatialWorldSpec.initial_layout` is NORMATIVE (not opaque): a
@@ -78,21 +90,52 @@ corresponding in-world instance id, and assembles the `WorldState` at `logical_s
 is simply not scheduler-eligible until it has a conforming layout. (S0's `SpatialWorldSpec` is unchanged;
 S2B additively requires this structure for scheduler eligibility.)
 
-## 3. The deterministic turn model (queue anchored to the round-start state)
-Eligibility, the sorted-by-`agent_body_id` frozen round queue, and the numbered dispatch are as in rev 3/4
-(QUIESCENT first; arrivals-first ADVANCE; head activate/pass; end-of-round ADVANCE). `sorted_eligible(state)`
-= `present`+`InRoom` bodies sorted by content-addressed `agent_body_id`. **Every** dispatched step increments
-`scheduler_position` and links `previous_scheduler_state_hash`, including a `pass` (which leaves
-`current_world_state_hash` unchanged but still advances `scheduler_position` and `within_round_index`).
-`initial_scheduler_state(scheduler_run, world_state)` requires `world_state.id ==
-worldlinegenesis(scheduler_run).initial_world_state_hash` and binds `scheduler_position = 0`,
-`previous_scheduler_state_hash = null`, `last_outcome = "initial"`, `current = round_start =` the genesis
-state, `round_index = within_round_index = 0`. Liveness is total (activate/pass/advance always available for
-a non-quiescent state; `QUIESCENT` only when no eligible AND no in-transit body).
+## 3. The deterministic turn model — normative dispatch (self-contained)
+**Eligibility:** a body is eligible iff lifecycle `present` AND location `InRoom` (an `in_transit`/`absent`/
+`removed` body is never activated). `sorted_eligible(state)` = the eligible bodies sorted by content-addressed
+`agent_body_id` (a stable, host/dict-independent total order; the frozen tie-break). A **round** is anchored
+to a `round_start_state`; its frozen queue `Q = sorted_eligible(round_start_state)` is consumed head-first
+(queued bodies stay `present`+`InRoom` until their own turn — no S2A actor action moves/removes another body;
+`advance_step` only lands `in_transit` bodies, which are not in `Q`).
 
-## 4. Legal-action context
-`legal_action_kinds(body, world_state, registry)` = the sorted S2A actor kinds whose S2A precondition is
-satisfiable for `body` at the current state (DERIVED, bound into the `Activation` id). (Unchanged from rev 2.)
+`initial_scheduler_state(scheduler_run, world_state)` requires `world_state.id ==
+worldlinegenesis(scheduler_run).initial_world_state_hash` and binds `scheduler_run_id`, `scheduler_position =
+0`, `previous_scheduler_state_hash = null`, `last_outcome = "initial"`, `current = round_start = world_state.id`,
+`round_index = within_round_index = 0`.
+
+`next(scheduler_state, world_state, registry)` dispatches in this **exact, mutually-exclusive** order; every
+non-QUIESCENT outcome, when consumed, increments `scheduler_position` and links
+`previous_scheduler_state_hash`:
+0. **Quiescence (first):** if `world_state` has NO `present`+`InRoom` body AND NO `in_transit` body, return
+   `QUIESCENT` (no step; a run may end). All later rules assume ≥1 eligible or in-transit body, so QUIESCENT
+   and end-of-round ADVANCE are disjoint.
+1. **Arrivals-first ADVANCE:** else if any `present` body is `in_transit` with `arrival_step ==
+   world_state.logical_step + 1`, return `ADVANCE` (`advance_step`, `last_outcome = advance_arrival`); the
+   successor keeps the SAME round (`round_start`/`round_index`/`within_round_index` unchanged, `current =
+   H1`).
+2. **Head of round:** else let `body = Q[within_round_index]` if `within_round_index < len(Q)`, and `L =
+   legal_action_kinds(body, world_state, registry)`. Return an `Activation` at this position for `body`,
+   `outcome_kind = pass if L empty else activate`, `legal_action_kinds = L`.
+   - `activate` (L non-empty): the caller applies `body`'s next committed action via S2A `apply_transition`
+     (`H → H1`); successor `current = H1`, `within+1`, `last_outcome = activate`, same round.
+   - `pass` (L empty): NO S2A action; successor `current = H` (unchanged), `within+1`, `last_outcome =
+     pass`, same round.
+3. **End-of-round ADVANCE:** else (`within_round_index == len(Q)`) return `ADVANCE` (`last_outcome =
+   advance_endround`); the successor starts a NEW round: `current = round_start = H1`, `round_index+1`,
+   `within = 0`.
+
+**Liveness is total:** every non-quiescent admitted state yields a step (arrivals/head/end-of-round);
+`QUIESCENT` only when no eligible AND no in-transit body — no reachable non-quiescent state lacks a
+successor, and an all-actionless round passes then advances.
+
+## 4. Legal-action context (self-contained)
+`legal_action_kinds(body, world_state, registry)` = the sorted subset of the S2A actor action kinds
+`{move, take, drop, give, put_inside, take_out}` whose S2A precondition (per the integrated S2A design
+source) is satisfiable for `body` at the CURRENT `world_state` — e.g. `move` iff a registered in-world portal
+leaves the body's room with destination effective-occupancy headroom; `take` iff a co-located portable object
+exists with inventory headroom; `give`/`put_inside`/`take_out` per their S2A preconditions. It is DERIVED
+(never authoritative) and bound into the `Activation` id, so a forged legal context yields a different id.
+Empty ⇒ `outcome_kind = pass`.
 
 ## 5. Pure linear chain + UNIQUE finalized manifest (the canonical truth)
 There is **no mutable current pointer**. The `SchedulerRun` **commits the whole run**: its
@@ -115,10 +158,15 @@ deterministically, the ENTIRE chain is a pure function of `(genesis, action_scri
   the EXACT `consume()` successor of `S_i` (contiguous `scheduler_position`, `previous == S_i.id`, dispatched
   `last_outcome`, and for `activate` the applied edge is the next committed script action; for `advance_*`
   the required `advance_step`); the `ordered_s2a_transition_hashes` equal the applied edges in order; and —
-  the **terminal rule** — `S_N` is a **legitimate stop**: either `next(S_N) == QUIESCENT` (the run drove to
-  quiescence and the script is exactly exhausted) OR `S_N.scheduler_position == explicit_stop_position`.
-  A **non-quiescent prefix** (a `chain_length=1` genesis-only manifest, or any early cut that is neither
-  QUIESCENT nor the committed stop) is refused; a **competing extension or alternative branch** for the same
+  the **terminal rule (exclusive)** — exactly one terminal is legitimate per run, by the run's own
+  commitment: **if `explicit_stop_position` is non-null**, the SOLE terminal is `S_N.scheduler_position ==
+  explicit_stop_position` (which must be a reachable position with the committed script consumed up to it) —
+  a QUIESCENT-ended continuation is NOT valid for such a run; **if `explicit_stop_position` is null**, the
+  SOLE terminal is `next(S_N) == QUIESCENT` with the script exactly exhausted — an early cut is NOT valid.
+  The two cases are mutually exclusive on a single `SchedulerRun`, so a run with an explicit stop cannot also
+  finalize at quiescence and vice-versa. A **non-quiescent prefix** (a `chain_length=1` genesis-only
+  manifest, or any early cut that is neither the committed stop nor QUIESCENT-per-the-rule) is refused; a
+  **competing extension or alternative branch** for the same
   `SchedulerRun` cannot exist because the run's committed script + terminal rule determine the one canonical
   manifest. It also rejects gaps, duplicates, backlinks, transition mismatches, and multiple successors.
   **Cross-manifest uniqueness:** the canonical manifest is a pure function of the `SchedulerRun` id, so any
@@ -159,8 +207,12 @@ post-activate / post-pass / post-arrival / new-round `SchedulerState` (with `sch
 an `activate` + `pass` `Activation`; a `SchedulerManifest`; a `RandomStream`; a `RandomDraw`.
 **Adversarial (each fails closed):** an unauthenticated/non-unique genesis (a root `WorldLineGenesis` whose
 `initial_world_state_hash != materialize_root_initial_state(...)` — incl. a second admitted `logical_step==0`
-snapshot; a fork whose parent line lacks a `WorldLineGenesis` (recursively), or whose materialized child hash
-is not the deterministic anti-transplant remap of the stated parent snapshot; a malformed `initial_layout`);
+snapshot; a fork whose parent line lacks a `WorldLineGenesis` (recursively), whose materialized child hash
+is not the deterministic anti-transplant remap of the stated parent snapshot, or whose `parent_state_hash`
+is not the state at `parent_scheduler_position` on the parent's authenticated `SchedulerManifest`
+(admitted-but-unreachable parent refused); a malformed `initial_layout`); an explicit-stop run finalized at
+QUIESCENT instead of its committed stop, or a no-stop run finalized before QUIESCENT (terminal-rule
+substitution);
 a **truncated / prefix manifest** (a `chain_length=1` genesis-only or any early cut whose terminal is neither
 `QUIESCENT` nor `explicit_stop_position`); a **competing extension or alternative branch** finalized for the
 same `SchedulerRun` (impossible — the committed action_script + terminal rule fix one canonical manifest); a
