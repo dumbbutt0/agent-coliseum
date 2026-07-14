@@ -391,21 +391,62 @@ def test_vector9_claim_ceiling_violation_refused(pack):
         SocietyOutcomeReport(nofork)
 
 
+_GOOD_FACT = {"cy": {"gem_in_box": True}}
+_SIX = {"ada->bo": 0, "ada->cy": 0, "bo->ada": 0, "bo->cy": 0,
+        "cy->ada": 0, "cy->bo": 0}
+
+
 def test_vector10_scope_expansion_refused():
     """The tick-state record rejects trust matrices that are not exactly the six
     ordered pairs (a fourth agent's edges cannot be represented), and non-int
     trust values; the SC-LC cardinalities are frozen."""
-    base = dict(private_facts={}, enforcement_event_count=0,
+    base = dict(private_facts=_GOOD_FACT, enforcement_event_count=0,
                 scheduler_position_range=[0, 3])
     with pytest.raises(ContentRecordError, match="six ordered pairs"):
         SocietyTickState(tick_index=0, previous_society_tick_hash=None,
                          trust_edges={"ada->bo": 0}, **base)
-    six = {"ada->bo": 0, "ada->cy": 0, "bo->ada": 0, "bo->cy": 0,
-           "cy->ada": 0, "cy->bo": 0}
     with pytest.raises(ContentRecordError, match="must be an int"):
         SocietyTickState(tick_index=0, previous_society_tick_hash=None,
-                         trust_edges=dict(six, **{"ada->bo": "not-an-int"}), **base)
-    # prev-link discipline
+                         trust_edges=dict(_SIX, **{"ada->bo": "not-an-int"}), **base)
     with pytest.raises(ContentRecordError, match="previous_society_tick_hash"):
         SocietyTickState(tick_index=0, previous_society_tick_hash="p" * 64,
-                         trust_edges=six, **base)
+                         trust_edges=_SIX, **base)
+
+
+def test_vector_private_fact_cardinality_closed():
+    """Audit 001263 HIGH-1: the private fact is closed to EXACTLY one holder (cy)
+    with EXACTLY one Boolean fact (gem_in_box). Extra holders, extra/renamed
+    facts, multiple facts, an absent holder, and non-bool values all refuse — the
+    single authorized private fact of the bounded seed cannot expand."""
+    def tick(pf):
+        return SocietyTickState(tick_index=0, previous_society_tick_hash=None,
+                                trust_edges=_SIX, private_facts=pf,
+                                enforcement_event_count=0,
+                                scheduler_position_range=[0, 3])
+    tick(_GOOD_FACT)                                            # the authorized shape
+    for bad in ({}, {"ada": {"gem_in_box": True}},             # absent / wrong holder
+                {"cy": {}}, {"cy": {"other_fact": True}},       # no fact / wrong name
+                {"cy": {"gem_in_box": True, "extra": False}},   # two facts
+                {"cy": {"gem_in_box": True}, "bo": {"x": True}},  # two holders
+                {"cy": {"gem_in_box": 1}}):                      # non-bool value
+        with pytest.raises(ContentRecordError):
+            tick(bad)
+
+
+def test_vector_perception_divergence_beyond_fork_required(pack):
+    """Audit 001263 HIGH-2: every non-null per-agent perception-divergence
+    coordinate must lie strictly beyond the fork position; a value at or before
+    the fork refuses at SocietyOutcomeReport construction."""
+    good = dict(pack["s"]["outcome"])
+    SocietyOutcomeReport(good)                                  # the real one passes
+    fs = dict(good["fork_divergence_summary"])
+    fork = fs["fork_position"]
+    fs["per_agent_perception_divergence"] = dict(
+        fs["per_agent_perception_divergence"], cy=fork)         # AT the fork
+    with pytest.raises(ContentRecordError, match="beyond the fork"):
+        SocietyOutcomeReport(dict(good, fork_divergence_summary=fs))
+    fs2 = dict(good["fork_divergence_summary"])
+    fs2["per_agent_perception_divergence"] = dict(
+        fs2["per_agent_perception_divergence"], ada=fork - 1)   # BEFORE the fork
+    with pytest.raises(ContentRecordError, match="beyond the fork"):
+        SocietyOutcomeReport(dict(good, fork_divergence_summary=fs2))

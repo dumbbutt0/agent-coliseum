@@ -46,15 +46,20 @@ def _is_hex64(v):
 
 
 def _validate_private_facts(private_facts):
-    """Exactly {holder-agent: {fact-name: bool}} for known agents (empty ok)."""
-    if not isinstance(private_facts, dict):
-        raise ContentRecordError("private_facts must be a dict")
-    for holder, facts in private_facts.items():
-        if holder not in AGENTS or not isinstance(facts, dict):
-            raise ContentRecordError("private_facts keys must be agents -> fact dicts")
-        for name, val in facts.items():
-            if not isinstance(name, str) or not name or not isinstance(val, bool):
-                raise ContentRecordError("each private fact must be name -> bool")
+    """CARDINALITY-CLOSED to the exact SC-LC scope: EXACTLY one holder
+    (PRIVATE_FACT_HOLDER = 'cy') carrying EXACTLY one Boolean fact
+    (PRIVATE_FACT = 'gem_in_box'). Any extra holder, extra/renamed fact, missing
+    holder/fact, or non-bool value refuses — the single authorized private fact
+    of the bounded seed cannot expand."""
+    if not isinstance(private_facts, dict) or set(private_facts) != {PRIVATE_FACT_HOLDER}:
+        raise ContentRecordError(
+            f"private_facts must have exactly the one holder {PRIVATE_FACT_HOLDER!r}")
+    facts = private_facts[PRIVATE_FACT_HOLDER]
+    if not isinstance(facts, dict) or set(facts) != {PRIVATE_FACT}:
+        raise ContentRecordError(
+            f"the holder must carry exactly the one fact {PRIVATE_FACT!r}")
+    if not isinstance(facts[PRIVATE_FACT], bool):
+        raise ContentRecordError("the private fact value must be a bool")
 
 
 # ----------------------------------------------------------------- records
@@ -200,6 +205,10 @@ class SocietyOutcomeReport(ContentRecord):
                 any(v is not None and not _is_int(v) for v in pad.values()):
             raise ContentRecordError(
                 "per_agent_perception_divergence must map every agent to an int or null")
+        if any(v is not None and v <= fs["fork_position"] for v in pad.values()):
+            raise ContentRecordError(
+                "every non-null per-agent perception divergence must lie strictly "
+                "beyond the fork position")
         super().__init__(dict(payload))
 
 
