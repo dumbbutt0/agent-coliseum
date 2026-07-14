@@ -26,11 +26,15 @@ from coliseum.textlab.spatial.scheduler import (SCHEDULER_VERSION,
                                                 verify_manifest)
 from coliseum.textlab.spatial.world import SPATIAL_SCHEMA_VERSION
 
-SPATIAL_RUN_SCHEMA_VERSION = "0.1"
+#: 0.2 (additive): + activations.jsonl (per-position dispatch context: the
+#: Activation content, the FULL candidate-effect universe, and the selected
+#: effect — behavior-policy support for the trajectory corpus) + closure.json
+#: (the authenticated topology closure rows). Identity records are unchanged.
+SPATIAL_RUN_SCHEMA_VERSION = "0.2"
 DEFAULT_SPATIAL_ROOT = os.path.join("logs", "spatial-runs")
 
 _EVIDENCE_FILES = ("run.json", "chain.jsonl", "transitions.jsonl",
-                   "observations.jsonl")
+                   "observations.jsonl", "activations.jsonl", "closure.json")
 
 
 def _observe_chain(chain, sc, registry):
@@ -58,6 +62,59 @@ def _observe_chain(chain, sc, registry):
     return rows
 
 
+def canonical_effect_id(effect) -> str:
+    """The canonical string id of a concrete effect — the spatial ACTION id used
+    by the trajectory corpus' legal-action universes (deterministic; no hashing
+    needed: effects are already canonical dicts of instance ids)."""
+    return canonical_json(effect)
+
+
+def _activation_rows(chain, transitions, sc, registry):
+    """Re-derive the per-position dispatch context (deterministic: the same
+    next_step/candidate_effects the run itself used): for every consumed position,
+    the step kind; for activate/pass positions additionally the Activation
+    content, the FULL candidate-effect universe of the activated body, and the
+    selected effect. This is the behavior-policy-support evidence (what COULD
+    have been chosen, not just what was)."""
+    from coliseum.textlab.spatial.scheduler import (ADVANCE, QUIESCENT,
+                                                    candidate_effects, next_step)
+    rows = []
+    tmap = {}
+    for t in transitions:
+        tmap[t.id] = t
+    for prev, cur in zip(chain, chain[1:]):
+        state = _rehydrate_world_state(
+            registry.get(prev.content["current_world_state_hash"]))
+        step = next_step(prev, state, sc["closure"], registry)
+        position = cur.content["scheduler_position"]
+        tid = cur.content.get("last_applied_transition_hash")
+        row = {"scheduler_position": position,
+               "step_kind": cur.content["last_outcome"],
+               "applied_transition_id": tid}
+        if step not in (ADVANCE, QUIESCENT):             # an Activation
+            body = step.content["agent_body_id"]
+            cands = candidate_effects(body, state, sc["closure"], registry)
+            universe = []
+            for kind in sorted(cands):
+                for eff in cands[kind]:
+                    universe.append({"action_id": canonical_effect_id(eff),
+                                     "effect": eff})
+            universe.sort(key=lambda r: r["action_id"])
+            selected = None
+            if tid is not None and step.content["outcome_kind"] == "activate":
+                selected = tmap[tid].content["effect"]
+            row.update({
+                "activation_id": step.id,
+                "activation": step.content,
+                "candidate_universe": universe,
+                "selected_effect": selected,
+                "selected_action_id": (canonical_effect_id(selected)
+                                       if selected is not None else None),
+            })
+        rows.append(row)
+    return rows
+
+
 def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
     """Build + schedule + verify + observe the named scenario and write the run
     directory. Returns the run summary dict (= the run.json payload)."""
@@ -71,6 +128,7 @@ def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
     verify_manifest(manifest, sc["run"], sc["genesis"], list(sc["script"]),
                     sc["closure"], registry)
     observations = _observe_chain(chain, sc, registry)
+    activations = _activation_rows(chain, transitions, sc, registry)
     run_id = f"{scenario}--seed{seed}--{manifest.id[:16]}"
     summary = {
         "spatial_run_schema_version": SPATIAL_RUN_SCHEMA_VERSION,
@@ -86,6 +144,7 @@ def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
         "genesis_state_id": sc["genesis"].id,
         "topology_closure_hash": sc["world_line_genesis"].content["topology_closure_hash"],
         "scheduler_run_id": sc["run"].id,
+        "action_script_commitment": sc["run"].content["action_script_commitment"],
         "manifest_id": manifest.id,
         "chain_length": len(chain),
         "terminal_scheduler_state_id": chain[-1].id,
@@ -114,6 +173,11 @@ def execute_spatial_run(scenario, seed, out_root=DEFAULT_SPATIAL_ROOT):
     with open(os.path.join(run_dir, "observations.jsonl"), "w", encoding="utf-8") as fh:
         for row in observations:
             fh.write(canonical_json(row) + "\n")
+    with open(os.path.join(run_dir, "activations.jsonl"), "w", encoding="utf-8") as fh:
+        for row in activations:
+            fh.write(canonical_json(row) + "\n")
+    with open(os.path.join(run_dir, "closure.json"), "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(sc["closure"]) + "\n")
     return summary
 
 
