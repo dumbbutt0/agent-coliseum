@@ -37,6 +37,10 @@ from coliseum.textlab.spatial.perception import (RENDERER_VERSION,
                                                  assert_actor_content_schema,
                                                  closure_visible_state_commitment,
                                                  render_observation_pair)
+from coliseum.textlab.spatial.scenario import SCENARIOS, build_scenario
+from coliseum.textlab.spatial.run import (execute_spatial_run,
+                                          inspect_spatial_run,
+                                          replay_spatial_run)
 
 __all__ = [
     "SPATIAL_SCHEMA_VERSION", "is_supported_version",
@@ -52,4 +56,7 @@ __all__ = [
     # S2C perception
     "RENDERER_VERSION", "assert_actor_content_schema",
     "closure_visible_state_commitment", "render_observation_pair",
+    # S2D scripted runner
+    "SCENARIOS", "build_scenario", "execute_spatial_run",
+    "inspect_spatial_run", "replay_spatial_run",
 ]

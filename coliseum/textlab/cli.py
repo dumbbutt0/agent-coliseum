@@ -181,6 +181,46 @@ def cmd_dataset_export(args):
     print(f"effective_units {desc['effective_unit_count']} commitment {desc['dataset_commitment'][:16]}")
 
 
+def cmd_spatial_run(args):
+    """S2D: build + schedule + verify + observe a scripted spatial scenario; the
+    run dir is experiment evidence (deterministic, replayable, byte-identical)."""
+    from .spatial.run import execute_spatial_run
+    s = execute_spatial_run(args.scenario, args.seed, out_root=args.spatial_root)
+    print(f"run_id   : {s['run_id']}")
+    print(f"manifest : {s['manifest_id']}")
+    print(f"chain    : {s['chain_length']} scheduler states "
+          f"(stop {s['explicit_stop_position']}, fork point {s['fork_position']})")
+    print(f"terminal : {s['terminal_world_state_id']}")
+    print(f"evidence : {os.path.join(args.spatial_root, s['run_id'])}")
+
+
+def cmd_spatial_replay(args):
+    """S2D: the replay gate — re-execute from nothing and byte-compare evidence."""
+    from .spatial.run import replay_spatial_run
+    ok, detail = replay_spatial_run(args.run_id, out_root=args.spatial_root)
+    if not ok:
+        sys.exit(f"REPLAY FAILED: {args.run_id}: {detail}")
+    print(f"{detail} ({args.run_id})")
+
+
+def cmd_spatial_inspect(args):
+    """S2D: what an agent could see, step by step, from the evidence alone."""
+    from .spatial.run import inspect_spatial_run
+    rows = inspect_spatial_run(args.run_id, out_root=args.spatial_root,
+                               view=args.view, agent=args.agent)
+    if not rows:
+        sys.exit("no observations matched")
+    for r in rows:
+        c = r["content"]
+        seen = c.get("visible_entity_identities", [])
+        room = c.get("visible_room_identity")
+        print(f"pos {r['scheduler_position']:>3}  {r['observer_key']:<8} "
+              f"room={str(room)[:12] if room else '-':<12} "
+              f"sees {len(seen)} entities  obs {r['observation_id'][:16]}")
+        if args.full:
+            print(json.dumps(c, indent=2))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="coliseum-lab", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -219,6 +259,24 @@ def main(argv=None):
                    help="include non-admitted runs (labeled; not for claims)")
     s.add_argument("--interaction", default="independent_vignettes", choices=interaction_choices,
                    help="which experimental mode to aggregate (modes never pool)")
+    spatial_root_kw = dict(default=os.path.join("logs", "spatial-runs"),
+                           help="spatial-run evidence root (separate from the "
+                                "vignette logs/runs tree)")
+    s = sub.add_parser("spatial-run"); s.set_defaults(fn=cmd_spatial_run)
+    s.add_argument("--scenario", required=True)
+    s.add_argument("--seed", type=int, default=42)
+    s.add_argument("--spatial-root", **spatial_root_kw)
+    s = sub.add_parser("spatial-replay"); s.set_defaults(fn=cmd_spatial_replay)
+    s.add_argument("run_id")
+    s.add_argument("--spatial-root", **spatial_root_kw)
+    s = sub.add_parser("spatial-inspect"); s.set_defaults(fn=cmd_spatial_inspect)
+    s.add_argument("run_id")
+    s.add_argument("--view", default="actor", choices=["actor", "privileged"])
+    s.add_argument("--agent", default=None)
+    s.add_argument("--full", action="store_true",
+                   help="print each observation's full content")
+    s.add_argument("--spatial-root", **spatial_root_kw)
+
     s = sub.add_parser("dataset-export"); s.set_defaults(fn=cmd_dataset_export)
     s.add_argument("--manifest", default=None,
                    help="evidence manifest to export (default: all runs under --out-root)")
