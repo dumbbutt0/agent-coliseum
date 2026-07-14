@@ -52,6 +52,21 @@ class SocietyTickState(ContentRecord):
                 "previous_society_tick_hash must be null exactly at tick 0")
         if set(trust_edges) != {_pair_key(i, j) for i, j in ORDERED_PAIRS}:
             raise ContentRecordError("trust_edges must be exactly the six ordered pairs")
+        if any(not isinstance(v, int) or isinstance(v, bool)
+               for v in trust_edges.values()):
+            raise ContentRecordError("every trust edge value must be an int")
+        if not isinstance(private_facts, dict):
+            raise ContentRecordError("private_facts must be a dict")
+        if not isinstance(enforcement_event_count, int) or \
+                isinstance(enforcement_event_count, bool) or enforcement_event_count < 0:
+            raise ContentRecordError("enforcement_event_count must be a non-negative int")
+        if not isinstance(scheduler_position_range, (list, tuple)) or \
+                len(scheduler_position_range) != 2 or \
+                any(not isinstance(x, int) or isinstance(x, bool)
+                    for x in scheduler_position_range) or \
+                scheduler_position_range[0] > scheduler_position_range[1]:
+            raise ContentRecordError(
+                "scheduler_position_range must be [lo, hi] ints with lo <= hi")
         super().__init__({
             "society_seed_version": SOCIETY_SEED_VERSION,
             "tick_index": tick_index,
@@ -61,6 +76,69 @@ class SocietyTickState(ContentRecord):
             "enforcement_event_count": enforcement_event_count,
             "scheduler_position_range": list(scheduler_position_range),
         })
+
+
+class SocietySourceEvidenceBinding(ContentRecord):
+    """Content-addresses the EIGHT society evidence files (the spatial six plus
+    society.jsonl + society_report.json) — the derived-evidence provenance
+    anchor. Domain-separated from the spatial + calibration bindings."""
+    __slots__ = ()
+    DOMAIN = "trs.source_evidence.society.v1"
+    ID_FIELD = "source_evidence_id"
+
+    def __init__(self, run_id, evidence_file_hashes):
+        if not isinstance(run_id, str) or not run_id:
+            raise ContentRecordError("run_id must be a non-empty string")
+        expected = {"run.json", "chain.jsonl", "transitions.jsonl",
+                    "observations.jsonl", "activations.jsonl", "closure.json",
+                    "society.jsonl", "society_report.json"}
+        if not isinstance(evidence_file_hashes, dict) or \
+                set(evidence_file_hashes) != expected:
+            raise ContentRecordError(
+                "evidence_file_hashes must bind exactly the eight society files")
+        for h in evidence_file_hashes.values():
+            if not isinstance(h, str) or len(h) != 64 or \
+                    any(c not in "0123456789abcdef" for c in h):
+                raise ContentRecordError("each hash must be 64 lowercase hex chars")
+        super().__init__({
+            "society_seed_version": SOCIETY_SEED_VERSION,
+            "run_id": run_id,
+            "evidence_file_hashes": dict(evidence_file_hashes),
+        })
+
+
+class SocietyOutcomeReport(ContentRecord):
+    """The closed, validated society-level OUTCOME record (design §8): the final
+    trust matrix, token terminal location, enforcement count, private fact, the
+    canonical FORK divergence summary, and the FIXED claim ceiling. Any other
+    claim string, or a missing fork summary, refuses."""
+    __slots__ = ()
+    DOMAIN = "society.outcome_report.v1"
+    ID_FIELD = "society_outcome_report_id"
+
+    _KEYS = frozenset({"society_seed_version", "scenario", "seed", "ticks",
+                       "final_trust_edges", "trust_update_count",
+                       "enforcement_event_count", "institutional_rule",
+                       "token_terminal_location", "private_fact",
+                       "fork_divergence_summary", "claim_ceiling"})
+
+    def __init__(self, payload):
+        if not isinstance(payload, dict) or set(payload) != self._KEYS:
+            raise ContentRecordError(
+                "society outcome report must have exactly the closed key set")
+        if payload["claim_ceiling"] != CLAIM_CEILING:
+            raise ContentRecordError("outcome claim_ceiling must be the fixed ceiling")
+        fs = payload["fork_divergence_summary"]
+        if not isinstance(fs, dict) or set(fs) != {
+                "intervention_id", "matched_pair_id", "divergence_report_id",
+                "fork_position", "first_divergent_coordinate",
+                "per_agent_perception_divergence"}:
+            raise ContentRecordError(
+                "fork_divergence_summary must carry the canonical fork material")
+        if set(payload["final_trust_edges"]) != {_pair_key(i, j)
+                                                 for i, j in ORDERED_PAIRS}:
+            raise ContentRecordError("final_trust_edges must be the six ordered pairs")
+        super().__init__(dict(payload))
 
 
 class SocietyRunManifest(ContentRecord):
@@ -155,14 +233,15 @@ def _privileged_states_by_position(run_dir):
 
 
 def _actor_view(run_dir):
-    """(position, agent_key) -> the set of visible entity ids from that agent's
-    recorded ACTOR observation."""
+    """(position, agent_key) -> (visible entity id set, actor_observation_id) from
+    that agent's recorded ACTOR observation."""
     run_json = _read(run_dir, "run.json")
     key_of = {b: k for k, b in run_json["observers"].items()}
     out = {}
     for r in _read_lines(run_dir, "observations.jsonl"):
-        out[(r["scheduler_position"], key_of[r["observer_body_id"]])] = set(
-            r["actor_content"]["content"]["visible_entity_identities"])
+        out[(r["scheduler_position"], key_of[r["observer_body_id"]])] = (
+            set(r["actor_content"]["content"]["visible_entity_identities"]),
+            r["actor_observation_id"])
     return out
 
 
@@ -210,21 +289,29 @@ def derive_society(run_dir):
         if eff["action"] == "give" and eff["object_instance_id"] == token:
             giver = key_of[eff["agent_body_id"]]
             recip = key_of[eff["recipient_agent_body_id"]]
+            # the recipient perceives its own receipt: bind to the recipient's
+            # actor observation of the POST-transfer state (position ``pos``).
+            _seen, obs_id = actor.get((pos, recip), (set(), None))
+            if obs_id is None:
+                raise ContentRecordError(
+                    "no recipient actor observation to justify a give update")
             trust[_pair_key(recip, giver)] += 1
             trust_updates.append({"scheduler_position": pos, "kind": "give",
                                   "edge": _pair_key(recip, giver), "delta": +1,
+                                  "actor_observation_id": obs_id,
                                   "provenance": "recipient perceives own receipt"})
         elif eff["action"] == "take" and eff["object_instance_id"] == token:
             taker = key_of[eff["agent_body_id"]]
             for other in AGENTS:
                 if other == taker:
                     continue
-                seen = actor.get((decided_at, other), set())
+                seen, obs_id = actor.get((decided_at, other), (set(), None))
                 if ids[taker] in seen and token in seen:
                     trust[_pair_key(other, taker)] -= 1
                     trust_updates.append({
                         "scheduler_position": pos, "kind": "witnessed_take",
                         "edge": _pair_key(other, taker), "delta": -1,
+                        "actor_observation_id": obs_id,
                         "provenance": f"actor view of {other} at pos {decided_at} "
                                       "contains taker and token"})
 

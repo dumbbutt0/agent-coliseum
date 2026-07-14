@@ -52,7 +52,8 @@ def _select_effect(cands, intent, ids):
 
 
 def _derive_script(genesis, closure, registry, world_line_id, glx, intents_by_key,
-                   key_of, ids, fork_after_intent, allow_unconsumed=False):
+                   key_of, ids, fork_after_intent, allow_unconsumed=False,
+                   legality_filter=None):
     """Simulate the canonical dispatch to derive the committed activate-effect
     script + the exclusive explicit stop position + the designated fork point.
     Returns (script, stop_position, fork_position, fork_state_hash).
@@ -96,6 +97,13 @@ def _derive_script(genesis, closure, registry, world_line_id, glx, intents_by_ke
             else:
                 intent = pending[key].pop(0)
                 cands = candidate_effects(body, state, closure, registry)
+                # an OPTIONAL above-substrate legality filter (default identity):
+                # society_seed_v1 passes the frozen institutional filter, so a
+                # scripted intent resolving only to an institutionally-blocked
+                # candidate REFUSES here at build time (the spatial candidate
+                # bytes are unchanged; the filter only narrows selection).
+                if legality_filter is not None:
+                    cands, _blocked = legality_filter(cands, state, ids)
                 eff = _select_effect(cands, intent, ids)
                 t = _mk_transition(state, eff, registry, actor=body)
                 cursor, state = consume(cursor, state, t, closure, registry)
@@ -203,7 +211,7 @@ def _two_agent_private_object_v1(registry, seed):
 
 def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_rows,
               intents, fork_after_intent, private_object_key=None,
-              allow_unconsumed=False):
+              allow_unconsumed=False, legality_filter=None):
     """Shared golden-suite assembler. One room spec; template object specs
     ('token' = portable exclusive takeable, 'box' = immobile container, 'gem' =
     portable exclusive takeable private object); every identity auto-derived;
@@ -260,7 +268,8 @@ def _assemble(registry, seed, name, room_keys, portal_rows, object_rows, body_ro
     key_of = {ids[k]: k for k, _ in body_rows}
     script, stop, fork_position, fork_state_hash = _derive_script(
         genesis, closure, registry, wl.id, glx, intents, key_of, ids,
-        fork_after_intent=fork_after_intent, allow_unconsumed=allow_unconsumed)
+        fork_after_intent=fork_after_intent, allow_unconsumed=allow_unconsumed,
+        legality_filter=legality_filter)
     run = SchedulerRun(wl.id, glx.id, action_script_commitment(script),
                        explicit_stop_position=stop)
     registry.register(run)
@@ -413,6 +422,7 @@ def _society_seed_v1(registry, seed, fact=True):
     in C — the referent of cy's private Boolean fact). Registered in the closed
     spatial SCENARIOS map so the calibration fork machinery consumes it
     unchanged; the society layer (rule/trust/ticks) is derived ABOVE it."""
+    from coliseum.textlab.society.rules import institutional_filter
     sc = _assemble(
         registry, seed, "society_seed_v1",
         room_keys=("A", "B", "C"),
@@ -428,7 +438,10 @@ def _society_seed_v1(registry, seed, fact=True):
         # take_out is legal — the one authenticated counterfactual.
         fork_after_intent=11,
         private_object_key="gem",
-        allow_unconsumed=True)
+        allow_unconsumed=True,
+        # the ONE institutional rule applied ABOVE the untouched spatial
+        # candidates: a scripted intent resolving only to a blocked move refuses.
+        legality_filter=institutional_filter)
     return sc
 
 
