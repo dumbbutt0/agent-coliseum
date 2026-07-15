@@ -704,11 +704,25 @@ def _validate_observations(rows, run, closure, chain_rows, chain_content):
                     actor_entity["location"] != authoritative["location"]:
                 refuse("actor_state_binding",
                        "actor entity kind/location differs from authenticated state")
-        visible_room = actor["visible_room_identity"]
-        for portal in actor_projection["portals"]:
-            if visible_room is None or (portal["portal_instance_id"], visible_room,
-                                        portal["to_room_instance_id"]) not in closure_portals:
-                refuse("actor_portal", "actor portal is outside visible authenticated topology")
+        observer_location = placement_by_id[body]["location"]
+        if observer_location["tag"] == "in_room":
+            expected_visible_room = observer_location["room_instance_id"]
+        elif observer_location["tag"] == "in_transit":
+            expected_visible_room = None
+        else:
+            refuse("actor_state_binding",
+                   "observer body has an unsupported authenticated location")
+        if actor["visible_room_identity"] != expected_visible_room:
+            refuse("actor_state_binding",
+                   "visible room differs from the authenticated observer location")
+        expected_portals = [
+            {"portal_instance_id": portal_id, "to_room_instance_id": destination}
+            for portal_id, origin, destination in sorted(closure_portals)
+            if origin == expected_visible_room
+        ]
+        if actor_projection["portals"] != expected_portals:
+            refuse("actor_state_binding",
+                   "actor portals differ from the authenticated visible-room arcs")
         validated.append(row)
     if seen != {(p, body) for p in range(len(chain_rows))
                 for body in run["observers"].values()}:

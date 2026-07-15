@@ -60,7 +60,9 @@ The renderer never parses canonical files. The actor response is positively
 constructed from the pinned actor's exact-schema observation artifacts. Global
 closure, privileged projections, transition records, activation records,
 logical instance labels, hidden events, and evaluator reports never enter that
-response.
+response. At admission, the actor's visible-room fact is derived from the
+observer body's authenticated placement, and its portal projection must equal
+the complete authenticated outgoing-arc set for that room.
 
 The research console renders unsupported experiment ID, agent regime, model
 regime, termination, and metrics fields explicitly as `Not available`; omission

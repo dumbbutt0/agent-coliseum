@@ -245,6 +245,54 @@ def test_reidentified_actor_kind_remains_bound_to_authenticated_state(
         load_validated_run(root, run_id)
 
 
+@pytest.mark.parametrize("mutation", [
+    "coordinated_in_closure", "coordinated_out_of_closure", "omit_portals",
+])
+def test_visible_room_and_portals_derive_from_authenticated_observer_location(
+        spatial_pack, tmp_path, mutation):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "observations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    row = next(candidate for candidate in rows if
+               candidate["actor_content"]["content"]
+               ["observable_state_projection"]["portals"])
+    body = row["observer_body_id"]
+    privileged_projection = row["privileged_content"]["content"] \
+        ["observable_state_projection"]
+    observer = next(entry for entry in
+                    privileged_projection["authoritative_placements"]
+                    if entry["entity_id"] == body)
+    authenticated_room = observer["location"]["room_instance_id"]
+    closure = json.loads((run_dir / "closure.json").read_text(encoding="utf-8"))
+    if mutation == "coordinated_in_closure":
+        forged_room = next(room for room in closure["rooms"]
+                           if room != authenticated_room)
+        for view in ("actor", "privileged"):
+            row[f"{view}_content"]["content"]["visible_room_identity"] = \
+                forged_room
+        row["actor_content"]["content"]["observable_state_projection"] \
+            ["portals"] = [
+                {"portal_instance_id": portal["portal_instance_id"],
+                 "to_room_instance_id": portal["to_room_instance_id"]}
+                for portal in closure["portals"]
+                if portal["from_room_instance_id"] == forged_room
+            ]
+    elif mutation == "coordinated_out_of_closure":
+        for view in ("actor", "privileged"):
+            row[f"{view}_content"]["content"]["visible_room_identity"] = "f" * 64
+        row["actor_content"]["content"]["observable_state_projection"] \
+            ["portals"] = []
+    else:
+        row["actor_content"]["content"]["observable_state_projection"] \
+            ["portals"] = []
+    for view in ("actor", "privileged"):
+        content = row[f"{view}_content"]["content"]
+        row[f"{view}_observation_id"] = observation_artifact(view, content).id
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="actor_state_binding"):
+        load_validated_run(root, run_id)
+
+
 def test_symlink_and_traversal_are_refused(spatial_pack, tmp_path):
     root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
     closure = run_dir / "closure.json"
