@@ -1,0 +1,359 @@
+"""Read-only visualization MVP: evidence, non-interference, and HTTP boundary."""
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import shutil
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from coliseum.textlab.schema import canonical_json, config_hash
+from coliseum.textlab.spatial.run import execute_spatial_run
+from coliseum.textlab.visualization import (
+    EvidenceLimits, RunRoot, build_view_model, load_validated_run, verify_replay)
+from coliseum.textlab.visualization.errors import VisualizationError
+from coliseum.textlab.visualization.server import VisualizationService, serve
+
+SCENARIO = "spatial_two_agent_private_object_v1"
+LIVE_ID = "society_seed_v1--seed42--b63d84694594b499"
+
+
+@pytest.fixture(scope="module")
+def spatial_pack(tmp_path_factory):
+    root = tmp_path_factory.mktemp("visualization-runs")
+    summary = execute_spatial_run(SCENARIO, 42, out_root=str(root))
+    return root, summary["run_id"]
+
+
+@pytest.fixture(scope="module")
+def validated(spatial_pack):
+    return load_validated_run(*spatial_pack)
+
+
+def _copy_pack(spatial_pack, tmp_path):
+    root, run_id = spatial_pack
+    target = tmp_path / "runs"
+    shutil.copytree(root, target)
+    return target, run_id, target / run_id
+
+
+def _write_json(path, value):
+    path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path, rows):
+    path.write_text("".join(canonical_json(row) + "\n" for row in rows),
+                    encoding="utf-8")
+
+
+def _sha_tree(run_dir):
+    import hashlib
+    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in run_dir.iterdir() if path.is_file()}
+
+
+def test_loader_rederives_complete_structural_evidence(validated):
+    assert validated.run_id.startswith(f"{SCENARIO}--seed42--")
+    assert len(validated.chain) == validated.run["chain_length"]
+    assert len(validated.activations) == len(validated.chain) - 1
+    assert len(validated.observations) == (
+        len(validated.chain) * len(validated.run["observers"]))
+    assert set(validated.file_hashes) == {
+        "run.json", "chain.jsonl", "transitions.jsonl", "observations.jsonl",
+        "activations.jsonl", "closure.json"}
+
+
+def test_loader_is_immutable_and_does_not_write(validated):
+    before = _sha_tree(Path(validated.run_dir))
+    with pytest.raises(TypeError):
+        validated.run["seed"] = 99
+    assert _sha_tree(Path(validated.run_dir)) == before
+
+
+def test_provider_free_spatial_replay_is_byte_identical(validated, tmp_path):
+    result = verify_replay(validated, scratch_root=str(tmp_path / "scratch"))
+    assert result.state == "verified"
+    assert "byte-identical" in result.detail
+
+
+def test_strict_json_refuses_duplicate_keys(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "run.json"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace('"seed":42', '"seed":42,"seed":42', 1),
+                    encoding="utf-8")
+    with pytest.raises(VisualizationError, match="malformed_json"):
+        load_validated_run(root, run_id)
+
+
+def test_unknown_schema_fails_closed(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    summary["spatial_run_schema_version"] = "999"
+    _write_json(run_dir / "run.json", summary)
+    with pytest.raises(VisualizationError, match="unsupported_schema"):
+        load_validated_run(root, run_id)
+
+
+def test_reordered_chain_cannot_masquerade_as_progress(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    rows = [json.loads(line) for line in
+            (run_dir / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows[1], rows[2] = rows[2], rows[1]
+    _write_jsonl(run_dir / "chain.jsonl", rows)
+    with pytest.raises(VisualizationError, match="chain_order|chain_link"):
+        load_validated_run(root, run_id)
+
+
+def test_value_sensitive_candidate_validation(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "activations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    activation = next(row for row in rows if row.get("candidate_universe"))
+    activation["candidate_universe"][0]["effect"]["action"] = "advance_step"
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="candidate_effect|candidate_identity"):
+        load_validated_run(root, run_id)
+
+
+def test_candidate_references_are_state_closure_bound(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "activations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    activation = next(row for row in rows if len(row.get("candidate_universe", [])) > 1)
+    candidate = activation["candidate_universe"][-1]
+    effect = candidate["effect"]
+    reference = next(key for key in effect if key.endswith("_id") and key != "agent_body_id")
+    effect[reference] = "f" * 64
+    candidate["action_id"] = canonical_json(effect)
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="effect_closure"):
+        load_validated_run(root, run_id)
+
+
+def test_actor_schema_rejects_privileged_carrier(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "observations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["actor_content"]["content"]["authoritative_placements"] = []
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="actor_schema|invalid_observation|invalid_shape"):
+        load_validated_run(root, run_id)
+
+
+def test_symlink_and_traversal_are_refused(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    closure = run_dir / "closure.json"
+    source = tmp_path / "outside.json"
+    source.write_bytes(closure.read_bytes())
+    closure.unlink()
+    closure.symlink_to(source)
+    with pytest.raises(VisualizationError, match="unsafe_evidence_file"):
+        load_validated_run(root, run_id)
+    with pytest.raises(VisualizationError, match="unsafe_run_id"):
+        load_validated_run(root, "../escape")
+
+
+def test_configured_and_absolute_size_ceilings_fail_closed():
+    with pytest.raises(VisualizationError, match="invalid_limits"):
+        EvidenceLimits(line_bytes=4 * 1024 * 1024 + 1)
+    with pytest.raises(VisualizationError, match="invalid_limits"):
+        EvidenceLimits(rows_per_stream=0)
+
+
+def test_optional_file_names_are_closed(spatial_pack):
+    root, run_id = spatial_pack
+    with pytest.raises(VisualizationError, match="unsafe_evidence_file"):
+        RunRoot(root).read(run_id, optional=("../outside",))
+
+
+def test_actor_view_contains_no_privileged_carriers_or_other_actor_labels(validated):
+    actor_key = sorted(validated.run["observers"])[0]
+    model = build_view_model(validated, "actor", actor_key)
+    encoded = json.dumps(model, sort_keys=True)
+    for forbidden in ("privileged_content", "privileged_observation_id",
+                      "authoritative_placements", "authoritative_lifecycle",
+                      "closure_visible_state_commitment", "scheduler_state_id",
+                      "transition_id", "activation_id", "instance_ids"):
+        assert forbidden not in encoded
+    for other_key in set(validated.run["observers"]) - {actor_key}:
+        assert other_key not in encoded
+
+
+def test_actor_view_omits_hidden_private_object(validated):
+    private_key = validated.run["private_object_key"]
+    assert private_key is not None
+    private_id = validated.run["instance_ids"][private_key]
+    visible_by_actor = {}
+    for key, body in validated.run["observers"].items():
+        visible_by_actor[key] = {entity["id"] for snapshot in
+                                 build_view_model(validated, "actor", key)["snapshots"]
+                                 for entity in snapshot["entities"]}
+    hidden_actor = next(key for key, visible in visible_by_actor.items()
+                        if private_id not in visible)
+    assert private_id not in json.dumps(build_view_model(validated, "actor", hidden_actor))
+    assert private_id in json.dumps(build_view_model(validated, "privileged"))
+
+
+def test_view_model_ordering_and_layout_are_deterministic(validated):
+    first = json.dumps(build_view_model(validated, "privileged"), sort_keys=True)
+    second = json.dumps(build_view_model(validated, "privileged"), sort_keys=True)
+    assert first == second
+    model = json.loads(first)
+    for snapshot in model["snapshots"]:
+        assert [room["id"] for room in snapshot["rooms"]] == \
+            sorted(room["id"] for room in snapshot["rooms"])
+        assert [entity["id"] for entity in snapshot["entities"]] == \
+            sorted(entity["id"] for entity in snapshot["entities"])
+
+
+def test_dynamic_state_changes_follow_recorded_snapshots(validated):
+    model = build_view_model(validated, "privileged")
+    state_signatures = {
+        tuple((entity["id"], canonical_json(entity["location"]))
+              for entity in snapshot["entities"])
+        for snapshot in model["snapshots"]}
+    assert len(state_signatures) > 1
+    assert model["map_model"]["simulation_impact"] is False
+
+
+def test_live_pack_preserves_incomplete_nonclaimable_ceiling():
+    root = Path("logs/live-persona-runs").resolve()
+    validated = load_validated_run(root, LIVE_ID)
+    for perspective, actor in (("actor", "ada"), ("privileged", None)):
+        provenance = build_view_model(validated, perspective, actor)["validation"]
+        assert provenance["completion"] == "incomplete"
+        assert provenance["behavioral_claimability"] == "nonclaimable"
+        assert provenance["result_status"] == "incomplete"
+    actor_model = build_view_model(validated, "actor", "ada")
+    privileged_model = build_view_model(validated, "privileged")
+    assert "model_regime" not in actor_model["experiment"]
+    assert privileged_model["experiment"]["model_regime"]["source"] == \
+        "structurally_valid_unverified_report"
+    assert privileged_model["experiment"]["termination"]["code"] == "control_desync"
+
+
+def test_counterfeit_favorable_report_is_not_presented_as_claimable(tmp_path):
+    source = Path("logs/live-persona-runs") / LIVE_ID
+    root = tmp_path / "live"
+    target = root / LIVE_ID
+    shutil.copytree(source, target)
+    report_path = target / "live_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["content"]["status"] = "complete"
+    report["content"]["complete"] = True
+    report["content"]["behavioral_departure_claimable"] = True
+    report["content"]["terminated"] = None
+    report["content"]["effective_n"] = report["content"]["effective_n_floor"]
+    report["content"]["decisions_parsed_ok"] = report["content"]["effective_n_floor"]
+    report["content"]["decisions_requested"] = report["content"]["effective_n_floor"]
+    report["content"]["per_code_counts"] = {"ok": report["content"]["effective_n_floor"]}
+    while len(report["content"]["per_tick"]) < report["content"]["effective_n_floor"]:
+        report["content"]["per_tick"].append(dict(report["content"]["per_tick"][-1]))
+    report["id"] = config_hash(report["content"])
+    _write_json(report_path, report)
+    validated = load_validated_run(root, LIVE_ID)
+    provenance = build_view_model(validated, "privileged")["validation"]
+    assert provenance["replay_verification"] == "unverified"
+    assert provenance["completion"] == "unknown"
+    assert provenance["behavioral_claimability"] == "unknown"
+    replay = verify_replay(validated, scratch_root=str(tmp_path / "counterfeit-replay"))
+    assert replay.state == "verified"
+    assert replay.report_state == "unverified"
+    authenticated = build_view_model(validated, "privileged",
+                                     replay_verification=replay)["validation"]
+    assert authenticated["completion"] == "unknown"
+    assert authenticated["behavioral_claimability"] == "unknown"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("complete", 0), ("complete", 0.0),
+    ("behavioral_departure_claimable", 0),
+    ("behavioral_departure_claimable", 0.0),
+])
+def test_live_claim_booleans_are_type_exact(tmp_path, field, value):
+    source = Path("logs/live-persona-runs") / LIVE_ID
+    root = tmp_path / "live"
+    target = root / LIVE_ID
+    shutil.copytree(source, target)
+    path = target / "live_report.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["content"][field] = value
+    report["id"] = config_hash(report["content"])
+    _write_json(path, report)
+    with pytest.raises(VisualizationError, match="claim_integrity"):
+        load_validated_run(root, LIVE_ID)
+
+
+def test_provider_free_live_replay_is_byte_identical(tmp_path):
+    validated = load_validated_run("logs/live-persona-runs", LIVE_ID)
+    result = verify_replay(validated, scratch_root=str(tmp_path / "live-replay"))
+    assert result.state == "verified"
+    assert "zero model calls" in result.detail
+
+
+@pytest.fixture
+def actor_server(spatial_pack):
+    root, _run_id = spatial_pack
+    actor = sorted(load_validated_run(root, _run_id).run["observers"])[0]
+    service = VisualizationService(root, "actor", actor, capability="t" * 43)
+    server, url = serve(service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield service, server, url
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_http_boundary_sets_security_headers_and_serves_scoped_json(actor_server):
+    service, _server, url = actor_server
+    with urllib.request.urlopen(url + "api/v1/runs", timeout=5) as response:
+        body = json.load(response)
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert "default-src 'self'" in response.headers["Content-Security-Policy"]
+        assert response.headers.get("Access-Control-Allow-Origin") is None
+    assert body["perspective"] == "actor"
+    assert body["runs"] and "observer_count" not in body["runs"][0]
+    run_id = body["runs"][0]["run_id"]
+    with urllib.request.urlopen(url + f"api/v1/runs/{run_id}/view", timeout=5) as response:
+        encoded = response.read().decode("utf-8")
+    assert "authoritative_placements" not in encoded
+    assert "privileged_content" not in encoded
+    assert service.capability not in encoded
+
+
+def test_http_boundary_rejects_wrong_host_raw_paths_and_mutation(actor_server):
+    service, server, url = actor_server
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    connection.request("GET", f"/{service.capability}/api/v1/health",
+                       headers={"Host": "attacker.invalid"})
+    assert connection.getresponse().status == 421
+    connection.close()
+    with pytest.raises(urllib.error.HTTPError) as raw:
+        urllib.request.urlopen(url + "raw/run.json", timeout=5)
+    assert raw.value.code == 404
+    request = urllib.request.Request(url + "api/v1/runs", method="POST", data=b"{}")
+    with pytest.raises(urllib.error.HTTPError) as mutation:
+        urllib.request.urlopen(request, timeout=5)
+    assert mutation.value.code == 405
+
+
+def test_static_client_uses_safe_text_and_accessible_controls(actor_server):
+    _service, _server, url = actor_server
+    with urllib.request.urlopen(url, timeout=5) as response:
+        html = response.read().decode("utf-8")
+    with urllib.request.urlopen(url + "static/app.js", timeout=5) as response:
+        script = response.read().decode("utf-8")
+    assert "innerHTML" not in script and "eval(" not in script
+    assert "textContent" in script and "createElementNS" in script
+    assert 'aria-live="polite"' in html
+    assert 'id="play-pause"' in html and 'id="scrubber"' in html
+    assert "prefers-reduced-motion" in (Path(
+        "coliseum/textlab/visualization/static/styles.css").read_text(encoding="utf-8"))

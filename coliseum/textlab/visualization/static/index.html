@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Coliseum Replay Viewer</title>
+  <link rel="stylesheet" href="static/styles.css">
+  <script src="static/playback.js" defer></script>
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#arena-panel">Skip to arena</a>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Agent Coliseum</p>
+      <h1>Replay viewer</h1>
+    </div>
+    <div class="run-picker">
+      <label for="run-select">Validated replay</label>
+      <select id="run-select" aria-describedby="load-status"></select>
+      <span id="load-status" role="status" aria-live="polite">Loading local runs…</span>
+    </div>
+    <div id="perspective-badge" class="perspective" aria-live="polite">Perspective unavailable</div>
+  </header>
+
+  <main class="workspace">
+    <aside class="panel chronicle" aria-labelledby="chronicle-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">Recorded history</p>
+          <h2 id="chronicle-title">Chronicle</h2>
+        </div>
+        <label class="compact" for="event-filter">Filter
+          <select id="event-filter"><option value="all">All events</option></select>
+        </label>
+      </div>
+      <ol id="event-list" class="event-list" aria-label="Replay events"></ol>
+    </aside>
+
+    <section id="arena-panel" class="panel arena-panel" aria-labelledby="arena-title" tabindex="-1">
+      <div class="panel-heading arena-heading">
+        <div>
+          <p class="eyebrow">Scenario-driven map</p>
+          <h2 id="arena-title">Arena</h2>
+        </div>
+        <div class="camera-controls" aria-label="Camera controls">
+          <button id="zoom-out" type="button" title="Zoom out">−</button>
+          <button id="zoom-in" type="button" title="Zoom in">+</button>
+          <button id="fit-map" type="button">Fit</button>
+          <button id="focus-selection" type="button">Focus</button>
+        </div>
+      </div>
+      <div id="arena-empty" class="empty-state">Choose an admitted replay.</div>
+      <svg id="arena" class="arena" role="img" aria-labelledby="arena-title arena-description"
+           viewBox="0 0 900 620" hidden>
+        <desc id="arena-description">A deterministic spatial replay map.</desc>
+        <g id="portal-layer"></g>
+        <g id="room-layer"></g>
+        <g id="entity-layer"></g>
+      </svg>
+      <div class="overlay-bar" aria-label="Map overlays">
+        <label><input id="overlay-room-labels" type="checkbox" checked> Room labels <span>derived</span></label>
+        <label><input id="overlay-portals" type="checkbox" checked> Portals <span>authoritative</span></label>
+        <label><input id="overlay-entities" type="checkbox" checked> Entities <span>authoritative</span></label>
+      </div>
+    </section>
+
+    <aside class="panel inspector" aria-labelledby="inspector-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">Authorized fields only</p>
+          <h2 id="inspector-title">Inspector</h2>
+        </div>
+      </div>
+      <div id="inspector-content" class="inspector-content">
+        <p>Select an agent, object, room, or event.</p>
+      </div>
+    </aside>
+  </main>
+
+  <section class="playback" aria-label="Replay controls">
+    <button id="jump-start" type="button" title="Beginning (Home)">⏮</button>
+    <button id="previous-event" type="button" title="Previous event">◀ event</button>
+    <button id="previous-tick" type="button" title="Previous tick (Left arrow)">◀ tick</button>
+    <button id="play-pause" class="primary" type="button" title="Play or pause (Space)">Play</button>
+    <button id="next-tick" type="button" title="Next tick (Right arrow)">tick ▶</button>
+    <button id="next-event" type="button" title="Next event">event ▶</button>
+    <button id="jump-end" type="button" title="End (End)">⏭</button>
+    <label for="speed">Speed
+      <select id="speed">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+      </select>
+    </label>
+    <label class="scrubber-label" for="scrubber">Recorded position
+      <input id="scrubber" type="range" min="0" max="0" value="0" step="1">
+    </label>
+    <output id="position-output" for="scrubber">Position 0 / 0</output>
+  </section>
+
+  <details class="research-console" open>
+    <summary>Research console — provenance dimensions</summary>
+    <div id="research-content" class="research-grid">
+      <p>No run loaded.</p>
+    </div>
+  </details>
+</body>
+</html>
