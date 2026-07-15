@@ -70,7 +70,11 @@ def parse_numeric_menu(raw, n):
     """Return (parsed_index | None, parse_status). Strip any <think>...</think>
     block, take the FIRST maximal run of ASCII digits in the remainder as an
     integer k; 1<=k<=n selects menu item k -> ("ok"); no digits -> parse_failure;
-    a well-formed integer outside 1..n -> illegal_selection. Deterministic/total."""
+    a well-formed integer outside 1..n -> illegal_selection. Deterministic/total —
+    a non-string raw (e.g. a malformed null completion) has no digit run and maps
+    to parse_failure, never a TypeError."""
+    if not isinstance(raw, str):
+        return None, "parse_failure"
     stripped = _THINK_RE.sub("", raw)
     m = _DIGITS_RE.search(stripped)
     if m is None:
@@ -264,6 +268,68 @@ def terminal_coding_for(code):
     if code == "ok":
         return None
     return _TERMINAL_CODING[code]
+
+
+def _as_int(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _normalize_decision(d):
+    """Enforce the closed persona decision schema (§6). Returns
+    (call_outcome, raw_completion, completion_reason, eval_count,
+    prompt_eval_count). Any transport outcome outside the closed enum maps to
+    backend_exception (a closed non-response failure). A non-response outcome
+    forces EVERY response-derived field to null. A responded outcome coerces the
+    response fields to their closed types (raw -> str, reason -> str|null, the
+    counts -> int|null), so a malformed persona output cannot admit inconsistent
+    evidence or escape the total taxonomy."""
+    co = d.get("call_outcome")
+    if co not in CALL_OUTCOMES:
+        co = "backend_exception"
+    if co in ("deadline_exceeded", "backend_exception"):
+        return co, None, None, None, None
+    raw = d.get("raw_completion")
+    raw = raw if isinstance(raw, str) else ""
+    reason = d.get("completion_reason")
+    reason = reason if isinstance(reason, str) else None
+    return co, raw, reason, _as_int(d.get("eval_count")), _as_int(d.get("prompt_eval_count"))
+
+
+_PERSONA_ROW_KEYS = frozenset({
+    "tick", "scheduler_position", "prompt_hash", "call_outcome", "model_id",
+    "model_digest", "decoding", "raw_completion", "completion_reason",
+    "eval_count", "prompt_eval_count", "parsed_menu_id", "parse_status"})
+
+
+def _validate_persona_row(row):
+    """The closed persona.jsonl row schema (§6), enforced at the replay boundary so
+    a tampered/malformed source row cannot be authenticated: exactly the permitted
+    keys; a non-response call_outcome REQUIRES every response-derived field null; a
+    responded row requires a string raw_completion and null-or-typed metadata.
+    Raises ContentRecordError on any violation."""
+    if not isinstance(row, dict) or set(row) != _PERSONA_ROW_KEYS:
+        raise ContentRecordError("persona row must have exactly the closed key set")
+    co = row["call_outcome"]
+    if co not in CALL_OUTCOMES:
+        raise ContentRecordError(f"unknown call_outcome {co!r} in persona row")
+    resp_fields = ("raw_completion", "completion_reason", "eval_count",
+                   "prompt_eval_count", "parsed_menu_id", "parse_status")
+    if co in ("deadline_exceeded", "backend_exception"):
+        if any(row[k] is not None for k in resp_fields):
+            raise ContentRecordError(
+                f"{co} row must null every response-derived field")
+        return
+    # responded
+    if not isinstance(row["raw_completion"], str):
+        raise ContentRecordError("responded row raw_completion must be a string")
+    if row["completion_reason"] is not None and \
+            not isinstance(row["completion_reason"], str):
+        raise ContentRecordError("responded row completion_reason must be str|null")
+    for k in ("eval_count", "prompt_eval_count"):
+        if row[k] is not None and (not isinstance(row[k], int) or isinstance(row[k], bool)):
+            raise ContentRecordError(f"responded row {k} must be int|null")
+    if row["parse_status"] not in ("ok", "parse_failure", "illegal_selection"):
+        raise ContentRecordError("responded row parse_status must be a parser status")
 
 
 # ===========================================================================
@@ -573,10 +639,13 @@ def _drive(persona, base_sc, registry, control_intents, ada_budget=TICKS):
             prompt = assemble_prompt(actor.content["content"], menu)
             n = len(menu)
             d = persona.decide(prompt, menu, {"scheduler_position": pos, "tick": tick})
-            raw = d.get("raw_completion")
-            reason = d.get("completion_reason")
-            ec = d.get("eval_count")
-            if d["call_outcome"] == "responded":
+            # ENFORCE the closed decision schema BEFORE any capture (§6): a
+            # non-response outcome forces every response-derived field to null; a
+            # responded outcome coerces the response fields to their closed types
+            # (a malformed null/non-string completion can never escape the taxonomy
+            # or admit inconsistent evidence).
+            co, raw, reason, ec, pec = _normalize_decision(d)
+            if co == "responded":
                 parsed, parse_status = parse_numeric_menu(raw, n)
                 parsed_menu_id = (canonical_effect_id(menu[parsed - 1])
                                   if parse_status == "ok" else None)
@@ -585,17 +654,17 @@ def _drive(persona, base_sc, registry, control_intents, ada_budget=TICKS):
             persona_rows.append({
                 "tick": tick, "scheduler_position": pos,
                 "prompt_hash": config_hash(prompt),
-                "call_outcome": d["call_outcome"],
+                "call_outcome": co,
                 "model_id": d["model_id"], "model_digest": d["model_digest"],
                 "decoding": d["decoding"], "raw_completion": raw,
                 "completion_reason": reason, "eval_count": ec,
-                "prompt_eval_count": d.get("prompt_eval_count"),
+                "prompt_eval_count": pec,
                 "parsed_menu_id": parsed_menu_id, "parse_status": parse_status})
             latency_rows.append({"scheduler_position": pos,
                                  "latency_ms": d.get("latency_ms"),
                                  "wall_clock_note": "non-identity"})
             ada_used += 1
-            code, _p, term = classify_decision(d["call_outcome"], raw, reason, ec, n)
+            code, _p, term = classify_decision(co, raw, reason, ec, n)
             if code == "ok":
                 eff = menu[parsed - 1]
                 t = _mk_transition(state, eff, registry, actor=body)
@@ -812,6 +881,11 @@ def replay_live_persona_pilot(run_dir, out_root=None, scratch_root=None):
     persona_rows = [json.loads(l) for l in
                     open(os.path.join(run_dir, "persona.jsonl"), encoding="utf-8")
                     if l.strip()]
+    # authenticate the closed persona-row schema BEFORE re-derivation: a malformed
+    # or tampered source row (a non-response outcome carrying response fields, a
+    # responded row with a non-string completion) cannot be admitted to replay.
+    for row in persona_rows:
+        _validate_persona_row(row)
     run_json = json.loads(open(os.path.join(run_dir, "run.json"), encoding="utf-8").read())
     seed = run_json["seed"]
     scratch = scratch_root or tempfile.mkdtemp(prefix="live-replay-")

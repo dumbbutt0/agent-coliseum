@@ -568,6 +568,58 @@ def test_backend_exception_terminates_incomplete(tmp_path):
     assert res["terminated"]["terminal_coding"] == "infrastructure_failure"
 
 
+def test_non_response_outcome_nulls_all_response_fields(tmp_path):
+    """audit 001335 HIGH-1 closure: a deadline_exceeded / backend_exception
+    decision that (adversarially) carries non-null response fields is normalized
+    to the closed schema — every response-derived field is null in the written
+    persona.jsonl row — so no inconsistent evidence is admitted."""
+    for co in ("deadline_exceeded", "backend_exception"):
+        res = _run_with_plan([{"call_outcome": co, "raw_completion": "1",
+                               "completion_reason": "stop", "eval_count": 1,
+                               "prompt_eval_count": 2}], tmp_path / co)
+        row = [json.loads(l) for l in open(
+            os.path.join(res["run_dir"], "persona.jsonl"), encoding="utf-8")][0]
+        assert row["call_outcome"] == co
+        for k in ("raw_completion", "completion_reason", "eval_count",
+                  "prompt_eval_count", "parsed_menu_id", "parse_status"):
+            assert row[k] is None, f"{co} row leaked {k}={row[k]!r}"
+        ok, detail = live.replay_live_persona_pilot(res["run_dir"])
+        assert ok, detail
+
+
+def test_malformed_responded_null_raw_resolves_fail_closed(tmp_path):
+    """audit 001335 HIGH-2 closure: a responded decision with a null (non-string)
+    raw_completion does NOT raise — it resolves to a closed failure (parse_failure)
+    with exactly one identity row, and the row's raw_completion is the normalized
+    empty string (a string, per the closed schema)."""
+    assert live.parse_numeric_menu(None, 3) == (None, "parse_failure")
+    res = _run_with_plan([{"call_outcome": "responded", "raw_completion": None,
+                           "completion_reason": "stop", "eval_count": 1}], tmp_path)
+    assert res["terminated"]["code"] == "parse_failure"
+    assert res["persona_row_count"] == 1
+    row = [json.loads(l) for l in open(
+        os.path.join(res["run_dir"], "persona.jsonl"), encoding="utf-8")][0]
+    assert row["raw_completion"] == "" and row["parse_status"] == "parse_failure"
+    ok, detail = live.replay_live_persona_pilot(res["run_dir"])
+    assert ok, detail
+
+
+def test_replay_refuses_malformed_persona_row(mimic_run, tmp_path):
+    """audit 001335 closure: replay rejects a source row that violates the closed
+    schema — a non-response outcome carrying response fields."""
+    import shutil
+    dst = str(tmp_path / "malformed")
+    shutil.copytree(mimic_run["run_dir"], dst)
+    rows = [json.loads(l) for l in open(
+        os.path.join(dst, "persona.jsonl"), encoding="utf-8") if l.strip()]
+    rows[0] = dict(rows[0], call_outcome="deadline_exceeded")  # keeps raw non-null
+    with open(os.path.join(dst, "persona.jsonl"), "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(canonical_json(r) + "\n")
+    with pytest.raises(Exception):
+        live.replay_live_persona_pilot(dst)
+
+
 def test_incomplete_replays_byte_identical(tmp_path):
     res = _run_with_plan(["9999"], tmp_path)     # illegal_selection at tick 0
     assert res["terminated"]["code"] == "illegal_selection"
