@@ -79,10 +79,103 @@ fields plus exactly these handoff fields:
 - for corrections only: prior result request ID, prior ready/result-audit/
   blocked/fix-started event IDs, and prior experiment-config/evidence hashes.
 
-`result_config` is closed and contains the authorization profile, run/binding
+`result_config` is closed and contains the authorization-profile identity, run/binding
 identity, regime/seed/limits, exact artifact-role map, primary-capture hashes,
 and conclusion scope. Thus `experiment_config_hash` authenticates the executed
 boundary without pretending that a runner config existed.
+
+For the compatibility entry, `result_config` has **exactly** the following
+canonical JSON value. Every object at every depth is closed: missing or unknown
+keys refuse; strings, integers, booleans, and the floating-point `temperature`
+must have the JSON types shown. Maps compare by canonical JSON equality, never
+by subset membership.
+
+```json
+{
+  "artifact_roles": {
+    "activations.jsonl": "primary_capture",
+    "chain.jsonl": "primary_capture",
+    "closure.json": "primary_capture",
+    "live_report.json": "derived_result",
+    "observations.jsonl": "primary_capture",
+    "persona.jsonl": "primary_capture",
+    "persona_latency.jsonl": "primary_capture",
+    "run.json": "primary_capture",
+    "transitions.jsonl": "primary_capture"
+  },
+  "authorization_profile_id": "society_live_persona_result_handoff.v1",
+  "conclusion_scope": "incomplete authenticated capture-replay only; no behavioral claim",
+  "evidence_inventory_hash": "3906af0c0fd56562df284690c9634c796ee048271c3ca06098814c95efca4af7",
+  "limits": {
+    "adaptive_intervention": false,
+    "live_agents": 1,
+    "live_runs": 1,
+    "max_requested_decisions": 8,
+    "retries": 0,
+    "scripted_controls": 2,
+    "training": false
+  },
+  "live_source_evidence_id": "7037594c102e5c19ace51a248fd25e315d3685029b4e0b385f1e41a09968c0d5",
+  "manifest_file": "logs/live-persona-runs/society_seed_v1--seed42--b63d84694594b499.manifest.json",
+  "outcome": {
+    "behavioral_departure_claimable": false,
+    "behavioral_departure_count": 1,
+    "complete": false,
+    "decisions_parsed_ok": 4,
+    "decisions_requested": 4,
+    "effective_n": 4,
+    "effective_n_floor": 6,
+    "first_divergence_tick": 1,
+    "observability_restricted_count": 2,
+    "status": "incomplete",
+    "terminated": {
+      "code": "control_desync",
+      "control": "bo",
+      "scheduler_position": 15,
+      "terminal_coding": "control_desync_termination",
+      "tick": 3
+    }
+  },
+  "primary_capture_hashes": {
+    "activations.jsonl": "db7db81d0fdd07165a29e01e5b1ac75db55a8127e11100dfb8890b58f4fef159",
+    "chain.jsonl": "262a9590ebfa4046cab9fe78b469e689812e84cca285a3f7a3a0b0501f3bc5ad",
+    "closure.json": "d7f37589d8856d595c6fdba7d699f89d82ef35cdebe6ae768d13951471638324",
+    "observations.jsonl": "178b4a2d8424a5717046b8bc3ddb0b0c61c90f550d75b320f6d1579c78d22319",
+    "persona.jsonl": "103c04eb9ea4c367a37c2eb787a30ce99c64c7d03f4830e499ee0c15c2f0f04f",
+    "persona_latency.jsonl": "b1ac8cbe8db219bec672658b1152917487d4d512c4eb942d160902780ac3b96c",
+    "run.json": "6550784d49d05fdda1bd5a801079b00c0f2d01296799b65f2533b082551afb82",
+    "transitions.jsonl": "c4e625f30d04ef94aa0700c937bc12d2c3252ebb4a2eef59bdf0a0adaab6418b"
+  },
+  "regime": {
+    "backend_version": "0.22.0",
+    "decoding": {
+      "num_predict": 256,
+      "seed": 42,
+      "temperature": 0.0
+    },
+    "model_digest": "103482475c9b4d4032999dd5d7383478cad8b966ae6ae984d525daf7352c2219",
+    "model_id": "huihui_ai/qwen2.5-abliterate:7b-instruct",
+    "parser_version": "society_numeric_menu.v1",
+    "persona_actor_version": "0.1",
+    "prompt_version": "society_persona_prompt.v1",
+    "seed_supported": true
+  },
+  "regime_id": "a442b818f2f164d446519edca7fc995abde04a3bdffd20e1ca78c16f5b1c3cb0",
+  "report_id": "b91a808ef43fc896edb3c2644b1bcfb8baa17931734ea8a288b2f4c7aece2e59",
+  "run_dir": "logs/live-persona-runs/society_seed_v1--seed42--b63d84694594b499",
+  "run_id": "society_seed_v1--seed42--b63d84694594b499",
+  "schema_version": "result-handoff-config.v1"
+}
+```
+
+The exact full manifested inventory is the nine path/digest entries in
+`society_seed_v1--seed42--b63d84694594b499.manifest.json`; its content-domain
+identity is the `evidence_inventory_hash` above. The validator recomputes that
+inventory and requires the manifest's file map to equal it. It then projects
+the eight `primary_capture` entries and requires exact equality to the literal
+`primary_capture_hashes` map above. `live_report.json` must have digest
+`d5645dad79fca107197f880cada717555d17d136367e5c7d6711db1ecf00f974`
+and contain the exact report/regime IDs and regime object above.
 
 The initial Society live-persona pack uses this exact role map:
 
@@ -98,7 +191,44 @@ non-regular files, or role reclassification refuse.
 
 ## 4. Closed authorization predicate
 
-Every handoff validates an `authorization_profile`. Future profiles require a
+Every handoff validates an `authorization_profile`. It is a closed object with
+exactly `profile_id`, `design`, and `implementation`. Each authority object has
+exactly `request_id`, `request_payload_hash`, `publication_event_id`,
+`publication_event_hash`, `go_event_id`, `go_event_hash`,
+`integration_event_id`, `integration_event_hash`, and `integrated_commit`.
+The compatibility value is exactly:
+
+```json
+{
+  "design": {
+    "go_event_hash": "0ba0421b524fc870d487ca987da80a9195b114b9dba8fa280721dc2f826dae4d",
+    "go_event_id": "001314-f9213572",
+    "integrated_commit": "e792a1981bdfd76b404a85deefcf933646901a78",
+    "integration_event_hash": "cbfbc43d15d5b62476cdba755f7357a509edac34e4379db2bdc3d92680706e3c",
+    "integration_event_id": "001315-1359cd7b",
+    "publication_event_hash": "34ca25084012ede04af66587537d62e6406a9b9de5fc8c230a14f06854763954",
+    "publication_event_id": "001312-87b4f8ee",
+    "request_id": "first-gladiator-society-live-persona-design-008",
+    "request_payload_hash": "77c96d1d7e5592c2073ecd19536486b99d48f651951f3219e1ae257d880f4857"
+  },
+  "implementation": {
+    "go_event_hash": "2df86105543b42b5a7c0ddef1c13c1800f76247536de82eb20b5a73b57bd812a",
+    "go_event_id": "001340-da14306d",
+    "integrated_commit": "06d3afab15ecbff14723338fd5418751f77a288b",
+    "integration_event_hash": "70d3f8dadbc4d2d74fcf0bcddbc48418c684972a2bb0308d1755a8acd471d11c",
+    "integration_event_id": "001341-a1718410",
+    "publication_event_hash": "4044f8e15fcef4b6cbaab8db2429f64e61c0cac9d0421fb93acafc1dc49801e8",
+    "publication_event_id": "001338-9140ea10",
+    "request_id": "first-gladiator-society-live-persona-impl-005",
+    "request_payload_hash": "b152824b0e0d14346eaa2ef6f3ecb18c7b5d07ab91f2b94e869ff9343f1d7c55"
+  },
+  "profile_id": "society_live_persona_result_handoff.v1"
+}
+```
+
+The supplied `authorization_profile` and `result_config` must each equal their
+code-pinned canonical literal in full; their profile IDs must equal each other.
+Their nested keys are not configurable. Future profiles require a
 structured `post_integration_result_authorization` object in both audited source
 requests. The already-preregistered Society pilot is admitted only through a
 one-entry compatibility profile pinned in code and tests:
