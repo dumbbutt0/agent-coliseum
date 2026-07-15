@@ -201,9 +201,12 @@ def verified_request(root: str, cfg: Config, request_id: str) -> tuple:
     request = read_request(root, request_id)
     failures: list = []
     chain = events.read_chain(root)  # hash-verified end to end
+    pin_types = (("RESULT_HANDOFF_READY", "RESULT_FIX_READY")
+                 if request.get("task_kind") == "result_handoff"
+                 else ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"))
     pins = [e for e in chain
             if e["request_id"] == request_id
-            and e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")]
+            and e["event_type"] in pin_types]
     if not pins:
         failures.append(
             "no publish event pins this request — the file has no "

@@ -62,6 +62,8 @@ TRANSITIONS = {
                             EXPERIMENT_COMPLETE),
     "RESULT_VALIDATION_REQUIRED": (frozenset({EXPERIMENT_COMPLETE}),
                                    RESULT_VALIDATION),
+    "RESULT_HANDOFF_READY": (frozenset({NONE}), RESULT_VALIDATION),
+    "RESULT_FIX_READY": (frozenset({NONE}), RESULT_VALIDATION),
     "RESULT_AUDIT_REQUESTED": (frozenset({RESULT_VALIDATION}), RESULT_AUDIT),
     "RESULT_APPROVED": (frozenset({RESULT_AUDIT}), RESULT_APPROVED),
     "RESULT_BLOCKED": (frozenset({RESULT_AUDIT}), RESULT_BLOCKED),
@@ -147,6 +149,17 @@ def check(event: dict, requests: dict) -> None:
             f"request {event['request_id']!r} is AUTONOMY_PAUSED — only a "
             "human cancel/fresh request may follow")
 
+    if etype == "RESULT_FIX_READY":
+        prior_id = event["payload"]["request"].get("prior_result_request_id")
+        prior = requests.get(prior_id, _blank_request())
+        if prior_id == event["request_id"] or prior["state"] != FIXING:
+            raise TransitionError(
+                "RESULT_FIX_READY requires a distinct prior result request "
+                "in fixing state")
+        if prior.get("audit_cycles", 0) >= 5:
+            raise TransitionError(
+                "result-handoff lineage already ran five audit cycles")
+
     if etype not in TRANSITIONS:
         raise TransitionError(f"no transition defined for {etype}")
     allowed_from, _to = TRANSITIONS[etype]
@@ -231,6 +244,14 @@ def apply(event: dict, requests: dict) -> dict:
     if etype in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
         req["target_commit"] = event["target_commit"]
         req["audit_cycles"] += 1
+    if etype in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
+        req["target_commit"] = event["target_commit"]
+        if etype == "RESULT_FIX_READY":
+            prior_id = event["payload"]["request"]["prior_result_request_id"]
+            req["audit_cycles"] = requests[prior_id]["audit_cycles"] + 1
+        else:
+            req["audit_cycles"] = 1
+        req["publication_event_id"] = event["event_id"]
     if etype == "AUDIT_CLAIMED":
         req["claimed_by"] = event["sender"]
     if etype in ("AUDIT_BLOCKED", "AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",

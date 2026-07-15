@@ -16,7 +16,8 @@ import json
 import sys
 
 from tools.council import (events, get_config, identity, locking, policy,
-                           publish, resume_locator, state_machine, storage,
+                           publish, result_handoff, resume_locator,
+                           state_machine, storage,
                            strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    validate_commit, validate_request_id)
@@ -85,6 +86,17 @@ def cmd_init(args) -> int:
         print("bootstrap (fail-closed root): 1) identity-init  "
               "2) status-set --status active   — until then everything "
               "is paused")
+    return 0
+
+
+def cmd_result_handoff(args) -> int:
+    cfg, root = _cfg(args)
+    with open(args.file, "rb") as fh:
+        request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
+    event = result_handoff.publish_handoff(
+        root, cfg, request, correction=args.command == "result-fix-ready")
+    print(f"result audit published for {request['request_id']} "
+          f"(event {event['event_id']})")
     return 0
 
 
@@ -724,6 +736,11 @@ def main(argv=None) -> int:
     p.add_argument("--reaudit", action="store_true")
     p.add_argument("--autonomous", action="store_true")
 
+    p = sub.add_parser("result-handoff")
+    p.add_argument("--file", required=True)
+    p = sub.add_parser("result-fix-ready")
+    p.add_argument("--file", required=True)
+
     p = sub.add_parser("record")
     p.add_argument("--type", required=True)
     p.add_argument("--request-id", required=True)
@@ -783,6 +800,8 @@ def main(argv=None) -> int:
                 "locate-resume-checkpoint": cmd_locate_resume_checkpoint,
                 "rebuild-state": cmd_rebuild_state,
                 "publish-request": cmd_publish_request,
+                "result-handoff": cmd_result_handoff,
+                "result-fix-ready": cmd_result_handoff,
                 "record": cmd_record, "approve": cmd_approve,
                 "approve-conditions": cmd_approve_conditions,
                 "identity-init": cmd_identity_init,

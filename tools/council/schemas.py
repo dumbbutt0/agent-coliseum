@@ -62,6 +62,8 @@ EVENT_TYPES = (
     "RESULT_AUDIT_REQUESTED",
     "RESULT_APPROVED",
     "RESULT_BLOCKED",
+    "RESULT_HANDOFF_READY",
+    "RESULT_FIX_READY",
     # launcher extension (owner-ratified 2026-07-11): a GO-audited source
     # candidate is folded into the mainline by fast-forward only; the event
     # records exactly which audited commit master advanced to
@@ -138,6 +140,8 @@ SENDER_ALLOWED = {
     "RESULT_AUDIT_REQUESTED": frozenset({"claude"}),
     "RESULT_APPROVED": frozenset({"codex"}),
     "RESULT_BLOCKED": frozenset({"codex"}),
+    "RESULT_HANDOFF_READY": frozenset({"claude"}),
+    "RESULT_FIX_READY": frozenset({"claude"}),
     "CHANGE_INTEGRATED": frozenset({"claude"}),
     "CONDITIONS_SATISFIED": frozenset({"human"}),
     # claude-sender + TOKENLESS: authority is a re-validated evaluate_delegation
@@ -263,7 +267,7 @@ def _validate_safe_relpath(value, field: str) -> None:
 # Absent field = "experiment": every pre-existing request keeps its exact
 # behavior. The field sits inside request_payload_hash, so the kind is
 # event-pinned and tamper-evident like every other request field.
-TASK_KINDS = ("experiment", "source")
+TASK_KINDS = ("experiment", "source", "result_handoff")
 
 GENESIS_HASH = "0" * 64
 
@@ -488,6 +492,42 @@ def validate_sender(event_type: str, sender: str) -> None:
 SUPPORTED_PROTOCOL_VERSIONS = ("1.0", "2.0")
 
 
+def _validate_result_ready_payload(event: dict) -> None:
+    """Validate the self-authenticating event-first handoff journal entry.
+
+    Repository and filesystem checks belong to the publisher because event
+    replay must remain independent of local checkout availability.
+    """
+    payload = event["payload"]
+    required = {"transaction_id", "phase", "request",
+                "request_payload_hash"}
+    if set(payload) != required:
+        raise SchemaViolation(
+            f"{event['event_type']} payload keys must be exactly "
+            f"{sorted(required)}")
+    if payload["phase"] != "ready_published":
+        raise SchemaViolation("result-ready phase must be 'ready_published'")
+    if not isinstance(payload["transaction_id"], str) or \
+            not re.fullmatch(r"[0-9a-f]{64}", payload["transaction_id"]):
+        raise SchemaViolation("result-ready transaction_id must be sha256 hex")
+    request = payload["request"]
+    if not isinstance(request, dict):
+        raise SchemaViolation("result-ready request must be an object")
+    if request.get("task_kind") != "result_handoff":
+        raise SchemaViolation("result-ready request must be result_handoff")
+    if request.get("request_id") != event["request_id"] or \
+            request.get("repository") != event["repository"] or \
+            request.get("target_commit") != event["target_commit"]:
+        raise SchemaViolation(
+            "result-ready request coordinates differ from its event")
+    want = compute_request_payload_hash(request)
+    if request.get("request_payload_hash") != want or \
+            payload["request_payload_hash"] != want:
+        raise SchemaViolation(
+            "result-ready request_payload_hash does not match content")
+    validate_request(request, (event["repository"],))
+
+
 def validate_event(event: dict, for_append: bool = False) -> None:
     """Version-dispatched (H2): 1.0 events are valid on READ/replay only;
     only the CURRENT protocol_version may be appended (for_append=True)."""
@@ -511,6 +551,8 @@ def validate_event(event: dict, for_append: bool = False) -> None:
         validate_verdict_event_payload(event)
     if event["event_type"] in CLASS_C_PAYLOAD_EVENT_TYPES:
         validate_class_c_event_payload(event)
+    if event["event_type"] in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
+        _validate_result_ready_payload(event)
     if compute_event_hash(event) != event["event_hash"]:
         raise ChainError(
             f"event {event.get('event_id')!r}: event_hash does not match "
@@ -589,10 +631,27 @@ def validate_request(request: dict, repo_roots) -> None:
             if len(entry) > _MAX_FIELD_STRING:
                 raise SchemaViolation(
                     f"{list_field} entry exceeds {_MAX_FIELD_STRING} chars")
+    allowed_verdicts = (RESULT_VERDICT_EVENT_TYPES
+                        if task_kind == "result_handoff"
+                        else VERDICT_EVENT_TYPES)
     for v in request["requested_verdicts"]:
-        if v not in VERDICT_EVENT_TYPES:
+        if v not in allowed_verdicts:
             raise SchemaViolation(f"requested verdict {v!r} is not a "
                                   "verdict event type")
+    if task_kind == "result_handoff":
+        if request["human_approval_required"] is not True:
+            raise SchemaViolation(
+                "result_handoff has no execution/autonomy path and requires "
+                "the conservative true flag")
+        if request["expected_test_command"] != FULL_TEST_COMMAND:
+            raise SchemaViolation("result_handoff must name the full suite")
+        if request["requested_verdicts"] != ["RESULT_APPROVED",
+                                              "RESULT_BLOCKED"]:
+            raise SchemaViolation(
+                "result_handoff requested_verdicts must be exactly "
+                "['RESULT_APPROVED', 'RESULT_BLOCKED']")
+        from tools.council.result_handoff import validate_handoff_request
+        validate_handoff_request(request)
     # H2 item 11: v2 requests must carry safe relative path fields (1.0
     # requests keep the legacy permissive behavior on replay)
     if request["protocol_version"] == "2.0":
@@ -1007,10 +1066,15 @@ def crosscheck_verdict_bindings(event: dict, chain: list,
     verdict = event["payload"]
     rid = event["request_id"]
 
-    # the pinned publication event (source: latest AUDIT_REQUESTED/
-    # READY_FOR_REAUDIT; result: the RESULT_AUDIT_REQUESTED)
-    pub_types = (("RESULT_AUDIT_REQUESTED",) if result_kind
-                 else ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"))
+    # Result handoffs use their event-first ready journal as the publication
+    # authority root; ordinary runner results retain RESULT_AUDIT_REQUESTED.
+    handoff_pubs = [e for e in chain if e["request_id"] == rid and
+                    e["event_type"] in
+                    ("RESULT_HANDOFF_READY", "RESULT_FIX_READY")]
+    handoff = result_kind and bool(handoff_pubs)
+    pub_types = (("RESULT_HANDOFF_READY", "RESULT_FIX_READY") if handoff
+                 else (("RESULT_AUDIT_REQUESTED",) if result_kind
+                       else ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")))
     pub = None
     for e in chain:
         if e["request_id"] == rid and e["event_type"] in pub_types:
@@ -1031,10 +1095,17 @@ def crosscheck_verdict_bindings(event: dict, chain: list,
     # request_payload_hash: source binds the payload hash pinned by the
     # publication event; result binds the request's payload hash too
     pinned_req_hash = None
+    pinned_expected = None
+    source_types = (("RESULT_HANDOFF_READY", "RESULT_FIX_READY") if handoff
+                    else ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"))
     for e in chain:
-        if e["request_id"] == rid and e["event_type"] in (
-                "AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+        if e["request_id"] == rid and e["event_type"] in source_types:
             pinned_req_hash = e["payload"].get("request_payload_hash")
+            if handoff:
+                pinned_expected = e["payload"].get("request", {}).get(
+                    "expected_test_count")
+            else:
+                pinned_expected = e["payload"].get("expected_test_count")
     # verify only what the publication event actually pins (the real
     # publish/runner path always pins these; a synthetic/legacy event
     # that pins nothing has nothing to cross-check against)
@@ -1044,20 +1115,24 @@ def crosscheck_verdict_bindings(event: dict, chain: list,
             "verdict request_payload_hash does not match the pinned request")
     # deferred from H2/-002: tests_observed must equal the request's
     # event-pinned expected_test_count (source audits declare it)
-    pinned_expected = None
-    for e in chain:
-        if e["request_id"] == rid and e["event_type"] in (
-                "AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
-            pinned_expected = e["payload"].get("expected_test_count")
     if pinned_expected is not None \
             and verdict["tests_observed"] != pinned_expected:
         raise SchemaViolation(
             f"verdict tests_observed {verdict['tests_observed']} != the "
             f"request's expected_test_count {pinned_expected}")
     if result_kind:
+        evidence_pub = pub
+        if handoff:
+            evidence_pub = next((e for e in reversed(chain)
+                                 if e["request_id"] == rid and
+                                 e["event_type"] ==
+                                 "RESULT_AUDIT_REQUESTED"), None)
+            if evidence_pub is None:
+                raise SchemaViolation(
+                    "result handoff has no RESULT_AUDIT_REQUESTED evidence pin")
         for field in ("experiment_config_hash", "evidence_inventory_hash",
                       "validation_report_hash", "run_id", "run_dir"):
-            pinned = pub["payload"].get(field)
+            pinned = evidence_pub["payload"].get(field)
             if pinned is not None and verdict[field] != pinned:
                 raise SchemaViolation(
                     f"verdict {field} does not match the runner-pinned "

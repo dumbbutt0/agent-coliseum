@@ -35,6 +35,18 @@ def commit_exists(repo: str, commit: str, repo_roots) -> bool:
     return proc.returncode == 0
 
 
+def is_ancestor(ancestor: str, descendant: str, repo: str, repo_roots) -> bool:
+    """True only when both exact commits exist and git proves ancestry."""
+    validate_commit(ancestor)
+    validate_commit(descendant)
+    proc = _git(repo, ["merge-base", "--is-ancestor", ancestor, descendant],
+                repo_roots)
+    if proc.returncode not in (0, 1):
+        raise CouncilError(
+            f"git merge-base failed in {repo}: {proc.stderr.strip()}")
+    return proc.returncode == 0
+
+
 def changed_paths(repo: str, commit: str, repo_roots) -> list:
     """The repo-relative paths the EXACT `commit` changed versus its parent
     (or, for a root commit, every path it introduced). This is the

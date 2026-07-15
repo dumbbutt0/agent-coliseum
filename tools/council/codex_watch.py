@@ -180,14 +180,18 @@ def _inject_bindings(root, verdict, request, rid, result_audit) -> None:
     projection = state_machine.project(chain)
     pub = None
     src_pub = None
+    handoff = request.get("task_kind") == "result_handoff"
+    source_types = (("RESULT_HANDOFF_READY", "RESULT_FIX_READY")
+                    if handoff else
+                    ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"))
     for e in chain:
         if e["request_id"] != rid:
             continue
-        if e["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+        if e["event_type"] in source_types:
             src_pub = e
         if result_audit and e["event_type"] == "RESULT_AUDIT_REQUESTED":
             pub = e
-    if not result_audit:
+    if not result_audit or handoff:
         pub = src_pub
     if pub is None or src_pub is None:
         raise SchemaViolation(
@@ -199,9 +203,15 @@ def _inject_bindings(root, verdict, request, rid, result_audit) -> None:
     verdict["publication_event_id"] = pub["event_id"]
     verdict["publication_event_hash"] = pub["event_hash"]
     if result_audit:
+        result_pub = next((e for e in reversed(chain)
+                           if e["request_id"] == rid and
+                           e["event_type"] == "RESULT_AUDIT_REQUESTED"), None)
+        if result_pub is None:
+            raise SchemaViolation(
+                f"cannot bind result verdict for {rid}: missing result audit")
         for field in ("experiment_config_hash", "run_id", "run_dir",
                       "evidence_inventory_hash", "validation_report_hash"):
-            verdict[field] = pub["payload"].get(field)
+            verdict[field] = result_pub["payload"].get(field)
 
 
 def submit_verdict(root: str, cfg, verdict: dict,
