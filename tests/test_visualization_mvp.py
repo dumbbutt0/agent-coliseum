@@ -37,6 +37,7 @@ def validated(spatial_pack):
 
 def _copy_pack(spatial_pack, tmp_path):
     root, run_id = spatial_pack
+    tmp_path.mkdir(parents=True, exist_ok=True)
     target = tmp_path / "runs"
     shutil.copytree(root, target)
     return target, run_id, target / run_id
@@ -110,6 +111,18 @@ def test_reordered_chain_cannot_masquerade_as_progress(spatial_pack, tmp_path):
         load_validated_run(root, run_id)
 
 
+@pytest.mark.parametrize("mutation", ["duplicate", "truncate"])
+def test_duplicate_or_truncated_chain_fails_closed(spatial_pack, tmp_path, mutation):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "chain.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows = (rows[:2] + [dict(rows[1])] + rows[2:]
+            if mutation == "duplicate" else rows[:-1])
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="chain_length|chain_order|chain_link"):
+        load_validated_run(root, run_id)
+
+
 def test_value_sensitive_candidate_validation(spatial_pack, tmp_path):
     root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
     path = run_dir / "activations.jsonl"
@@ -133,6 +146,26 @@ def test_candidate_references_are_state_closure_bound(spatial_pack, tmp_path):
     candidate["action_id"] = canonical_json(effect)
     _write_jsonl(path, rows)
     with pytest.raises(VisualizationError, match="effect_closure"):
+        load_validated_run(root, run_id)
+
+
+def test_unsupported_action_and_malformed_location_fail_closed(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path / "action")
+    path = run_dir / "transitions.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["content"]["effect"]["action"] = "execute_code"
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="invalid_transition"):
+        load_validated_run(root, run_id)
+
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path / "location")
+    path = run_dir / "observations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    entity = rows[0]["actor_content"]["content"]["observable_state_projection"]["entities"][0]
+    reference = next(key for key in entity["location"] if key.endswith("_id"))
+    entity["location"][reference] = 7
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="invalid_observation|actor_schema"):
         load_validated_run(root, run_id)
 
 
@@ -164,6 +197,12 @@ def test_configured_and_absolute_size_ceilings_fail_closed():
         EvidenceLimits(line_bytes=4 * 1024 * 1024 + 1)
     with pytest.raises(VisualizationError, match="invalid_limits"):
         EvidenceLimits(rows_per_stream=0)
+
+
+def test_bounded_loader_refuses_oversized_input(spatial_pack):
+    root, run_id = spatial_pack
+    with pytest.raises(VisualizationError, match="file_limit"):
+        load_validated_run(root, run_id, EvidenceLimits(json_bytes=32))
 
 
 def test_optional_file_names_are_closed(spatial_pack):
@@ -210,6 +249,38 @@ def test_view_model_ordering_and_layout_are_deterministic(validated):
             sorted(room["id"] for room in snapshot["rooms"])
         assert [entity["id"] for entity in snapshot["entities"]] == \
             sorted(entity["id"] for entity in snapshot["entities"])
+    assert [event["position"] for event in model["events"]] == \
+        sorted(event["position"] for event in model["events"])
+    chain_ids = {row["scheduler_state_id"] for row in validated.chain}
+    assert all(event["structured"]["scheduler_state_id"] in chain_ids
+               for event in model["events"])
+
+
+def test_actor_events_link_only_to_actor_observation_records(validated):
+    actor_key = sorted(validated.run["observers"])[0]
+    body = validated.run["observers"][actor_key]
+    allowed = {row["actor_observation_id"] for row in validated.observations
+               if row["observer_body_id"] == body}
+    model = build_view_model(validated, "actor", actor_key)
+    assert model["events"]
+    assert all(event["structured"]["source_actor_observation_id"] in allowed
+               for event in model["events"])
+
+
+def test_invalid_perspective_fails_closed(validated):
+    with pytest.raises(VisualizationError, match="invalid_perspective"):
+        build_view_model(validated, "client-toggle")
+
+
+def test_visible_inventory_is_derived_only_from_visible_placements(validated):
+    for perspective, actor in (("privileged", None),
+                               ("actor", sorted(validated.run["observers"])[0])):
+        model = build_view_model(validated, perspective, actor)
+        for snapshot in model["snapshots"]:
+            visible = {entity["id"] for entity in snapshot["entities"]}
+            for entity in snapshot["entities"]:
+                if entity["kind"] == "agent_body":
+                    assert set(entity["visible_inventory_ids"]) <= visible
 
 
 def test_dynamic_state_changes_follow_recorded_snapshots(validated):
@@ -220,6 +291,26 @@ def test_dynamic_state_changes_follow_recorded_snapshots(validated):
         for snapshot in model["snapshots"]}
     assert len(state_signatures) > 1
     assert model["map_model"]["simulation_impact"] is False
+    assert model["experiment"]["experiment_id"] is None
+    assert model["experiment"]["agent_regime"] is None
+    assert {overlay["id"] for overlay in model["overlay_catalog"]} >= {
+        "room_labels", "portal_connectivity", "entity_locations", "event_markers"}
+
+
+def test_experiment_strings_remain_data_not_markup(spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "run.json"
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    body = next(iter(summary["observers"].values()))
+    key = next(key for key, value in summary["instance_ids"].items() if value == body)
+    hostile = '"><script>globalThis.pwned=true</script>'
+    summary["instance_ids"].pop(key)
+    summary["instance_ids"][hostile] = body
+    _write_json(path, summary)
+    model = build_view_model(load_validated_run(root, run_id), "privileged")
+    assert any(entity["label"] == hostile for entity in model["snapshots"][0]["entities"])
+    script = Path("coliseum/textlab/visualization/static/app.js").read_text(encoding="utf-8")
+    assert "textContent" in script and "innerHTML" not in script
 
 
 def test_live_pack_preserves_incomplete_nonclaimable_ceiling():
@@ -232,7 +323,7 @@ def test_live_pack_preserves_incomplete_nonclaimable_ceiling():
         assert provenance["result_status"] == "incomplete"
     actor_model = build_view_model(validated, "actor", "ada")
     privileged_model = build_view_model(validated, "privileged")
-    assert "model_regime" not in actor_model["experiment"]
+    assert actor_model["experiment"]["model_regime"] is None
     assert privileged_model["experiment"]["model_regime"]["source"] == \
         "structurally_valid_unverified_report"
     assert privileged_model["experiment"]["termination"]["code"] == "control_desync"
@@ -327,6 +418,8 @@ def test_http_boundary_sets_security_headers_and_serves_scoped_json(actor_server
     assert "authoritative_placements" not in encoded
     assert "privileged_content" not in encoded
     assert service.capability not in encoded
+    run_id = body["runs"][0]["run_id"]
+    assert service.view(run_id) is service.view(run_id)
 
 
 def test_http_boundary_rejects_wrong_host_raw_paths_and_mutation(actor_server):
@@ -353,6 +446,8 @@ def test_static_client_uses_safe_text_and_accessible_controls(actor_server):
         script = response.read().decode("utf-8")
     assert "innerHTML" not in script and "eval(" not in script
     assert "textContent" in script and "createElementNS" in script
+    assert "event-marker" in script and 'id="reset-camera"' in html
+    assert not __import__("re").search(r"state\.model\.[A-Za-z0-9_]+\s*=", script)
     assert 'aria-live="polite"' in html
     assert 'id="play-pause"' in html and 'id="scrubber"' in html
     assert "prefers-reduced-motion" in (Path(

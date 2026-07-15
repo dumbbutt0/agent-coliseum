@@ -47,6 +47,7 @@
           <button id="zoom-out" type="button" title="Zoom out">−</button>
           <button id="zoom-in" type="button" title="Zoom in">+</button>
           <button id="fit-map" type="button">Fit</button>
+          <button id="reset-camera" type="button">Reset</button>
           <button id="focus-selection" type="button">Focus</button>
         </div>
       </div>
@@ -57,11 +58,13 @@
         <g id="portal-layer"></g>
         <g id="room-layer"></g>
         <g id="entity-layer"></g>
+        <g id="event-layer"></g>
       </svg>
       <div class="overlay-bar" aria-label="Map overlays">
         <label><input id="overlay-room-labels" type="checkbox" checked> Room labels <span>derived</span></label>
         <label><input id="overlay-portals" type="checkbox" checked> Portals <span>authoritative</span></label>
         <label><input id="overlay-entities" type="checkbox" checked> Entities <span>authoritative</span></label>
+        <label><input id="overlay-events" type="checkbox" checked> Selected event <span>derived</span></label>
       </div>
     </section>
 

@@ -30,3 +30,18 @@ test("playback speed changes timing only", () => {
   assert.equal(playback.delayForSpeed(4), 200);
   assert.equal(playback.delayForSpeed(999), 800);
 });
+
+test("pause, resume, seek, and terminal tick preserve exact state", () => {
+  let state = playback.transition({position: 2, playing: false}, 4, {type: "play"});
+  assert.deepEqual(state, {position: 2, playing: true});
+  state = playback.transition(state, 4, {type: "tick"});
+  assert.deepEqual(state, {position: 3, playing: true});
+  state = playback.transition(state, 4, {type: "pause"});
+  assert.deepEqual(state, {position: 3, playing: false});
+  assert.deepEqual(playback.transition(state, 4, {type: "tick"}), state);
+  state = playback.transition(state, 4, {type: "seek", position: 4});
+  state = playback.transition(state, 4, {type: "play"});
+  assert.deepEqual(state, {position: 0, playing: true});
+  state = playback.transition({position: 3, playing: true}, 4, {type: "tick"});
+  assert.deepEqual(state, {position: 4, playing: false});
+});

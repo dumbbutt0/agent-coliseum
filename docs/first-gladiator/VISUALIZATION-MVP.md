@@ -15,7 +15,8 @@ model, and renders that model in a local browser. It provides:
 - recorded agent/object locations, holdings, containment, transit, and lifecycle;
 - begin/end, tick/event step, play/pause, speed, and exact seek controls;
 - synchronized event chronicle and entity/room/event inspection;
-- pan, zoom, fit, and focus camera controls;
+- selected-event map markers plus pan, zoom, fit/reset, and entity/event focus;
+- visible-inventory derivation from only the active perspective's placements;
 - authoritative/derived overlay labels;
 - separate completion, claimability, replay, admission, governance, quarantine,
   and correction-lineage statuses;
@@ -60,6 +61,10 @@ constructed from the pinned actor's exact-schema observation artifacts. Global
 closure, privileged projections, transition records, activation records,
 logical instance labels, hidden events, and evaluator reports never enter that
 response.
+
+The research console renders unsupported experiment ID, agent regime, model
+regime, termination, and metrics fields explicitly as `Not available`; omission
+never implies a favorable or known value.
 
 ## Launch
 

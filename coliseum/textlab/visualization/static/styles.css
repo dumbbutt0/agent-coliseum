@@ -76,6 +76,8 @@ h2 { font-size: 1rem; }
 .object-token { fill: var(--bronze); stroke: #f0c894; stroke-width: 2; cursor: pointer; }
 .entity-token.selected { stroke: var(--focus); stroke-width: 6; }
 .entity-label { fill: var(--ink); font-size: 11px; pointer-events: none; paint-order: stroke; stroke: #111; stroke-width: 3px; }
+.event-marker { fill: none; stroke: var(--bad); stroke-width: 5; stroke-dasharray: 5 4; pointer-events: none; }
+.event-marker-cross { stroke: var(--bad); stroke-width: 4; pointer-events: none; }
 .overlay-bar { display: flex; flex-wrap: wrap; gap: .7rem 1rem; padding: .55rem .8rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .72rem; }
 .overlay-bar label { display: flex; align-items: center; gap: .35rem; }
 .overlay-bar span { color: var(--sand); }

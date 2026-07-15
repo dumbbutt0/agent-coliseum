@@ -45,6 +45,7 @@ class VisualizationService:
             refuse("invalid_capability", "capability must carry at least 256 bits")
         self.runs = {}
         self.replay = {}
+        self.views = {}
         self.refused_count = 0
         self.static_root = Path(__file__).with_name("static")
         self.expected_host = None
@@ -73,8 +74,10 @@ class VisualizationService:
         validated = self.runs.get(run_id)
         if validated is None:
             refuse("run_unavailable", "run is absent or unavailable in this perspective")
-        return build_view_model(validated, self.perspective, self.actor_key,
-                                self.replay[run_id])
+        if run_id not in self.views:
+            self.views[run_id] = build_view_model(
+                validated, self.perspective, self.actor_key, self.replay[run_id])
+        return self.views[run_id]
 
 
 def _json_bytes(value):

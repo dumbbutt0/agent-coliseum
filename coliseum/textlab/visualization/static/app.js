@@ -42,13 +42,17 @@ function currentSnapshot() { return state.model?.snapshots[state.position] || nu
 function setDisabled(disabled) {
   for (const id of ["jump-start", "previous-event", "previous-tick", "play-pause",
                     "next-tick", "next-event", "jump-end", "scrubber", "speed",
-                    "zoom-out", "zoom-in", "fit-map", "focus-selection"]) {
+                    "zoom-out", "zoom-in", "fit-map", "reset-camera",
+                    "focus-selection"]) {
     byId(id).disabled = disabled;
   }
 }
 
 function stopPlayback() {
-  state.playing = false;
+  const next = Playback.transition(
+    {position: state.position, playing: state.playing},
+    state.model?.playback.last_position || 0, {type: "pause"});
+  state.playing = next.playing;
   if (state.timer !== null) window.clearTimeout(state.timer);
   state.timer = null;
   byId("play-pause").textContent = "Play";
@@ -58,20 +62,29 @@ function stopPlayback() {
 function schedulePlayback() {
   if (!state.playing || !state.model) return;
   state.timer = window.setTimeout(() => {
-    if (state.position >= state.model.playback.last_position) {
-      stopPlayback();
-      return;
-    }
-    seek(state.position + 1);
-    schedulePlayback();
+    state.timer = null;
+    const next = Playback.transition(
+      {position: state.position, playing: state.playing},
+      state.model.playback.last_position, {type: "tick"});
+    state.position = next.position; state.playing = next.playing;
+    state.selectedEvent = null;
+    scrubber.value = String(state.position);
+    render();
+    if (state.playing) schedulePlayback();
+    else stopPlayback();
   }, Playback.delayForSpeed(state.speed));
 }
 
 function togglePlayback() {
   if (!state.model) return;
   if (state.playing) { stopPlayback(); return; }
-  if (state.position >= state.model.playback.last_position) seek(0);
-  state.playing = true;
+  const next = Playback.transition(
+    {position: state.position, playing: state.playing},
+    state.model.playback.last_position, {type: "play"});
+  state.position = next.position; state.playing = next.playing;
+  state.selectedEvent = null;
+  scrubber.value = String(state.position);
+  render();
   byId("play-pause").textContent = "Pause";
   byId("play-pause").setAttribute("aria-pressed", "true");
   schedulePlayback();
@@ -79,7 +92,10 @@ function togglePlayback() {
 
 function seek(position) {
   if (!state.model) return;
-  state.position = Playback.clampPosition(position, state.model.playback.last_position);
+  const next = Playback.transition(
+    {position: state.position, playing: state.playing},
+    state.model.playback.last_position, {type: "seek", position});
+  state.position = next.position;
   scrubber.value = String(state.position);
   state.selectedEvent = null;
   render();
@@ -117,15 +133,37 @@ function zoom(factor) {
 
 function focusSelection() {
   const snapshot = currentSnapshot();
-  if (!snapshot || !state.selected) return;
-  const entity = snapshot.entities.find((item) => item.id === state.selected.id);
-  const room = snapshot.rooms.find((item) => item.id === state.selected.id);
-  const target = entity || room;
+  if (!snapshot) return;
+  let target = null;
+  if (state.selected) {
+    target = snapshot.entities.find((item) => item.id === state.selected.id) ||
+      snapshot.rooms.find((item) => item.id === state.selected.id);
+  } else if (state.selectedEvent) {
+    target = eventTarget(snapshot, state.selectedEvent);
+  }
   if (!target) return;
   const x = target.x + (target.width || 0) / 2;
   const y = target.y + (target.height || 0) / 2;
   state.camera = {x: x - 220, y: y - 160, width: 440, height: 320};
   applyCamera();
+}
+
+function eventTarget(snapshot, event) {
+  const structured = event?.structured || {};
+  const effect = structured.effect || {};
+  const entityIds = [structured.agent_id, effect.agent_body_id,
+    effect.object_instance_id, effect.recipient_agent_body_id].filter(Boolean);
+  for (const id of entityIds) {
+    const entity = snapshot.entities.find((item) => item.id === id);
+    if (entity) return entity;
+  }
+  const roomIds = [structured.room_id, effect.to_room_instance_id,
+    effect.from_room_instance_id, effect.room_instance_id].filter(Boolean);
+  for (const id of roomIds) {
+    const room = snapshot.rooms.find((item) => item.id === id);
+    if (room) return room;
+  }
+  return null;
 }
 
 function renderArena() {
@@ -136,10 +174,13 @@ function renderArena() {
   const showRooms = byId("overlay-room-labels").checked;
   const showPortals = byId("overlay-portals").checked;
   const showEntities = byId("overlay-entities").checked;
+  const showEvents = byId("overlay-events").checked;
   const portalLayer = byId("portal-layer");
   const roomLayer = byId("room-layer");
   const entityLayer = byId("entity-layer");
-  portalLayer.replaceChildren(); roomLayer.replaceChildren(); entityLayer.replaceChildren();
+  const eventLayer = byId("event-layer");
+  portalLayer.replaceChildren(); roomLayer.replaceChildren();
+  entityLayer.replaceChildren(); eventLayer.replaceChildren();
   if (showPortals) {
     for (const portal of snapshot.portals) {
       portalLayer.append(svgNode("line", {x1: portal.x1, y1: portal.y1, x2: portal.x2, y2: portal.y2,
@@ -176,6 +217,20 @@ function renderArena() {
       group.addEventListener("click", selectEntity);
       group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectEntity(); } });
       entityLayer.append(group);
+    }
+  }
+  if (showEvents && state.selectedEvent) {
+    const target = eventTarget(snapshot, state.selectedEvent);
+    if (target) {
+      const x = target.x + (target.width || 0) / 2;
+      const y = target.y + (target.height || 0) / 2;
+      const radius = target.width ? Math.min(target.width, target.height) / 2 + 8 : 24;
+      eventLayer.append(svgNode("circle", {cx: x, cy: y, r: radius,
+        class: "event-marker", "aria-label": "Selected recorded event location"}));
+      eventLayer.append(svgNode("line", {x1: x - 10, y1: y, x2: x + 10, y2: y,
+        class: "event-marker-cross"}));
+      eventLayer.append(svgNode("line", {x1: x, y1: y - 10, x2: x, y2: y + 10,
+        class: "event-marker-cross"}));
     }
   }
   byId("arena-description").textContent = `${snapshot.rooms.length} visible rooms and ${snapshot.entities.length} visible entities at recorded position ${snapshot.position}.`;
@@ -232,6 +287,8 @@ function renderInspector() {
     addDefinition(list, "Room", entity.room_id);
     addDefinition(list, "Location", entity.location.tag);
     addDefinition(list, "Status", entity.status);
+    addDefinition(list, "Visible inventory",
+                  entity.visible_inventory_ids?.join(", ") || "None visible");
     addDefinition(list, "Source", entity.semantic_source);
     container.append(list);
     if (snapshot.dispatch?.agent_id === entity.id) {
@@ -270,9 +327,20 @@ function renderResearch() {
   if (!state.model) { container.append(node("p", "No run loaded.")); return; }
   const fields = {
     "Run ID": state.model.run_id,
+    "Experiment ID": state.model.experiment.experiment_id,
     "Scenario": state.model.experiment.scenario,
+    "Agent regime": state.model.experiment.agent_regime,
+    "Model regime": state.model.experiment.model_regime?.model_id,
     "Seed": state.model.experiment.seed,
+    "Recorded position": state.position,
+    "Logical step": currentSnapshot()?.logical_step,
     "Perspective": state.model.perspective.label,
+    "Active overlays": [
+      ["Room labels", byId("overlay-room-labels").checked],
+      ["Portals", byId("overlay-portals").checked],
+      ["Entities", byId("overlay-entities").checked],
+      ["Event marker", byId("overlay-events").checked],
+    ].filter((item) => item[1]).map((item) => item[0]).join(", "),
     "Artifact validation": state.model.validation.artifact_validation,
     "Replay verification": state.model.validation.replay_verification,
     "Report authentication": state.model.validation.report_authentication,
@@ -284,18 +352,23 @@ function renderResearch() {
     "Quarantine": state.model.validation.quarantine,
     "Correction lineage": state.model.validation.correction_lineage,
     "Run schema": state.model.source_schema_versions.spatial_run,
+    "Spatial schema": state.model.source_schema_versions.spatial,
+    "Scheduler version": state.model.source_schema_versions.scheduler,
+    "Renderer version": state.model.source_schema_versions.renderer,
     "Map theme": state.model.map_model.theme,
+    "Selected event": state.selectedEvent?.summary,
+    "Selected entity": state.selected?.id,
+    "Metrics summary": null,
+    "Termination": state.model.experiment.termination?.code,
   };
   if (state.model.experiment.model_regime) {
-    fields["Model"] = state.model.experiment.model_regime.model_id;
     fields["Model metadata source"] = state.model.experiment.model_regime.source;
   }
-  if (state.model.experiment.termination) {
-    fields["Termination"] = state.model.experiment.termination.code || "recorded";
-  }
   for (const [label, value] of Object.entries(fields)) {
-    const item = node("div", null, `provenance-item status-${String(value).replaceAll(" ", "_")}`);
-    item.append(node("strong", label)); item.append(node("span", value)); container.append(item);
+    const display = value === null || value === undefined || value === "" ? "Not available" : value;
+    const statusClass = String(display).replace(/[^A-Za-z0-9_-]/g, "_");
+    const item = node("div", null, `provenance-item status-${statusClass}`);
+    item.append(node("strong", label)); item.append(node("span", display)); container.append(item);
   }
 }
 
@@ -309,7 +382,7 @@ function render() {
   renderArena(); renderEvents(); renderInspector(); renderResearch();
   for (const id of ["jump-start", "previous-tick", "previous-event"]) byId(id).disabled = state.position === 0;
   for (const id of ["jump-end", "next-tick", "next-event"]) byId(id).disabled = state.position === state.model.playback.last_position;
-  byId("focus-selection").disabled = !state.selected;
+  byId("focus-selection").disabled = !state.selected && !eventTarget(snapshot, state.selectedEvent);
   if (snapshot.rooms.length === 0) byId("fit-map").disabled = true;
 }
 
@@ -336,7 +409,7 @@ async function initialize() {
     const payload = await getJson("api/v1/runs");
     runSelect.replaceChildren();
     for (const run of payload.runs) {
-      const option = node("option", `${run.scenario} · seed ${run.seed} · ${run.validation.completion}`);
+      const option = node("option", `${run.scenario} · seed ${run.seed} · ${run.validation.completion} · ${run.run_id.slice(-12)}`);
       option.value = run.run_id; runSelect.append(option);
     }
     if (payload.runs.length === 0) { loadStatus.textContent = "No runs admitted in this perspective."; return; }
@@ -356,10 +429,14 @@ byId("previous-event").addEventListener("click", () => { stopPlayback(); eventJu
 byId("next-event").addEventListener("click", () => { stopPlayback(); eventJump(1); });
 byId("speed").addEventListener("change", () => { state.speed = Number(byId("speed").value); if (state.playing) { window.clearTimeout(state.timer); schedulePlayback(); } });
 byId("fit-map").addEventListener("click", fitMap);
+byId("reset-camera").addEventListener("click", fitMap);
 byId("focus-selection").addEventListener("click", focusSelection);
 byId("zoom-in").addEventListener("click", () => zoom(0.8));
 byId("zoom-out").addEventListener("click", () => zoom(1.25));
-for (const id of ["overlay-room-labels", "overlay-portals", "overlay-entities"]) byId(id).addEventListener("change", renderArena);
+for (const id of ["overlay-room-labels", "overlay-portals", "overlay-entities",
+                  "overlay-events"]) byId(id).addEventListener("change", () => {
+  renderArena(); renderResearch();
+});
 
 arena.addEventListener("wheel", (event) => { event.preventDefault(); zoom(event.deltaY > 0 ? 1.12 : 0.88); }, {passive: false});
 let drag = null;

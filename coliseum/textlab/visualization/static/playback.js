@@ -28,7 +28,27 @@
     return 800 / ([0.5, 1, 2, 4].includes(numeric) ? numeric : 1);
   }
 
+  function transition(current, lastPosition, action) {
+    const position = clampPosition(current?.position, lastPosition);
+    const playing = current?.playing === true;
+    if (!action || typeof action.type !== "string") return {position, playing};
+    if (action.type === "pause") return {position, playing: false};
+    if (action.type === "seek") {
+      return {position: clampPosition(action.position, lastPosition), playing};
+    }
+    if (action.type === "play") {
+      return {position: position >= lastPosition ? 0 : position, playing: true};
+    }
+    if (action.type === "tick") {
+      if (!playing) return {position, playing: false};
+      const next = adjacentPosition(position, lastPosition, 1);
+      return {position: next, playing: next < lastPosition};
+    }
+    return {position, playing};
+  }
+
   global.ColiseumPlayback = Object.freeze({
     adjacentEventPosition, adjacentPosition, clampPosition, delayForSpeed,
+    transition,
   });
 })(globalThis);

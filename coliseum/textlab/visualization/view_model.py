@@ -102,6 +102,14 @@ def _entity_rows(placements, rooms, perspective, labels, actor_body=None):
                 "y": box["y"] + 58 + row * 36,
                 "semantic_source": "authoritative",
             })
+    visible_held = defaultdict(list)
+    for placement in placements:
+        location = placement["location"]
+        if placement["entity_kind"] == "object" and location["tag"] == "held_by":
+            visible_held[location["agent_body_id"]].append(placement["entity_id"])
+    for row in rows:
+        if row["kind"] == "agent_body":
+            row["visible_inventory_ids"] = sorted(visible_held[row["id"]])
     return sorted(rows, key=lambda row: row["id"])
 
 
@@ -211,6 +219,7 @@ def _actor_snapshots(validated, actor_key):
             "position": position, "logical_step": content["logical_step"],
             "rooms": rooms, "portals": portals, "entities": entities,
             "visible_room_id": room,
+            "source_actor_observation_id": row["actor_observation_id"],
             "map_state_source": "actor_observation_with_derived_layout",
         })
     return snapshots, actor_body
@@ -223,11 +232,13 @@ def _privileged_events(validated, labels):
     for row in validated.activations:
         position = row["scheduler_position"]
         kind = row["step_kind"]
-        structured = {"step_kind": kind}
+        structured = {"step_kind": kind,
+                      "scheduler_state_id": validated.chain[position]["scheduler_state_id"]}
         if "activation" in row:
             body = row["activation"]["agent_body_id"]
             label = labels.get(body, f"Agent {_short(body)}")
             structured["agent_id"] = body
+            structured["activation_id"] = row["activation_id"]
             if kind == "pass":
                 summary = f"{label} had no legal action and passed."
             else:
@@ -261,7 +272,10 @@ def _actor_events(snapshots):
                 "id": _presentation_id("actor", position, "room", room),
                 "position": position, "category": "observation",
                 "summary": summary,
-                "structured": {"observation_change": "visible_room"},
+                "structured": {"observation_change": "visible_room",
+                               "room_id": room,
+                               "source_actor_observation_id":
+                                   snapshot["source_actor_observation_id"]},
                 "semantic_source": "derived_from_actor_observation",
             })
         appeared, disappeared = sorted(entities - previous_entities), \
@@ -272,7 +286,9 @@ def _actor_events(snapshots):
                 "position": position, "category": "visibility",
                 "summary": f"Visible entities changed (+{len(appeared)}, -{len(disappeared)}).",
                 "structured": {"appeared_count": len(appeared),
-                               "disappeared_count": len(disappeared)},
+                               "disappeared_count": len(disappeared),
+                               "source_actor_observation_id":
+                                   snapshot["source_actor_observation_id"]},
                 "semantic_source": "derived_from_actor_observation",
             })
         previous_room, previous_entities = room, entities
@@ -319,6 +335,7 @@ def run_card(validated, perspective, actor_key=None, replay_verification=None):
     card = {
         "run_id": validated.run_id, "scenario": validated.run["scenario"],
         "seed": validated.run["seed"],
+        "experiment_id": None, "agent_regime": None,
         "source_schema_versions": {
             "spatial_run": validated.run["spatial_run_schema_version"],
             "spatial": validated.run["spatial_schema_version"],
@@ -330,6 +347,19 @@ def run_card(validated, perspective, actor_key=None, replay_verification=None):
     if perspective == "privileged":
         card["observer_count"] = len(validated.run["observers"])
         card["chain_length"] = validated.run["chain_length"]
+        if validated.live_report is not None:
+            report = validated.live_report["content"]
+            card["model_regime"] = {
+                "model_id": report["regime"].get("model_id"),
+                "source": "structurally_valid_unverified_report",
+            }
+            card["termination"] = thaw(report["terminated"])
+        else:
+            card["model_regime"] = None
+            card["termination"] = None
+    else:
+        card["model_regime"] = None
+        card["termination"] = None
     return card
 
 
@@ -351,8 +381,9 @@ def build_view_model(validated, perspective, actor_key=None,
         events = _actor_events(snapshots)
         perspective_info = {"kind": "actor", "label": "Actor-safe recorded view"}
     card = run_card(validated, perspective, actor_key, replay)
-    experiment = {"scenario": validated.run["scenario"],
-                  "seed": validated.run["seed"]}
+    experiment = {"experiment_id": None, "scenario": validated.run["scenario"],
+                  "agent_regime": None, "model_regime": None,
+                  "seed": validated.run["seed"], "termination": None}
     if perspective == "privileged" and validated.live_report is not None:
         report = validated.live_report["content"]
         regime = report["regime"]
@@ -389,6 +420,8 @@ def build_view_model(validated, perspective, actor_key=None,
              "source": "authoritative"},
             {"id": "entity_locations", "label": "Entity locations",
              "source": "authoritative"},
+            {"id": "event_markers", "label": "Selected event marker",
+             "source": "derived"},
         ],
         "snapshots": snapshots, "events": events,
     }
