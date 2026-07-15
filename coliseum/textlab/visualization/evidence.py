@@ -18,20 +18,26 @@ from typing import Any, Mapping
 
 from coliseum.textlab._content_record import ContentRecordError
 from coliseum.textlab.schema import config_hash
-from coliseum.textlab.spatial.perception import assert_actor_content_schema
+from coliseum.textlab.spatial.perception import (
+    SUPPORTED_RENDERER_VERSIONS, assert_actor_content_schema)
 from coliseum.textlab.spatial.run import canonical_effect_id, replay_spatial_run
-from coliseum.textlab.spatial.scheduler import (Activation, SchedulerRun,
-                                                SchedulerState, _closure_hash)
+from coliseum.textlab.spatial.scenario import SPATIAL_SCENARIO_SCHEMA_VERSION
+from coliseum.textlab.spatial.scheduler import (
+    SUPPORTED_SCHEDULER_VERSIONS, Activation, SchedulerRun, SchedulerState,
+    _closure_hash)
 from coliseum.textlab.spatial.state import WorldState
 from coliseum.textlab.spatial.transition import (LocationTransition,
                                                  _validate_effect_shape)
+from coliseum.textlab.spatial.world import SUPPORTED_SPATIAL_SCHEMA_VERSIONS
 from coliseum.textlab.training.observation import observation_artifact
+from coliseum.textlab.training.spatial_records import SpatialSourceEvidenceBinding
 
 from .errors import VisualizationError, refuse
 
 API_VERSION = "1"
 VIEW_MODEL_VERSION = "1"
 SUPPORTED_RUN_SCHEMAS = frozenset({"0.2", "0.3"})
+SUPPORTED_SCENARIO_SCHEMAS = frozenset({SPATIAL_SCENARIO_SCHEMA_VERSION})
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,240}$")
 REQUIRED_FILES = (
     "run.json", "chain.jsonl", "transitions.jsonl", "observations.jsonl",
@@ -347,9 +353,16 @@ def _validate_summary(run, run_id):
                 "terminal_scheduler_state_id", "terminal_world_state_id",
                 "random_stream_id"):
         _hash(run[key], f"run.{key}")
-    for key in ("scenario_schema_version", "spatial_schema_version",
-                "scheduler_version", "renderer_version"):
-        _string(run[key], f"run.{key}")
+    supported_versions = {
+        "scenario_schema_version": SUPPORTED_SCENARIO_SCHEMAS,
+        "spatial_schema_version": SUPPORTED_SPATIAL_SCHEMA_VERSIONS,
+        "scheduler_version": SUPPORTED_SCHEDULER_VERSIONS,
+        "renderer_version": frozenset(SUPPORTED_RENDERER_VERSIONS),
+    }
+    for key, supported in supported_versions.items():
+        value = _string(run[key], f"run.{key}")
+        if value not in supported:
+            refuse("unsupported_schema", f"unsupported {key} {value!r}")
     if not isinstance(run["observers"], dict) or not run["observers"]:
         refuse("invalid_run", "observers must be a non-empty object")
     for key, value in run["observers"].items():
@@ -433,6 +446,9 @@ def _validate_chain(rows, run):
         if c["scheduler_run_id"] != run["scheduler_run_id"] or \
                 c["world_line_id"] != run["world_line_id"]:
             refuse("chain_binding", "chain is bound to another run/world")
+        if c["spatial_schema_version"] != run["spatial_schema_version"] or \
+                c["scheduler_version"] != run["scheduler_version"]:
+            refuse("chain_binding", "chain versions differ from run.json")
         previous = None if index == 0 else rows[index - 1]["scheduler_state_id"]
         if c["previous_scheduler_state_hash"] != previous:
             refuse("chain_link", "previous scheduler-state link is broken")
@@ -470,6 +486,8 @@ def _validate_transitions(rows, run, closure, chain_rows, chain_content):
             refuse("duplicate_transition", "transition identities must be unique")
         if content["world_line_id"] != run["world_line_id"]:
             refuse("transition_binding", "transition is bound to another world line")
+        if content["spatial_schema_version"] != run["spatial_schema_version"]:
+            refuse("transition_binding", "transition spatial version differs from run.json")
         action = content["effect"]["action"]
         actor = content["actor_body_id"]
         if action in {"move", "take", "drop", "give", "put_inside", "take_out"}:
@@ -661,6 +679,31 @@ def _validate_observations(rows, run, closure, chain_rows, chain_content):
             refuse("actor_visibility", "actor entity projection/list is inconsistent")
         if not set(visible_ids) <= set(placement_ids):
             refuse("actor_visibility", "actor projection names an entity outside privileged state")
+        placement_by_id = {
+            entry["entity_id"]: entry
+            for entry in projection["authoritative_placements"]
+        }
+        closure_refs = {
+            "room_instance_id": set(closure["rooms"]),
+            "agent_body_id": set(closure["bodies"]),
+            "object_instance_id": set(closure["objects"]),
+            "portal_instance_id": {
+                entry["portal_instance_id"] for entry in closure["portals"]
+            },
+            "origin_room_instance_id": set(closure["rooms"]),
+            "destination_room_instance_id": set(closure["rooms"]),
+        }
+        for actor_entity in actor_projection["entities"]:
+            location = actor_entity["location"]
+            for field, allowed in closure_refs.items():
+                if field in location and location[field] not in allowed:
+                    refuse("actor_state_binding",
+                           "actor entity location reference is outside closure")
+            authoritative = placement_by_id[actor_entity["entity_id"]]
+            if actor_entity["entity_kind"] != authoritative["entity_kind"] or \
+                    actor_entity["location"] != authoritative["location"]:
+                refuse("actor_state_binding",
+                       "actor entity kind/location differs from authenticated state")
         visible_room = actor["visible_room_identity"]
         for portal in actor_projection["portals"]:
             if visible_room is None or (portal["portal_instance_id"], visible_room,
@@ -809,6 +852,13 @@ def _validate_treatment(run):
                 bindings["fork_position"] != spec["fork_position"] or \
                 bindings["fork_state_hash"] != spec["fork_state_hash"]:
             refuse("treatment_binding", "treatment differs from its closed intervention")
+        if run["witness_ids"]["scheduler_manifest_id"] != \
+                bindings["control_manifest_id"]:
+            refuse("treatment_binding",
+                   "witness manifest differs from the bound control manifest")
+        if bindings["fork_genesis_id"] != run["world_line_genesis_id"]:
+            refuse("treatment_binding",
+                   "fork genesis differs from the run world-line genesis")
         expected = derive_execution_instance_id(
             intervention.intervention_id, spec["scenario"], spec["seed"],
             spec["agent_key"], bindings["parent_world_line_id"],
@@ -821,6 +871,59 @@ def _validate_treatment(run):
         refuse("treatment_binding", str(exc))
     if run["execution_instance_id"] != expected:
         refuse("treatment_binding", "execution instance identity does not re-derive")
+
+
+def _validate_treatment_control(run, run_root, limits):
+    """Cross-bind a treatment to its structurally validated sibling control.
+
+    This remains structural admission, not replay authentication: the named
+    control is passed through the same bounded loader and every locally
+    reconstructible treatment/control equality is checked.
+    """
+    if run["spatial_run_schema_version"] != "0.3":
+        return
+    bindings = run["treatment_bindings"]
+    control_run_id = bindings["control_run_id"]
+    if control_run_id == run["run_id"]:
+        refuse("treatment_binding", "treatment cannot name itself as its control")
+
+    # Refuse treatment-of-treatment recursion before invoking the public loader.
+    control_files = run_root.read(control_run_id)
+    control_summary = _strict_json(control_files["run.json"], "control/run.json")
+    if control_summary.get("spatial_run_schema_version") != "0.2":
+        refuse("treatment_binding", "treatment control must be a schema-0.2 run")
+    control = load_validated_run(run_root, control_run_id, limits)
+    witness = run["witness_ids"]
+    fork_position = bindings["fork_position"]
+    if fork_position >= len(control.chain):
+        refuse("treatment_binding", "fork position is outside the control chain")
+    control_cursor = control.chain[fork_position]
+    control_content = control_cursor["content"]
+    control_binding = SpatialSourceEvidenceBinding(
+        control_run_id, dict(control.file_hashes))
+
+    expected = {
+        "control scenario": (control.run["scenario"], run["scenario"]),
+        "control seed": (control.run["seed"], run["seed"]),
+        "control manifest": (control.run["manifest_id"],
+                             bindings["control_manifest_id"]),
+        "witness manifest": (witness["scheduler_manifest_id"],
+                             control.run["manifest_id"]),
+        "control source evidence": (control_binding.id,
+                                    bindings["control_source_evidence_id"]),
+        "parent world line": (bindings["parent_world_line_id"],
+                              control.run["world_line_id"]),
+        "control fork position": (control.run["fork_position"], fork_position),
+        "control fork state": (control.run["fork_state_hash"],
+                               bindings["fork_state_hash"]),
+        "witness scheduler state": (witness["scheduler_state_id"],
+                                    control_cursor["scheduler_state_id"]),
+        "witness world state": (bindings["fork_state_hash"],
+                                control_content["current_world_state_hash"]),
+    }
+    for label, (actual, wanted) in expected.items():
+        if actual != wanted:
+            refuse("treatment_binding", f"{label} does not cross-bind")
 
 
 def _validate_live_report(value, run):
@@ -914,6 +1017,7 @@ def load_validated_run(root, run_id, limits=None):
     activations = _validate_activations(
         parsed["activations.jsonl"], run, closure, chain_content, transitions,
         state_by_position)
+    _validate_treatment_control(run, run_root, limits)
     live_report = _validate_live_report(report, run)
     hashes = {name: hashlib.sha256(data).hexdigest()
               for name, data in files.items() if name in REQUIRED_FILES}

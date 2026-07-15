@@ -116,10 +116,13 @@ closure.json
 `live_report.json` is the only optional report extension currently parsed. It
 uses a closed schema, exact Boolean types, a re-derived report ID and regime ID,
 and internally consistent completion/effective-N relations. A negative ceiling
-(`incomplete`, `nonclaimable`) is retained for diagnostic display. A favorable
-ceiling remains `unknown` until a future exact result-binding adapter authenticates
-the report. The current live replay gate authenticates the spatial six and captured
-persona rows, not `live_report.json`; the console exposes that distinction.
+(`incomplete`, `nonclaimable`) is retained only in the explicit privileged
+research view. Actor responses report evaluator dimensions as `unknown` and do
+not vary with the presence or contents of `live_report.json`. A favorable ceiling
+remains `unknown` until a future exact result-binding adapter authenticates the
+report. The current live replay gate authenticates the spatial six and captured
+persona rows, not `live_report.json`; the privileged console exposes that
+distinction.
 
 Structural validation and replay verification are deliberately different:
 

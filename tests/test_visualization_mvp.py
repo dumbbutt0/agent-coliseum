@@ -15,12 +15,16 @@ import pytest
 from coliseum.textlab.schema import canonical_json, config_hash
 from coliseum.textlab.spatial.run import execute_spatial_run
 from coliseum.textlab.visualization import (
-    EvidenceLimits, RunRoot, build_view_model, load_validated_run, verify_replay)
+    EvidenceLimits, ReplayVerification, RunRoot, build_view_model,
+    load_validated_run, verify_replay)
 from coliseum.textlab.visualization.errors import VisualizationError
 from coliseum.textlab.visualization.server import VisualizationService, serve
+from coliseum.textlab.training.observation import observation_artifact
 
 SCENARIO = "spatial_two_agent_private_object_v1"
 LIVE_ID = "society_seed_v1--seed42--b63d84694594b499"
+TREATMENT_ID = (
+    "society_seed_v1--iv_society_seed_fact_flip_v1--seed42--0c6358d10a610b6a")
 
 
 @pytest.fixture(scope="module")
@@ -101,6 +105,20 @@ def test_unknown_schema_fails_closed(spatial_pack, tmp_path):
         load_validated_run(root, run_id)
 
 
+@pytest.mark.parametrize("field", [
+    "scenario_schema_version", "spatial_schema_version",
+    "scheduler_version", "renderer_version",
+])
+def test_every_summary_version_fails_closed_when_unsupported(
+        spatial_pack, tmp_path, field):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    summary = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    summary[field] = "unsupported-v999"
+    _write_json(run_dir / "run.json", summary)
+    with pytest.raises(VisualizationError, match="unsupported_schema"):
+        load_validated_run(root, run_id)
+
+
 def test_reordered_chain_cannot_masquerade_as_progress(spatial_pack, tmp_path):
     root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
     rows = [json.loads(line) for line in
@@ -176,6 +194,54 @@ def test_actor_schema_rejects_privileged_carrier(spatial_pack, tmp_path):
     rows[0]["actor_content"]["content"]["authoritative_placements"] = []
     _write_jsonl(path, rows)
     with pytest.raises(VisualizationError, match="actor_schema|invalid_observation|invalid_shape"):
+        load_validated_run(root, run_id)
+
+
+@pytest.mark.parametrize("location", [
+    {"tag": "in_room", "room_instance_id": "f" * 64},
+    {"tag": "held_by", "agent_body_id": "f" * 64},
+    {"tag": "in_transit", "portal_instance_id": "f" * 64,
+     "origin_room_instance_id": "e" * 64,
+     "destination_room_instance_id": "d" * 64,
+     "start_step": 1, "arrival_step": 2},
+])
+def test_reidentified_actor_locations_remain_bound_to_authenticated_state(
+        spatial_pack, tmp_path, location):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "observations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    required_kind = "object" if location["tag"] == "held_by" else "agent_body"
+    row = next(
+        candidate for candidate in rows
+        if any(entity["entity_kind"] == required_kind for entity in
+               candidate["actor_content"]["content"]
+               ["observable_state_projection"]["entities"]))
+    entity = next(
+        entity for entity in row["actor_content"]["content"]
+        ["observable_state_projection"]["entities"]
+        if entity["entity_kind"] == required_kind)
+    entity["location"] = dict(location)
+    content = row["actor_content"]["content"]
+    row["actor_observation_id"] = observation_artifact("actor", content).id
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="actor_state_binding"):
+        load_validated_run(root, run_id)
+
+
+def test_reidentified_actor_kind_remains_bound_to_authenticated_state(
+        spatial_pack, tmp_path):
+    root, run_id, run_dir = _copy_pack(spatial_pack, tmp_path)
+    path = run_dir / "observations.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    row = rows[0]
+    entity = row["actor_content"]["content"]["observable_state_projection"] \
+        ["entities"][0]
+    entity["entity_kind"] = (
+        "object" if entity["entity_kind"] == "agent_body" else "agent_body")
+    content = row["actor_content"]["content"]
+    row["actor_observation_id"] = observation_artifact("actor", content).id
+    _write_jsonl(path, rows)
+    with pytest.raises(VisualizationError, match="actor_state_binding"):
         load_validated_run(root, run_id)
 
 
@@ -313,20 +379,126 @@ def test_experiment_strings_remain_data_not_markup(spatial_pack, tmp_path):
     assert "textContent" in script and "innerHTML" not in script
 
 
+def _copy_treatment_pair(tmp_path):
+    source_root = Path("logs/society-runs")
+    treatment_summary = json.loads(
+        (source_root / TREATMENT_ID / "run.json").read_text(encoding="utf-8"))
+    control_id = treatment_summary["treatment_bindings"]["control_run_id"]
+    root = tmp_path / "society-runs"
+    shutil.copytree(source_root / control_id, root / control_id)
+    shutil.copytree(source_root / TREATMENT_ID, root / TREATMENT_ID)
+    return root, root / TREATMENT_ID
+
+
+def _refresh_treatment_execution_identity(summary):
+    from coliseum.textlab.spatial.calibration import (
+        derive_execution_instance_id, intervention_record)
+    spec = intervention_record(summary["intervention_id"]).canonical_spec
+    bindings = summary["treatment_bindings"]
+    summary["execution_instance_id"] = derive_execution_instance_id(
+        summary["intervention_id"], summary["scenario"], summary["seed"],
+        spec["agent_key"], bindings["parent_world_line_id"],
+        bindings["control_source_evidence_id"], bindings["fork_position"],
+        bindings["fork_state_hash"])
+
+
+def test_treatment_provenance_cross_binds_valid_control(tmp_path):
+    root, _run_dir = _copy_treatment_pair(tmp_path)
+    validated = load_validated_run(root, TREATMENT_ID)
+    assert validated.run["spatial_run_schema_version"] == "0.3"
+
+
+@pytest.mark.parametrize("mutation", [
+    "witness_manifest", "coordinated_manifest", "fork_genesis",
+    "witness_state", "parent_world_line", "control_source", "control_run",
+])
+def test_treatment_provenance_drift_fails_closed(tmp_path, mutation):
+    root, run_dir = _copy_treatment_pair(tmp_path)
+    path = run_dir / "run.json"
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    bindings = summary["treatment_bindings"]
+    witness = summary["witness_ids"]
+    if mutation == "witness_manifest":
+        witness["scheduler_manifest_id"] = "f" * 64
+    elif mutation == "coordinated_manifest":
+        witness["scheduler_manifest_id"] = "f" * 64
+        bindings["control_manifest_id"] = "f" * 64
+    elif mutation == "fork_genesis":
+        bindings["fork_genesis_id"] = "f" * 64
+    elif mutation == "witness_state":
+        witness["scheduler_state_id"] = "f" * 64
+    elif mutation == "parent_world_line":
+        bindings["parent_world_line_id"] = "f" * 64
+        _refresh_treatment_execution_identity(summary)
+    elif mutation == "control_source":
+        bindings["control_source_evidence_id"] = "f" * 64
+        _refresh_treatment_execution_identity(summary)
+    elif mutation == "control_run":
+        bindings["control_run_id"] = "society_seed_v1--seed42--" + "f" * 16
+    _write_json(path, summary)
+    with pytest.raises(VisualizationError):
+        load_validated_run(root, TREATMENT_ID)
+
+
 def test_live_pack_preserves_incomplete_nonclaimable_ceiling():
     root = Path("logs/live-persona-runs").resolve()
     validated = load_validated_run(root, LIVE_ID)
-    for perspective, actor in (("actor", "ada"), ("privileged", None)):
-        provenance = build_view_model(validated, perspective, actor)["validation"]
-        assert provenance["completion"] == "incomplete"
-        assert provenance["behavioral_claimability"] == "nonclaimable"
-        assert provenance["result_status"] == "incomplete"
     actor_model = build_view_model(validated, "actor", "ada")
     privileged_model = build_view_model(validated, "privileged")
+    assert actor_model["validation"]["completion"] == "unknown"
+    assert actor_model["validation"]["behavioral_claimability"] == "unknown"
+    assert actor_model["validation"]["result_status"] == "unknown"
+    assert actor_model["validation"]["report_authentication"] == "not_exposed"
+    assert privileged_model["validation"]["completion"] == "incomplete"
+    assert privileged_model["validation"]["behavioral_claimability"] == \
+        "nonclaimable"
+    assert privileged_model["validation"]["result_status"] == "incomplete"
     assert actor_model["experiment"]["model_regime"] is None
     assert privileged_model["experiment"]["model_regime"]["source"] == \
         "structurally_valid_unverified_report"
     assert privileged_model["experiment"]["termination"]["code"] == "control_desync"
+
+
+def test_actor_view_is_invariant_to_live_report_presence_and_content(tmp_path):
+    source = Path("logs/live-persona-runs") / LIVE_ID
+    models = []
+    for label in ("committed", "absent", "mutated", "favorable"):
+        root = tmp_path / label
+        target = root / LIVE_ID
+        shutil.copytree(source, target)
+        report_path = target / "live_report.json"
+        if label == "absent":
+            report_path.unlink()
+        elif label == "mutated":
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["content"]["regime"]["backend_version"] = "mutated-private-report"
+            report["content"]["regime_id"] = config_hash(report["content"]["regime"])
+            report["id"] = config_hash(report["content"])
+            _write_json(report_path, report)
+        elif label == "favorable":
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            floor = report["content"]["effective_n_floor"]
+            report["content"].update({
+                "status": "complete", "complete": True,
+                "behavioral_departure_claimable": True, "terminated": None,
+                "decisions_requested": floor, "decisions_parsed_ok": floor,
+                "effective_n": floor, "per_code_counts": {"ok": floor},
+            })
+            while len(report["content"]["per_tick"]) < floor:
+                report["content"]["per_tick"].append(
+                    dict(report["content"]["per_tick"][-1]))
+            report["content"]["per_tick"] = report["content"]["per_tick"][:floor]
+            report["id"] = config_hash(report["content"])
+            _write_json(report_path, report)
+        validated = load_validated_run(root, LIVE_ID)
+        replay = ReplayVerification(
+            "failed" if label == "favorable" else "verified",
+            f"private replay detail for {label}",
+            "failed" if label == "mutated" else "unverified")
+        models.append(json.dumps(
+            build_view_model(validated, "actor", "ada", replay),
+            sort_keys=True))
+    assert len(set(models)) == 1
 
 
 def test_counterfeit_favorable_report_is_not_presented_as_claimable(tmp_path):

@@ -295,7 +295,25 @@ def _actor_events(snapshots):
     return events
 
 
-def _provenance(validated, replay):
+def _provenance(validated, replay, perspective):
+    if perspective == "actor":
+        # Actor responses are a positive projection of actor artifacts. Replay
+        # gates, evaluator reports, and their presence/absence are privileged
+        # carriers, so even conservative report ceilings must not enter this
+        # payload or create a cross-report side channel.
+        return {
+            "artifact_validation": "valid",
+            "replay_verification": "not_exposed",
+            "replay_detail": "not exposed in actor view",
+            "report_authentication": "not_exposed",
+            "completion": "unknown",
+            "behavioral_claimability": "unknown",
+            "result_status": "unknown",
+            "training_admission": "unknown",
+            "governance_approval": "not_bound",
+            "quarantine": "unknown",
+            "correction_lineage": "unknown",
+        }
     report = validated.live_report["content"] if validated.live_report else None
     authenticated_positive = (replay.state == "verified" and
                               (report is None or replay.report_state == "verified"))
@@ -342,7 +360,7 @@ def run_card(validated, perspective, actor_key=None, replay_verification=None):
             "scheduler": validated.run["scheduler_version"],
             "renderer": validated.run["renderer_version"],
         },
-        "validation": _provenance(validated, replay),
+        "validation": _provenance(validated, replay, perspective),
     }
     if perspective == "privileged":
         card["observer_count"] = len(validated.run["observers"])
