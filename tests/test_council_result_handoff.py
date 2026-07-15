@@ -260,6 +260,23 @@ def test_correction_schema_freezes_primary_but_allows_derived_identity(tmp_path)
         validate_request(request, (repo,))
 
 
+@pytest.mark.parametrize("field,value", [
+    ("behavioral_departure_claimable", True),
+    ("complete", True),
+    ("status", "complete"),
+])
+def test_correction_cannot_expand_frozen_conclusion_ceiling(
+        tmp_path, field, value):
+    repo, head = make_repo(tmp_path)
+    request = correction_request(repo, head)
+    request["result_config"]["outcome"][field] = value
+    request["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, request["result_config"])
+    request["request_payload_hash"] = compute_request_payload_hash(request)
+    with pytest.raises(SchemaViolation, match="conclusion ceiling"):
+        validate_request(request, (repo,))
+
+
 def test_correction_pack_may_change_only_derived_report(tmp_path, monkeypatch):
     repo, head = make_repo(tmp_path)
     source = os.path.join("logs", "live-persona-runs", RUN_ID)

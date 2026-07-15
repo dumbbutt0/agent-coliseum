@@ -133,6 +133,16 @@ _CORRECTION_FIELDS = {
     "prior_evidence_inventory_hash",
 }
 
+# These outcome fields express the authorized conclusion ceiling, rather than
+# merely a recomputable report summary.  A derived-only correction may repair
+# counts or report structure, but it cannot turn this incomplete pilot into a
+# complete or behaviorally claimable result.
+CORRECTION_OUTCOME_CEILING = {
+    "behavioral_departure_claimable": False,
+    "complete": False,
+    "status": "incomplete",
+}
+
 
 def _safe_relpath(value: object, field: str) -> None:
     if not isinstance(value, str) or not value or value.startswith(("/", "\\")) \
@@ -165,6 +175,10 @@ def validate_handoff_request(request: dict) -> None:
                     f"correction changed frozen result_config field {key}")
         if not isinstance(config["outcome"], dict) or not config["outcome"]:
             raise SchemaViolation("correction outcome must be a non-empty object")
+        for field, ceiling in CORRECTION_OUTCOME_CEILING.items():
+            if config["outcome"].get(field) != ceiling:
+                raise SchemaViolation(
+                    f"correction outcome exceeds frozen conclusion ceiling: {field}")
         for field in ("evidence_inventory_hash", "report_id"):
             if not isinstance(config[field], str) or not re.fullmatch(
                     r"[0-9a-f]{64}", config[field]):
