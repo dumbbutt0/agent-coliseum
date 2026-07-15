@@ -315,6 +315,69 @@ def test_no_menu_or_prompt_names_an_unseen_entity():
                 f"prompt names unseen id {tok[:12]} at tick {tick}")
 
 
+from coliseum.textlab.schema import config_hash
+from coliseum.textlab.spatial.scheduler import WorldState, admit_world_state
+
+# frozen literals (§3): the template hash + the 8 assembled-prompt hashes at seed
+# 42. Any serializer/template drift changes these and refuses.
+_FROZEN_TEMPLATE_HASH = \
+    "11cfbe5d22446f207f898ebfd2c352a6d13711df39cf1bf1258e1cb305b2e518"
+_FROZEN_PROMPT_HASHES = [
+    "c7cfa972480557180d7cb7f8b20a2de3b578c86789ac2174ce0ef9f172e5d2c5",
+    "23f173848c4cd689cec12530c7bf3efaae9318b159fe413ed11994af3efebfa1",
+    "3e348cfb5f1116e97cd94d9de03062bd8d8e9235848f04e59811617c2f356971",
+    "10fda4ba4d28426512757cc4805a69b2402a1e41063b276d31d14b74ced55ab9",
+    "26388791c93aa4475ba83cb4b358c1e013b9e9b84b498ca1518ccd40af95193a",
+    "5b62417aff3edfbb57b070c7fbd657579ec42443fbf70213319d48079fe71a11",
+    "9c5b79e80b45c7937c39133aa92438555c4bee69c71b1ab99f5fdc2f3791fb1f",
+    "30f2f5bb2a0bed863f95370d9eebe60cf3ad7d19d0c2703fb2a7d9a73e1b3c4d",
+]
+
+
+def test_frozen_prompt_template_hash():
+    assert config_hash(live.PROMPT_TEMPLATE) == _FROZEN_TEMPLATE_HASH
+
+
+def test_eight_assembled_prompt_hashes_pinned(mimic_run):
+    """§3: the assembled-prompt config_hash at each of the eight ada activations
+    is pinned; any serializer drift refuses."""
+    rows = [json.loads(l) for l in open(
+        os.path.join(mimic_run["run_dir"], "persona.jsonl"), encoding="utf-8")
+        if l.strip()]
+    assert [r["prompt_hash"] for r in rows] == _FROZEN_PROMPT_HASHES
+
+
+def test_privileged_invariance_two_admitted_states():
+    """§3 privileged-invariance (two-state form): two ADMITTED states with
+    byte-identical ada actor content but DIFFERENT hidden gem containment (gem
+    inside the box vs gem free on room C's floor — both invisible to ada in room
+    A) yield byte-identical ada actor content AND byte-identical menu ids. A
+    privileged-only change therefore cannot alter ada's prompt/menu."""
+    reg = SpatialSpecRegistry()
+    base = build_scenario("society_seed_v1", reg, 42)
+    genesis, closure, ids = base["genesis"], base["closure"], base["ids"]
+    ada, gem, room_c = ids["ada"], ids["gem"], ids["room_C"]
+    # s2: relocate the (hidden-from-ada) gem from inside the box to the floor of
+    # room C — a privileged-only mutation ada in room A cannot perceive.
+    placements2 = []
+    for p in genesis.content["placements"]:
+        if p["entity_id"] == gem:
+            p = dict(p, location={"tag": "in_room", "room_instance_id": room_c})
+        placements2.append(p)
+    s2 = WorldState(genesis.world_line_id, genesis.logical_step, placements2,
+                    genesis.content["entity_lifecycle"])
+    admit_world_state(s2, reg)
+    reg.register(s2)
+    assert s2.id != genesis.id, "the privileged mutation must produce a distinct state"
+    a1, _ = render_observation_pair(genesis, ada, closure, reg)
+    a2, _ = render_observation_pair(s2, ada, closure, reg)
+    assert canonical_json(a1.content) == canonical_json(a2.content), \
+        "ada actor content changed under a hidden-only mutation"
+    m1 = [canonical_effect_id(e) for e in live.actor_safe_menu(ada, genesis, closure, reg, ids)]
+    m2 = [canonical_effect_id(e) for e in live.actor_safe_menu(ada, s2, closure, reg, ids)]
+    assert m1 == m2, "ada menu changed under a hidden-only mutation (leak)"
+
+
 def test_hidden_gem_never_appears_when_ada_co_located_with_box():
     """The auditor's reproduced leak (audit 001293), directly refuted: drive ada
     INTO room C so it is co-located with the box whose HIDDEN gem it cannot
@@ -443,11 +506,34 @@ def test_no_actor_safe_action_never_triggers_in_seed():
         assert len(mids) >= 1, f"empty actor-safe menu at tick {tick}"
 
 
-def test_live_source_binding_domain_separated():
-    from coliseum.textlab.society.seed import SocietySourceEvidenceBinding
-    fake = {n: "0" * 64 for n in live.LIVE_EVIDENCE_FILES}
-    b = live.LiveSourceEvidenceBinding("society_seed_v1--seed42--x", fake)
-    assert b.content  # constructs
+def test_live_source_binding_binds_society_for_complete_packs():
+    """§6: a COMPLETE pack's LiveSourceEvidenceBinding binds the spatial six +
+    society.jsonl + persona.jsonl; an INCOMPLETE pack binds the spatial six +
+    persona.jsonl; any other key set (or pack_kind) refuses fail-closed."""
+    complete = {n: "0" * 64 for n in live.LIVE_EVIDENCE_FILES_COMPLETE}
+    assert "society.jsonl" in complete
+    b = live.LiveSourceEvidenceBinding("society_seed_v1--seed42--x", complete,
+                                       "complete")
+    assert b.content["pack_kind"] == "complete"
+    incomplete = {n: "0" * 64 for n in live.LIVE_EVIDENCE_FILES_INCOMPLETE}
+    bi = live.LiveSourceEvidenceBinding("x", incomplete, "incomplete")
+    assert bi.content["pack_kind"] == "incomplete"
+    # complete hashes under 'incomplete' pack_kind (society.jsonl extra) refuses
+    with pytest.raises(Exception):
+        live.LiveSourceEvidenceBinding("x", complete, "incomplete")
     # a wrong file set refuses
     with pytest.raises(Exception):
-        live.LiveSourceEvidenceBinding("x", {"run.json": "0" * 64})
+        live.LiveSourceEvidenceBinding("x", {"run.json": "0" * 64}, "complete")
+    # an unknown pack_kind refuses
+    with pytest.raises(Exception):
+        live.LiveSourceEvidenceBinding("x", complete, "partial")
+
+
+def test_complete_pack_binding_includes_society(mimic_run):
+    """The executed mimics-scripted (complete) pack's binding is over the complete
+    file set including society.jsonl (rebuild the binding from the run dir)."""
+    import os as _os
+    hashes = {n: live._sha256_file(_os.path.join(mimic_run["run_dir"], n))
+              for n in live.LIVE_EVIDENCE_FILES_COMPLETE}
+    b = live.LiveSourceEvidenceBinding(mimic_run["run_id"], hashes, "complete")
+    assert b.id == mimic_run["live_source_evidence_id"]

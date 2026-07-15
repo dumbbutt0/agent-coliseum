@@ -39,8 +39,13 @@ from coliseum.textlab.spatial.scheduler import (ADVANCE, QUIESCENT,
 from coliseum.textlab.spatial.world import SPATIAL_SCHEMA_VERSION
 from coliseum.textlab.society.rules import (INSTITUTION_TOKEN_STAYS_IN_A,
                                             institutional_filter)
-from coliseum.textlab.society.seed import AGENTS, SCENARIO as SEED_SCENARIO, derive_society
-from coliseum.textlab.society.run import _society_jsonl_bytes, assert_script_rule_clean
+from coliseum.textlab.society.seed import (AGENTS, CLAIM_CEILING as SEED_CLAIM_CEILING,
+                                           PRIVATE_FACT, PRIVATE_FACT_HOLDER,
+                                           SCENARIO as SEED_SCENARIO, _pair_key,
+                                           derive_society)
+from coliseum.textlab.society.run import (_society_jsonl_bytes, _terminal_token_location,
+                                          assert_actor_report_schema,
+                                          assert_script_rule_clean)
 
 #: frozen version constants (§2). Any drift refuses.
 PROMPT_VERSION = "society_persona_prompt.v1"
@@ -70,7 +75,14 @@ def parse_numeric_menu(raw, n):
     m = _DIGITS_RE.search(stripped)
     if m is None:
         return None, "parse_failure"
-    k = int(m.group(0))
+    # TOTAL over any completion length: a digit run with more significant digits
+    # than N necessarily exceeds N, so we never convert an unbounded string to int
+    # (Python raises on >4300-digit int() conversions — an adversarial completion
+    # must NOT escape the closed taxonomy).
+    digits = m.group(0).lstrip("0") or "0"
+    if len(digits) > len(str(n)):
+        return None, "illegal_selection"
+    k = int(digits)
     if 1 <= k <= n:
         return k, "ok"
     return None, "illegal_selection"
@@ -156,26 +168,37 @@ def _menu_block(menu):
                      for k, eff in enumerate(menu, 1))
 
 
+#: the frozen prompt template `society_persona_prompt.v1` (§3), the single source
+#: of truth for the assembled bytes. Its config_hash is pinned as a regression.
+PROMPT_TEMPLATE = (
+    "You are agent {agent_key} in a simple world of rooms connected by doors.\n"
+    "You can only perceive your own room. Current logical step: {logical_step}.\n"
+    "You are in room {visible_room}.\n"
+    "You can see these entities here (id: kind: location):\n"
+    "{visible_entities_block}\n"
+    "Doors leading out of your room (id -> destination room):\n"
+    "{visible_portals_block}\n"
+    "It is your turn. Choose EXACTLY ONE action by replying with only its number:\n"
+    "{numbered_menu_block}\n"
+    "Reply with only the number of your chosen action.\n"
+)
+
+
 def assemble_prompt(actor_content, menu):
     """Build the ONE frozen-template prompt from ada's S2C actor content + the
-    actor-safe menu. Deterministic; no privileged content ever enters (§3)."""
+    actor-safe menu. Deterministic; no privileged content ever enters (§3). Built
+    from PROMPT_TEMPLATE by ordered placeholder replacement — the scalar values
+    (agent key, step, room id) and the serialized blocks never contain a
+    placeholder token, so replacement is unambiguous."""
     room = actor_content["visible_room_identity"]
-    visible_room = "none" if room is None else room
-    return (
-        f"You are agent {LIVE_AGENT_KEY} in a simple world of rooms connected by "
-        "doors.\n"
-        "You can only perceive your own room. Current logical step: "
-        f"{actor_content['logical_step']}.\n"
-        f"You are in room {visible_room}.\n"
-        "You can see these entities here (id: kind: location):\n"
-        f"{_entities_block(actor_content)}\n"
-        "Doors leading out of your room (id -> destination room):\n"
-        f"{_portals_block(actor_content)}\n"
-        "It is your turn. Choose EXACTLY ONE action by replying with only its "
-        "number:\n"
-        f"{_menu_block(menu)}\n"
-        "Reply with only the number of your chosen action.\n"
-    )
+    out = PROMPT_TEMPLATE
+    out = out.replace("{agent_key}", LIVE_AGENT_KEY)
+    out = out.replace("{logical_step}", str(actor_content["logical_step"]))
+    out = out.replace("{visible_room}", "none" if room is None else room)
+    out = out.replace("{visible_entities_block}", _entities_block(actor_content))
+    out = out.replace("{visible_portals_block}", _portals_block(actor_content))
+    out = out.replace("{numbered_menu_block}", _menu_block(menu))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -267,12 +290,18 @@ LIVE_CLAIM_CEILING = (
     "or general live-model reliability, and no claim beyond this single governed "
     "run.")
 
-#: the LiveSourceEvidenceBinding set: the spatial six + the persona capture. The
-#: latency file is EXCLUDED (non-identity, §6); society.jsonl (complete runs only)
-#: is a further derived layer verified by byte re-derivation, not the anchor.
-LIVE_EVIDENCE_FILES = ("run.json", "chain.jsonl", "transitions.jsonl",
-                       "observations.jsonl", "activations.jsonl", "closure.json",
-                       "persona.jsonl")
+#: the LiveSourceEvidenceBinding sets (§6): the spatial six + the society layer +
+#: persona.jsonl. persona_latency.jsonl is EXCLUDED (non-identity). A COMPLETE
+#: pack binds society.jsonl (the derived trust/tick layer exists); an INCOMPLETE
+#: pack (a decision terminated before 8 ticks, so derive_society cannot run) has
+#: no society.jsonl and binds the spatial six + persona.jsonl only. The two shapes
+#: are the ONLY admissible key sets — fail-closed.
+_SPATIAL_SIX = ("run.json", "chain.jsonl", "transitions.jsonl",
+                "observations.jsonl", "activations.jsonl", "closure.json")
+LIVE_EVIDENCE_FILES_COMPLETE = _SPATIAL_SIX + ("society.jsonl", "persona.jsonl")
+LIVE_EVIDENCE_FILES_INCOMPLETE = _SPATIAL_SIX + ("persona.jsonl",)
+#: the replay-compared set is whatever the pack actually wrote (see replay).
+LIVE_EVIDENCE_FILES = LIVE_EVIDENCE_FILES_COMPLETE   # back-compat alias
 
 
 # --- personas ---------------------------------------------------------------
@@ -294,6 +323,8 @@ class MockPersona:
         self._plan = list(plan)
         self._i = 0
         self.decoding = dict(DECODING)
+        self.backend_version = "mock"
+        self.seed_supported = None
         self.model_digest = model_digest or (
             "mock:" + config_hash({"plan": self._plan}))
 
@@ -331,6 +362,8 @@ class ScriptFollowingPersona:
         self._ids = ids
         self._i = 0
         self.decoding = dict(DECODING)
+        self.backend_version = "mock"
+        self.seed_supported = None
         self.model_digest = "mock:" + config_hash(
             {"intents": [list(i) for i in intents]})
 
@@ -363,6 +396,8 @@ class ReplayPersona:
         self.backend_calls = 0
         self.model_digest = None
         self.decoding = None
+        self.backend_version = None
+        self.seed_supported = None
 
     def decide(self, prompt, menu, context):
         self.backend_calls += 1                  # NOT a backend call — a lookup
@@ -412,6 +447,13 @@ class OllamaPersona:
         self.model_digest = expected_digest
         self.decoding = dict(DECODING)
         self.backend_calls = 0
+        # §2: resolve backend_version + probe seed support BEFORE the regime is
+        # hashed, never assumed. These are the governed run's environment facts
+        # (they require live calls — legitimate at governed-run time, never during
+        # the doc/source audit). The seed probe is warmup-adjacent, never captured.
+        self._agent.resolve_effective_config()
+        self.backend_version = self._agent.backend_version
+        self.seed_supported = bool(self._agent.verify_seeded_sampling())
 
     def decide(self, prompt, menu, context):
         import socket
@@ -652,26 +694,33 @@ def _sha256_file(path):
 # --- the live-source evidence binding (domain-separated, §6) -----------------
 
 class LiveSourceEvidenceBinding(ContentRecord):
-    """Content-addresses the live pilot's provenance anchor: the spatial six +
-    persona.jsonl (the behavioral capture). Domain-separated from the spatial,
-    society, and calibration bindings. persona_latency.jsonl is EXCLUDED (§6)."""
+    """Content-addresses the live pilot's provenance anchor: the spatial six + the
+    derived society layer (complete packs) + persona.jsonl (the behavioral
+    capture). Domain-separated from the spatial, society, and calibration
+    bindings. persona_latency.jsonl is EXCLUDED (§6). The bound `pack_kind`
+    (complete|incomplete) fixes which of the two admissible key sets applies —
+    fail-closed: any other key set refuses."""
     __slots__ = ()
     DOMAIN = "trs.source_evidence.live.v1"
     ID_FIELD = "source_evidence_id"
 
-    def __init__(self, run_id, evidence_file_hashes):
+    def __init__(self, run_id, evidence_file_hashes, pack_kind):
         if not isinstance(run_id, str) or not run_id:
             raise ContentRecordError("run_id must be a non-empty string")
+        expected = {"complete": set(LIVE_EVIDENCE_FILES_COMPLETE),
+                    "incomplete": set(LIVE_EVIDENCE_FILES_INCOMPLETE)}.get(pack_kind)
+        if expected is None:
+            raise ContentRecordError("pack_kind must be 'complete' or 'incomplete'")
         if not isinstance(evidence_file_hashes, dict) or \
-                set(evidence_file_hashes) != set(LIVE_EVIDENCE_FILES):
+                set(evidence_file_hashes) != expected:
             raise ContentRecordError(
-                "evidence_file_hashes must bind exactly the live evidence files "
-                f"{sorted(LIVE_EVIDENCE_FILES)}")
+                f"evidence_file_hashes must bind exactly the {pack_kind} live "
+                f"evidence files {sorted(expected)}")
         for h in evidence_file_hashes.values():
             if not isinstance(h, str) or len(h) != 64 or \
                     any(c not in "0123456789abcdef" for c in h):
                 raise ContentRecordError("each hash must be 64 lowercase hex chars")
-        super().__init__({"run_id": run_id,
+        super().__init__({"run_id": run_id, "pack_kind": pack_kind,
                           "evidence_file_hashes": dict(evidence_file_hashes)})
 
 
@@ -718,11 +767,14 @@ def execute_live_persona_pilot(persona, seed=SEED, out_root=None, fact=True):
             fh.write(society_bytes)
         society_manifest_id = smanifest.id
 
+    pack_kind = "complete" if drive["complete"] else "incomplete"
+    bound_files = (LIVE_EVIDENCE_FILES_COMPLETE if drive["complete"]
+                   else LIVE_EVIDENCE_FILES_INCOMPLETE)
     binding = LiveSourceEvidenceBinding(
-        run_id=summary["run_id"],
+        run_id=summary["run_id"], pack_kind=pack_kind,
         evidence_file_hashes={n: _sha256_file(os.path.join(run_dir, n))
-                              for n in LIVE_EVIDENCE_FILES})
-    report = build_departure_report(run_dir, drive, derived, seed, fact)
+                              for n in bound_files})
+    report = build_departure_report(run_dir, drive, derived, seed, fact, persona)
     _write_line(run_dir, "live_report.json",
                 canonical_json({"id": config_hash(report), "content": report}))
     return {"run_id": summary["run_id"], "run_dir": run_dir, "spatial": summary,
@@ -748,9 +800,9 @@ def replay_live_persona_pilot(run_dir, out_root=None, scratch_root=None):
     fresh = execute_live_persona_pilot(replay, seed, out_root=scratch)
     if fresh["run_id"] != run_json["run_id"]:
         return False, f"run_id differs: {fresh['run_id']} != {run_json['run_id']}"
-    compare = list(LIVE_EVIDENCE_FILES)
-    if os.path.isfile(os.path.join(run_dir, "society.jsonl")):
-        compare.append("society.jsonl")
+    compare = list(LIVE_EVIDENCE_FILES_COMPLETE
+                   if os.path.isfile(os.path.join(run_dir, "society.jsonl"))
+                   else LIVE_EVIDENCE_FILES_INCOMPLETE)
     for name in compare:
         a = open(os.path.join(run_dir, name), "rb").read()
         b = open(os.path.join(fresh["run_dir"], name), "rb").read()
@@ -778,7 +830,7 @@ def _scripted_baseline_ada_effects(seed, fact):
     return out, drive
 
 
-def build_departure_report(run_dir, live_drive, derived, seed, fact):
+def build_departure_report(run_dir, live_drive, derived, seed, fact, persona):
     """Per-tick live-vs-scripted-baseline departure (§7). Divergences at a tick
     whose baseline action was not in ada's actor-safe menu are coded
     `observability_restricted` and EXCLUDED from the behavioral-departure count;
@@ -832,12 +884,34 @@ def build_departure_report(run_dir, live_drive, derived, seed, fact):
     behavioral_claimable = (status == "complete"
                             and effective_n >= EFFECTIVE_N_FLOOR)
     trust_delta = enforcement_delta = token_terminal_delta = None
+    privileged = None
+    actor_safe = None
     if derived is not None:
-        base_derived = base_drive_society(base_drive, seed)
+        base_derived, base_run_dir = base_drive_society(base_drive, seed)
         trust_delta = {k: derived["trust"][k] - base_derived["trust"][k]
                        for k in derived["trust"]}
         enforcement_delta = (len(derived["enforcement"])
                              - len(base_derived["enforcement"]))
+        live_tok = _terminal_token_location(run_dir)
+        base_tok = _terminal_token_location(base_run_dir)
+        token_terminal_delta = {"live": live_tok, "baseline": base_tok,
+                                "differs": live_tok != base_tok}
+        privileged = _live_privileged_report(run_dir, derived)
+        actor_safe = {a: _live_actor_safe_report(run_dir, derived, a)
+                      for a in AGENTS}
+
+    # the run REGIME (§2): the actual persona's model + decoding + resolved
+    # backend_version + probed seed support + the frozen prompt/parser/actor
+    # versions, hashed into a regime identity. For the mock it records
+    # backend_version 'mock'/seed_supported null; the governed Ollama run records
+    # the authenticated live values (resolved before this hash).
+    regime = {"model_id": persona.model_id, "model_digest": persona.model_digest,
+              "decoding": persona.decoding,
+              "backend_version": getattr(persona, "backend_version", None),
+              "seed_supported": getattr(persona, "seed_supported", None),
+              "prompt_version": PROMPT_VERSION,
+              "parser_version": PERSONA_PARSER_VERSION,
+              "persona_actor_version": PERSONA_ACTOR_VERSION}
 
     return {
         "live_scenario": LIVE_SCENARIO, "baseline_scenario": SEED_SCENARIO,
@@ -854,9 +928,14 @@ def build_departure_report(run_dir, live_drive, derived, seed, fact):
         "observability_restricted_count": observability_restricted,
         "trust_matrix_delta": trust_delta,
         "enforcement_count_delta": enforcement_delta,
+        "token_terminal_delta": token_terminal_delta,
+        "privileged_report": privileged,
+        "actor_safe_reports": actor_safe,
         "prompt_version": PROMPT_VERSION,
         "parser_version": PERSONA_PARSER_VERSION,
-        "model_id": PILOT_MODEL_ID, "model_digest": PILOT_MODEL_DIGEST,
+        "preregistered_model_id": PILOT_MODEL_ID,
+        "preregistered_model_digest": PILOT_MODEL_DIGEST,
+        "regime": regime, "regime_id": config_hash(regime),
         "claim_ceiling": LIVE_CLAIM_CEILING,
     }
 
@@ -903,7 +982,43 @@ def base_drive_society(base_drive, seed):
                     "fork_position": None, "fork_state_hash": None})
     _summary, run_dir, _m = _write_spatial_evidence(
         live_sc, registry, SEED_SCENARIO, seed, scratch)
-    return derive_society(run_dir)
+    return derive_society(run_dir), run_dir
+
+
+def _live_actor_safe_report(run_dir, derived, agent):
+    """The per-agent ACTOR-SAFE report (§7, 'as in the seed'): built ONLY from
+    that agent's own recorded actor observations + its own outgoing trust; the
+    closed seed schema validates it (no other agent's trust, no private facts)."""
+    body = derived["run_json"]["observers"][agent]
+    observed, counts = [], {}
+    for r in (json.loads(l) for l in
+              open(os.path.join(run_dir, "observations.jsonl"), encoding="utf-8")):
+        if r["observer_body_id"] != body:
+            continue
+        observed.append(r["scheduler_position"])
+        counts[str(r["scheduler_position"])] = len(
+            r["actor_content"]["content"]["visible_entity_identities"])
+    report = {"agent": agent, "observed_positions": sorted(observed),
+              "visible_entity_counts": counts,
+              "outgoing_trust": {_pair_key(agent, j): derived["trust"][_pair_key(agent, j)]
+                                 for j in AGENTS if j != agent},
+              "claim_ceiling": SEED_CLAIM_CEILING}
+    assert_actor_report_schema(report)
+    return report
+
+
+def _live_privileged_report(run_dir, derived):
+    """The PRIVILEGED report (§7): the full trust matrix, enforcement trace, the
+    private fact, tick-state ids, and the terminal token location — built from the
+    already-derived society layer (no fork)."""
+    return {"scenario": SEED_SCENARIO, "trust_matrix": derived["trust"],
+            "trust_updates": derived["trust_updates"],
+            "private_facts": {PRIVATE_FACT_HOLDER: {PRIVATE_FACT: True}},
+            "enforcement_trace": derived["enforcement"],
+            "enforcement_trace_commitment": derived["enforcement_commitment"],
+            "tick_state_ids": [t.id for t in derived["tick_states"]],
+            "token_terminal_location": _terminal_token_location(run_dir),
+            "claim_ceiling": SEED_CLAIM_CEILING}
 
 
 def _ada_menu_ids_by_tick(seed, fact, live_drive):
