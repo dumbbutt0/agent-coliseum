@@ -450,10 +450,29 @@ class OllamaPersona:
         # §2: resolve backend_version + probe seed support BEFORE the regime is
         # hashed, never assumed. These are the governed run's environment facts
         # (they require live calls — legitimate at governed-run time, never during
-        # the doc/source audit). The seed probe is warmup-adjacent, never captured.
+        # the doc/source audit). The wrapped LLMAgent's verify_seeded_sampling is
+        # NOT used: its deterministic (temp 0) sampling config forbids a
+        # sampler_seed, so it would send no seed and always record false. Instead
+        # we probe with the EXACT pilot options — temperature 0, seed 42, the same
+        # options every real decision sends — so the recorded result reflects the
+        # backend's behaviour UNDER seed 42, never a faked or seedless probe.
         self._agent.resolve_effective_config()
         self.backend_version = self._agent.backend_version
-        self.seed_supported = bool(self._agent.verify_seeded_sampling())
+        self.seed_supported = self._probe_seed_support()
+
+    def _probe_seed_support(self):
+        """Send the SAME probe prompt twice with the exact frozen pilot options
+        (temperature 0, seed 42); byte-equal output records seed support. Never
+        captured, never latency-measured (warmup-adjacent, like the seed probe in
+        the integrated backend)."""
+        opts = {"temperature": 0.0, "num_predict": 8, "seed": 42}
+        probe = "Reply with one word: ready"
+        try:
+            a = self._agent._post(probe, 8, 60, options_override=opts).get("response", "")
+            b = self._agent._post(probe, 8, 60, options_override=opts).get("response", "")
+        except Exception:
+            return False
+        return a == b
 
     def decide(self, prompt, menu, context):
         import socket
@@ -800,9 +819,19 @@ def replay_live_persona_pilot(run_dir, out_root=None, scratch_root=None):
     fresh = execute_live_persona_pilot(replay, seed, out_root=scratch)
     if fresh["run_id"] != run_json["run_id"]:
         return False, f"run_id differs: {fresh['run_id']} != {run_json['run_id']}"
-    compare = list(LIVE_EVIDENCE_FILES_COMPLETE
-                   if os.path.isfile(os.path.join(run_dir, "society.jsonl"))
+    # the canonical pack shape comes from the RE-DERIVATION, never from what the
+    # (possibly-tampered) source dir happens to contain: a complete re-derivation
+    # REQUIRES society.jsonl in the source (dropping it must not silently pass as
+    # an incomplete pack); an incomplete re-derivation must NOT carry society.jsonl.
+    compare = list(LIVE_EVIDENCE_FILES_COMPLETE if fresh["complete"]
                    else LIVE_EVIDENCE_FILES_INCOMPLETE)
+    src_has_society = os.path.isfile(os.path.join(run_dir, "society.jsonl"))
+    if fresh["complete"] and not src_has_society:
+        return False, ("source pack is missing society.jsonl but re-derives as a "
+                       "COMPLETE pack — the bound society layer was dropped")
+    if not fresh["complete"] and src_has_society:
+        return False, ("source pack carries society.jsonl but re-derives as an "
+                       "INCOMPLETE pack — inconsistent pack shape")
     for name in compare:
         a = open(os.path.join(run_dir, name), "rb").read()
         b = open(os.path.join(fresh["run_dir"], name), "rb").read()

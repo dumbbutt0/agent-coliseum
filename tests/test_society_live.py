@@ -270,6 +270,110 @@ def test_zero_call_replay_byte_identical(mimic_run):
     assert ok, detail
 
 
+def test_parser_5000_digit_terminates_illegal_with_one_row(tmp_path):
+    """audit 001320 HIGH-1 closure: a 5000-digit completion (which would overflow
+    Python's int() conversion) is TOTAL -> illegal_selection, terminates the run,
+    and writes EXACTLY ONE persona.jsonl row (no crash, no lost decision)."""
+    assert live.parse_numeric_menu("9" * 5000, 3) == (None, "illegal_selection")
+    # non-truncated (eval_count small, reason 'stop') so the parser's
+    # illegal_selection is the decision code, not budget_exhausted; the 5000-digit
+    # completion is parsed WITHOUT crashing and one row is captured.
+    res = _run_with_plan([{"raw_completion": "9" * 5000,
+                           "completion_reason": "stop", "eval_count": 1}], tmp_path)
+    assert res["terminated"]["code"] == "illegal_selection"
+    assert res["persona_row_count"] == 1
+    ok, detail = live.replay_live_persona_pilot(res["run_dir"])
+    assert ok, detail
+    # and a genuinely truncated 5000-token completion is budget_exhausted (the
+    # precedence), still total + one row.
+    res2 = _run_with_plan([{"raw_completion": "9" * 5000,
+                            "completion_reason": "length", "eval_count": 5000}],
+                          tmp_path / "b")
+    assert res2["terminated"]["code"] == "budget_exhausted"
+    assert res2["persona_row_count"] == 1
+
+
+def test_complete_report_has_full_measurement_surface(mimic_run):
+    """audit 001320 HIGH-3 closure: a complete pack's report carries the
+    token-terminal-location delta + the privileged report + the closed-schema
+    actor-safe reports for all three agents."""
+    from coliseum.textlab.society.run import assert_actor_report_schema
+    rep = mimic_run["report"]
+    ttd = rep["token_terminal_delta"]
+    assert set(ttd) == {"live", "baseline", "differs"} and ttd["differs"] is False
+    priv = rep["privileged_report"]
+    for k in ("trust_matrix", "trust_updates", "enforcement_trace",
+              "enforcement_trace_commitment", "private_facts", "tick_state_ids",
+              "token_terminal_location", "claim_ceiling"):
+        assert k in priv, f"privileged report missing {k}"
+    assert priv["private_facts"] == {"cy": {"gem_in_box": True}}
+    assert set(rep["actor_safe_reports"]) == {"ada", "bo", "cy"}
+    for a, report in rep["actor_safe_reports"].items():
+        assert_actor_report_schema(report)          # closed seed schema
+        assert "private_facts" not in report and "enforcement_trace" not in report
+
+
+def test_regime_fields_mock(mimic_run):
+    """audit 001320 HIGH-4 closure (mock-exercised): the report records a regime
+    with the actual backend_version + seed_supported + a regime_id, plus the
+    preregistered pins — all without a live call."""
+    rep = mimic_run["report"]
+    reg = rep["regime"]
+    assert reg["backend_version"] == "mock" and reg["seed_supported"] is None
+    assert reg["model_id"] == "mock-script-follower"
+    assert reg["prompt_version"] == "society_persona_prompt.v1"
+    assert reg["parser_version"] == "society_numeric_menu.v1"
+    assert len(rep["regime_id"]) == 64
+    assert rep["preregistered_model_id"] == live.PILOT_MODEL_ID
+    assert rep["preregistered_model_digest"] == live.PILOT_MODEL_DIGEST
+
+
+def test_replay_refuses_dropped_society_layer(mimic_run, tmp_path):
+    """audit 001320 HIGH-2 closure: removing society.jsonl from a COMPLETE pack
+    must NOT silently pass as a 7-file incomplete replay — the pack shape is
+    authenticated from the re-derivation, so a dropped society layer refuses."""
+    import shutil
+    dst = str(tmp_path / "dropped")
+    shutil.copytree(mimic_run["run_dir"], dst)
+    os.remove(os.path.join(dst, "society.jsonl"))
+    ok, detail = live.replay_live_persona_pilot(dst)
+    assert not ok and "society.jsonl" in detail
+
+
+class _FakeOllamaAgent:
+    """A network-free stand-in for OllamaAgent that records the exact options each
+    _post receives — for the seed-probe regression (no live backend)."""
+    def __init__(self, model, host=None):
+        self.model = model
+        self.digest_status = "ok"
+        self.model_digest = "sha256:" + live.PILOT_MODEL_DIGEST
+        self.backend_version = "fake-0.1"
+        self.posts = []
+
+    def resolve_effective_config(self):
+        pass
+
+    def _post(self, prompt, num_predict, timeout_s, options_override=None):
+        self.posts.append(options_override)
+        return {"response": "ready", "done_reason": "stop", "eval_count": 1,
+                "prompt_eval_count": 3}
+
+
+def test_ollama_seed_probe_sends_seed_42(monkeypatch):
+    """audit 001320 HIGH-1 closure: OllamaPersona's seed probe sends the exact
+    frozen pilot options INCLUDING seed 42 (not a seedless probe), and records the
+    genuine result before the regime is hashed."""
+    import coliseum.textlab.agents as agents_mod
+    monkeypatch.setattr(agents_mod, "OllamaAgent", _FakeOllamaAgent)
+    p = live.OllamaPersona(host="http://localhost:11434")
+    # both probe posts carried temperature 0 + seed 42
+    assert len(p._agent.posts) >= 2
+    for opts in p._agent.posts[:2]:
+        assert opts["seed"] == 42 and opts["temperature"] == 0.0
+    assert p.seed_supported is True          # identical output twice
+    assert p.backend_version == "fake-0.1"
+
+
 def test_replay_constructs_no_live_persona(mimic_run, monkeypatch):
     """§6 / threat vector 4: replay re-derives from captures and NEVER invokes the
     model. Poison OllamaPersona so any attempt to build the live backend during
