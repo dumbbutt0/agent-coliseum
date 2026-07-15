@@ -14,10 +14,11 @@ import subprocess
 import sys
 
 from tools.autonomy.runner import validation_report_hash
-from tools.council import events, git_state, state_machine, storage
+from tools.council import events, git_state, locking, state_machine, storage
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    compute_request_payload_hash, domain_hash,
-                                   payload_hash, validate_request)
+                                   EVIDENCE_INVENTORY_DOMAIN, payload_hash,
+                                   validate_request)
 from tools.council.strictjson import loads_strict
 
 SENDER = "claude"
@@ -151,8 +152,23 @@ def validate_handoff_request(request: dict) -> None:
             "result_handoff request has missing or unknown keys: "
             f"missing={sorted(expected-set(request))}, "
             f"unknown={sorted(set(request)-expected)}")
-    if request["result_config"] != RESULT_CONFIG:
-        raise SchemaViolation("result_config differs from the pinned profile")
+    config = request["result_config"]
+    if not correction and config != RESULT_CONFIG:
+        raise SchemaViolation("initial result_config differs from the pin")
+    if correction:
+        if not isinstance(config, dict) or set(config) != set(RESULT_CONFIG):
+            raise SchemaViolation("correction result_config shape differs")
+        derived = {"evidence_inventory_hash", "outcome", "report_id"}
+        for key in set(RESULT_CONFIG) - derived:
+            if config[key] != RESULT_CONFIG[key]:
+                raise SchemaViolation(
+                    f"correction changed frozen result_config field {key}")
+        if not isinstance(config["outcome"], dict) or not config["outcome"]:
+            raise SchemaViolation("correction outcome must be a non-empty object")
+        for field in ("evidence_inventory_hash", "report_id"):
+            if not isinstance(config[field], str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", config[field]):
+                raise SchemaViolation(f"correction {field} must be sha256 hex")
     if request["authorization_profile"] != AUTHORIZATION_PROFILE:
         raise SchemaViolation("authorization_profile differs from the pin")
     if request["artifact_roles"] != ARTIFACT_ROLES or \
@@ -160,13 +176,14 @@ def validate_handoff_request(request: dict) -> None:
         raise SchemaViolation("artifact role or primary-capture map drift")
     exact = {"run_id": RUN_ID, "run_dir": RUN_DIR,
              "manifest_file": MANIFEST_FILE,
-             "evidence_inventory_hash": INVENTORY_HASH,
              "live_source_evidence_id":
              RESULT_CONFIG["live_source_evidence_id"],
              "conclusion_scope": CONCLUSION_SCOPE}
     for key, value in exact.items():
         if request[key] != value:
             raise SchemaViolation(f"{key} differs from the pinned profile")
+    if request["evidence_inventory_hash"] != config["evidence_inventory_hash"]:
+        raise SchemaViolation("request/config evidence inventory mismatch")
     _safe_relpath(request["run_dir"], "run_dir")
     _safe_relpath(request["manifest_file"], "manifest_file")
     if request["experiment_config_hash"] != domain_hash(
@@ -184,10 +201,11 @@ def validate_handoff_request(request: dict) -> None:
             if not isinstance(request[field], str) or not re.fullmatch(
                     r"\d{6}-[0-9a-f]{8}", request[field]):
                 raise SchemaViolation(f"{field} must be a council event id")
-        if request["prior_experiment_config_hash"] != \
-                request["experiment_config_hash"] or \
-                request["prior_evidence_inventory_hash"] != INVENTORY_HASH:
-            raise SchemaViolation("correction changed a frozen evidence binding")
+        for field in ("prior_experiment_config_hash",
+                      "prior_evidence_inventory_hash"):
+            if not isinstance(request[field], str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", request[field]):
+                raise SchemaViolation(f"{field} must be sha256 hex")
 
 
 def _sha256_file(path: str) -> str:
@@ -199,11 +217,12 @@ def _sha256_file(path: str) -> str:
 
 
 def _validate_pack(repo: str, request: dict) -> None:
+    config = request["result_config"]
     run_dir = os.path.join(repo, request["run_dir"])
     if not os.path.isdir(run_dir) or os.path.islink(run_dir):
         raise SchemaViolation("run_dir must be a real directory, not a symlink")
     names = sorted(os.listdir(run_dir))
-    if names != sorted(INVENTORY):
+    if names != sorted(ARTIFACT_ROLES):
         raise SchemaViolation("run directory inventory differs from the pin")
     actual = {}
     for name in names:
@@ -212,27 +231,39 @@ def _validate_pack(repo: str, request: dict) -> None:
         if not stat.S_ISREG(mode) or stat.S_ISLNK(mode):
             raise SchemaViolation(f"manifested member {name!r} is not regular")
         actual[name] = _sha256_file(path)
-    if actual != INVENTORY:
-        raise SchemaViolation("manifested evidence bytes differ from the pin")
+    primary = {name: digest for name, digest in actual.items()
+               if ARTIFACT_ROLES[name] == "primary_capture"}
+    if primary != PRIMARY_CAPTURE_HASHES:
+        raise SchemaViolation("a frozen primary capture differs from the pin")
     manifest_path = os.path.join(repo, request["manifest_file"])
     with open(manifest_path, "rb") as fh:
         manifest = loads_strict(fh.read(), max_bytes=262_144)
+    inventory_content = {
+        "schema_version": "evidence-manifest.v1", "run_id": RUN_ID,
+        "run_dir": RUN_DIR, "file_count": len(actual),
+        "files": dict(sorted(actual.items()))}
+    computed_inventory = domain_hash(EVIDENCE_INVENTORY_DOMAIN,
+                                     inventory_content)
     if manifest.get("files") != actual or manifest.get("file_count") != 9 \
             or set(manifest) != {"schema_version", "run_id", "run_dir",
                                 "file_count", "files", "inventory_hash",
                                 "generated_utc"} \
             or manifest.get("schema_version") != "evidence-manifest.v1" \
-            or manifest.get("inventory_hash") != INVENTORY_HASH \
+            or manifest.get("inventory_hash") != computed_inventory \
             or manifest.get("run_id") != RUN_ID \
             or manifest.get("run_dir") != RUN_DIR:
         raise SchemaViolation("sibling manifest does not authenticate the pack")
+    if request["evidence_inventory_hash"] != computed_inventory or \
+            config["evidence_inventory_hash"] != computed_inventory:
+        raise SchemaViolation("request/config inventory does not bind manifest")
     with open(os.path.join(run_dir, "live_report.json"), "rb") as fh:
         report = loads_strict(fh.read(), max_bytes=2_000_000)
     content = report.get("content", {})
-    outcome = RESULT_CONFIG["outcome"]
+    outcome = config["outcome"]
     outcome_fields = {key: content.get(key) for key in outcome}
     if set(report) != {"id", "content"} or \
-            report.get("id") != RESULT_CONFIG["report_id"] or \
+            report.get("id") != payload_hash(content) or \
+            report.get("id") != config["report_id"] or \
             content.get("regime_id") != RESULT_CONFIG["regime_id"] or \
             content.get("regime") != REGIME or outcome_fields != outcome:
         raise SchemaViolation("live report identity or regime differs from pin")
@@ -287,6 +318,17 @@ def _validate_authority(root: str, cfg, chain: list, request: dict) -> None:
                 or source_commit != pin["integrated_commit"]:
             raise SchemaViolation(
                 f"{label} source request is not valid plain-GO authority")
+    correction = "prior_result_request_id" in request
+    ready_requests = {
+        e["request_id"]: e["payload"].get("request", {}) for e in chain
+        if e["event_type"] in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY")}
+    lineage = set()
+    cursor = request.get("prior_result_request_id")
+    while cursor:
+        if cursor in lineage:
+            raise SchemaViolation("correction lineage contains a cycle")
+        lineage.add(cursor)
+        cursor = ready_requests.get(cursor, {}).get("prior_result_request_id")
     for event in chain:
         if event["event_type"] not in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
             continue
@@ -294,9 +336,10 @@ def _validate_authority(root: str, cfg, chain: list, request: dict) -> None:
         if any(prior.get(k) == request.get(k) for k in
                ("run_id", "run_dir", "live_source_evidence_id",
                 "evidence_inventory_hash")):
-            if event["request_id"] != request["request_id"]:
+            if event["request_id"] != request["request_id"] and \
+                    event["request_id"] not in lineage:
                 raise SchemaViolation("result profile/evidence already used")
-    if "prior_result_request_id" in request:
+    if correction:
         prior_id = request["prior_result_request_id"]
         expected = {
             "prior_ready_event_id":
@@ -311,9 +354,18 @@ def _validate_authority(root: str, cfg, chain: list, request: dict) -> None:
                     event["event_type"] not in types:
                 raise SchemaViolation(
                     f"correction lineage anchor {field} is invalid")
+        prior_request = by_id[request["prior_ready_event_id"]]["payload"][
+            "request"]
+        if request["prior_experiment_config_hash"] != \
+                prior_request.get("experiment_config_hash") or \
+                request["prior_evidence_inventory_hash"] != \
+                prior_request.get("evidence_inventory_hash"):
+            raise SchemaViolation(
+                "correction predecessor hashes do not match its ready event")
 
 
-def publish_handoff(root: str, cfg, request: dict, correction: bool = False) -> dict:
+def _publish_handoff_locked(root: str, cfg, request: dict,
+                            correction: bool = False) -> dict:
     """Preflight, then roll forward the three-step event-first journal."""
     request = dict(request)
     request["request_payload_hash"] = compute_request_payload_hash(request)
@@ -403,3 +455,16 @@ def publish_handoff(root: str, cfg, request: dict, correction: bool = False) -> 
         return audits[-1]
     return events.append_event(root, cfg, "RESULT_AUDIT_REQUESTED", SENDER,
                                rid, repo, commit, audit_payload)
+
+
+def publish_handoff(root: str, cfg, request: dict,
+                    correction: bool = False) -> dict:
+    """Serialize preflight and all durable steps under one council lease."""
+    rid = request.get("request_id", "result-handoff") \
+        if isinstance(request, dict) else "result-handoff"
+    txn_lock = locking.acquire(root, "_result_handoff", SENDER, rid,
+                               kind="result_handoff_transaction")
+    try:
+        return _publish_handoff_locked(root, cfg, request, correction)
+    finally:
+        locking.release(txn_lock)
