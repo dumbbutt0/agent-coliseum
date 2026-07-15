@@ -176,7 +176,8 @@ def validate_handoff_request(request: dict) -> None:
         if not isinstance(config["outcome"], dict) or not config["outcome"]:
             raise SchemaViolation("correction outcome must be a non-empty object")
         for field, ceiling in CORRECTION_OUTCOME_CEILING.items():
-            if config["outcome"].get(field) != ceiling:
+            value = config["outcome"].get(field)
+            if type(value) is not type(ceiling) or value != ceiling:
                 raise SchemaViolation(
                     f"correction outcome exceeds frozen conclusion ceiling: {field}")
         for field in ("evidence_inventory_hash", "report_id"):

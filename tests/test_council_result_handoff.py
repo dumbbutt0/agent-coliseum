@@ -262,7 +262,11 @@ def test_correction_schema_freezes_primary_but_allows_derived_identity(tmp_path)
 
 @pytest.mark.parametrize("field,value", [
     ("behavioral_departure_claimable", True),
+    ("behavioral_departure_claimable", 0),
+    ("behavioral_departure_claimable", 0.0),
     ("complete", True),
+    ("complete", 0),
+    ("complete", 0.0),
     ("status", "complete"),
 ])
 def test_correction_cannot_expand_frozen_conclusion_ceiling(
@@ -275,6 +279,65 @@ def test_correction_cannot_expand_frozen_conclusion_ceiling(
     request["request_payload_hash"] = compute_request_payload_hash(request)
     with pytest.raises(SchemaViolation, match="conclusion ceiling"):
         validate_request(request, (repo,))
+
+
+@pytest.mark.parametrize(
+    "field", ["behavioral_departure_claimable", "complete", "status"])
+def test_correction_cannot_omit_frozen_conclusion_field(tmp_path, field):
+    repo, head = make_repo(tmp_path)
+    request = correction_request(repo, head)
+    del request["result_config"]["outcome"][field]
+    request["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, request["result_config"])
+    request["request_payload_hash"] = compute_request_payload_hash(request)
+    with pytest.raises(SchemaViolation, match="conclusion ceiling"):
+        validate_request(request, (repo,))
+
+
+def test_correction_of_correction_cannot_promote_conclusion(tmp_path):
+    repo, head = make_repo(tmp_path)
+    first = correction_request(repo, head)
+    first["result_config"]["outcome"]["decisions_parsed_ok"] = 3
+    first["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, first["result_config"])
+    first["request_payload_hash"] = compute_request_payload_hash(first)
+    validate_request(first, (repo,))
+
+    second = deepcopy(first)
+    second["prior_result_request_id"] = first["request_id"]
+    second["request_id"] = "result-fix-test-003"
+    second["result_config"]["outcome"]["decisions_parsed_ok"] = 2
+    second["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, second["result_config"])
+    second["request_payload_hash"] = compute_request_payload_hash(second)
+    validate_request(second, (repo,))
+
+    second["result_config"]["outcome"]["complete"] = True
+    second["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, second["result_config"])
+    second["request_payload_hash"] = compute_request_payload_hash(second)
+    with pytest.raises(SchemaViolation, match="conclusion ceiling"):
+        validate_request(second, (repo,))
+
+
+def test_stale_and_reordered_correction_promotions_fail_closed(tmp_path):
+    repo, head = make_repo(tmp_path)
+    stale = correction_request(repo, head)
+    stale["result_config"]["outcome"]["complete"] = True
+    stale["request_payload_hash"] = compute_request_payload_hash(stale)
+    with pytest.raises(SchemaViolation):
+        validate_request(stale, (repo,))
+
+    reordered = correction_request(repo, head)
+    outcome = reordered["result_config"]["outcome"]
+    outcome["behavioral_departure_claimable"] = True
+    reordered["result_config"]["outcome"] = dict(
+        reversed(list(outcome.items())))
+    reordered["experiment_config_hash"] = domain_hash(
+        CONFIG_DOMAIN, reordered["result_config"])
+    reordered["request_payload_hash"] = compute_request_payload_hash(reordered)
+    with pytest.raises(SchemaViolation, match="conclusion ceiling"):
+        validate_request(reordered, (repo,))
 
 
 def test_correction_pack_may_change_only_derived_report(tmp_path, monkeypatch):
