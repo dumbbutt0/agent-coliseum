@@ -603,6 +603,33 @@ def test_behavioral_departure_counted(tmp_path):
     assert rep["behavioral_departure_count"] >= 1
 
 
+def test_observability_restricted_divergence_excluded_from_behavioral(tmp_path):
+    """audit 001330 closure (§7): a divergence at a tick whose scripted-baseline
+    action is ABSENT from ada's live actor-safe menu is coded
+    observability_restricted and EXCLUDED from the behavioral-departure count.
+    Drive live-ada to shuttle B<->C, never touching the token in A: the baseline
+    `take token` (tick 2) and `give token` (tick 3) are then unavailable to ada,
+    while the tick-1 move divergence (both moves available) is behavioral."""
+    reg = SpatialSpecRegistry()
+    base = build_scenario("society_seed_v1", reg, 42)
+    ada_intents = [("move", "room_B"), ("move", "room_C")] * 4
+    persona = live.ScriptFollowingPersona(ada_intents, base["ids"])
+    res = live.execute_live_persona_pilot(persona, 42, out_root=str(tmp_path))
+    rep = res["report"]
+    per = {t["tick"]: t["classification"] for t in rep["per_tick"]}
+    assert per[1] == "behavioral_departure"
+    assert per[2] == "observability_restricted"
+    # the baseline action at tick 2 (take token) is genuinely absent from ada's
+    # live menu (ada is in room C, the token is in room A)
+    base_take = next(t["baseline_action_id"] for t in rep["per_tick"] if t["tick"] == 2)
+    assert '"action":"take"' in base_take
+    assert rep["observability_restricted_count"] >= 1
+    assert rep["behavioral_departure_count"] == 1        # tick 1 only
+    # the observability-restricted ticks are NOT counted as behavioral
+    assert rep["observability_restricted_count"] == sum(
+        1 for t in rep["per_tick"] if t["classification"] == "observability_restricted")
+
+
 def test_no_actor_safe_action_never_triggers_in_seed():
     """The pre-call no_actor_safe_action terminal (§5) never fires in
     society_seed_v1: ada always has >=1 actor-safe action at every activation."""
