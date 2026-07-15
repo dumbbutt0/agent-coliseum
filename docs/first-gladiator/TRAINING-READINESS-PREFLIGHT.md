@@ -5,7 +5,13 @@ admission, label creation, model inference, model contact, weight fitting, or
 scientific claim. Implementation requires a separately routed source after this
 design receives the applicable plain Council verdict.
 
-Proposed source: `first-gladiator-t0a-learning-preflight-design-001`.
+Proposed revision: `first-gladiator-t0a-learning-preflight-design-002`.
+
+Revision 002 preserves the blocked revision-001 lineage and closes its two
+independently reproduced design defects: standalone run exports are no longer
+treated as a corpus partition/export, and report publication no longer accepts
+arbitrary output filenames or any path inside a Git repository or protected
+input tree.
 
 ## 1. Purpose
 
@@ -34,7 +40,9 @@ This source reuses, without weakening:
   `training.spatial_trajectory_projection.project_spatial_trajectory`;
 - admission: `training_admission.admit_runs`;
 - group partition and independent leakage lint: `partition.py`;
-- governed actor export: `training.pipeline.export_training_data_from_run`;
+- standalone governed actor export:
+  `training.pipeline.export_training_data_from_run` (diagnostic capability only;
+  never pooled or treated as a corpus-bound export);
 - actor/privileged isolation: `training.observation.assert_no_privileged_leak`.
 
 No T0-B labels and no model weights are introduced.
@@ -60,18 +68,23 @@ them; tests must not hard-code the mutable historical-corpus counts.
 | replay-verified among those 153, provider-free | 46 |
 | raw vignette projections accepted | 242 |
 | unambiguous + admitted + replay-valid vignette projections | 2 |
-| current governed actor exports over those candidates | 1 |
-| actor decision examples in that export | 3 |
-| effective units in that export | 1 |
+| current standalone governed actor exports over those candidates | 1 |
+| actor decision examples in that standalone export | 3 |
+| effective units in that standalone export | 1 |
+| current corpus-bound governed actor exports | 0 |
 
-The one currently exportable run is
+The one currently **standalone-exportable** run is
 `corrupt_king.v0_province.scripted%3Amerciful.s2.f4bc53ba49782a83`.
 Its actor export has manifest
 `fd072aa573025dde223a44f15339c67a47df4bcd3f3cfe29d59f3b30924d6022`,
 dataset commitment
 `138a5ee161694263e6f24f5b20722fbb1a8919f07215add866703dd94e0cfdf7`,
 three factual action examples, one effective unit, and a byte-identical replay.
-This is availability evidence, not evidence that a useful learner can generalize.
+This is availability evidence for the run-level export contract, not a
+corpus-bound training export and not evidence that a useful learner can
+generalize. The existing exporter recomputes a partition over its singleton
+input. Its manifest and commitment MUST NOT be pooled with another singleton
+export or reported as corpus-exportable.
 
 The second unambiguous candidate is a deterministic mock-LLM run. It projects and
 replays, but the current export binding rejects its `.a1` attempt directory because
@@ -125,7 +138,7 @@ or mutates it.
 
 ## 4. Inputs and discovery
 
-The API accepts:
+The report builder accepts:
 
 - one or more explicitly named roots, each `(root_id, filesystem_path)`;
 - scenario registry path;
@@ -133,8 +146,7 @@ The API accepts:
 - held-out scenario ids and hashes;
 - preregistered exclusions;
 - replay mode, which is `required` for the governed report;
-- actor view, fixed to `actor` in v1;
-- optional explicit output paths for JSON and Markdown.
+- actor view, fixed to `actor` in v1.
 
 Only `root_id` and root-relative POSIX locators enter report identity. Absolute host
 paths are runtime locators and never enter the content record.
@@ -150,10 +162,39 @@ Discovery recursively identifies directories containing `run.json`, in sorted
 - reject traversal, absolute artifact references, and path escapes;
 - record unreadable/unknown artifacts as failures rather than crash or omit them;
 - hash the complete regular-file bundle by sorted relative filename + file bytes;
-- never write beneath an input root or canonical `logs/` tree.
+- never write beneath an input root, the code repository, any other Git
+  repository, the registry/config trees, or the canonical `logs/` tree.
 
-Output defaults to stdout. Explicit output paths must be outside every input root
-and written atomically. A report is derived documentation, not a run artifact.
+Report construction is pure and returns a content record plus an opaque runtime
+publication context containing the resolved input/protected paths (the runtime
+context is excluded from report identity and serialization). The CLI defaults to
+one selected serialization (`json` or `markdown`) on stdout. It accepts no
+arbitrary output filename. Stdout mode and `--output-root` mode are mutually
+exclusive.
+
+An optional `--output-root` publishes both fixed filenames under a newly created,
+content-addressed directory:
+
+```text
+<output-root>/<training_readiness_report_id>/report.json
+<output-root>/<training_readiness_report_id>/report.md
+<output-root>/<training_readiness_report_id>/COMPLETE
+```
+
+Before creating anything, the publisher requires the output root to be an existing
+directory, checks every component with `lstat`, and then resolves it only after
+proving that no component is a symlink. It refuses a root equal to,
+inside, or containing any input root, canonical run/log root, registry path,
+configuration directory, code-repository root, or any Git repository (a `.git`
+file or directory in any ancestor is sufficient). This general Git-repository
+refusal protects the separate Council tree without coupling the reporter to a
+Council path. The final report-id directory MUST NOT exist; publication never
+overwrites or reuses it. Temporary files are created exclusively inside that new
+directory, each file is flushed and atomically renamed to its fixed distinct name,
+and the `COMPLETE` marker binding both output hashes is published last. A reader
+ignores a directory without the terminal marker. `report.json` and `report.md`
+cannot alias because callers cannot name them. A report is derived documentation,
+not a run artifact.
 
 ## 5. Artifact-family dispatch
 
@@ -200,7 +241,8 @@ Important examples include:
   `spatial_schema_pre_activation`, `live_projector_unavailable`;
 - integrated admission-v1 rejection codes;
 - `registry_scenario_missing`, `partition_leakage`, `held_out`;
-- `attempt_report_id_binding_mismatch`, `spatial_export_unavailable`;
+- `attempt_report_id_binding_mismatch`, `spatial_export_unavailable`,
+  `corpus_export_manifest_unavailable`, `non_corpus_bound_export`;
 - `governance_linkage_unavailable`, `quarantine_state_unknown`,
   `license_permission_deferred`, `correction_lineage_unavailable`;
 - `target_field_missing`, `target_degenerate`, `effective_n_insufficient`.
@@ -226,7 +268,7 @@ denominator after identity or replay failures.
 | `projectable` | Can an authorized projector derive truthful training records? |
 | `admitted` | Does the integrated admission gate accept it under the declared held-out/exclusion inputs? |
 | `partitionable` | Can the artifact enter a deterministic group-aware split with leakage lint passing? |
-| `exportable` | Does the governed actor export produce a manifest and commitment? |
+| `exportable` | Does a governed actor export bind the exact corpus-wide descriptor, partition, and commitment? |
 | `task_bearing` | Can one or more factual targets be constructed without privileged or post-outcome leakage? |
 | `effective_units` | How many independent units remain after retry/identity/group collapse? |
 
@@ -300,9 +342,13 @@ deferred criterion from `TrainingAdmissionRecord`.
 
 ## 11. Partition and leakage
 
-Partitioning runs only on cumulatively admitted artifacts. It reuses the scenario
-registry, exact-content deduplication, family/control lineage components,
-deterministic dataset-version-bound assignment, and independent leakage lint.
+Partitioning runs exactly once on the complete sorted set of cumulatively admitted
+artifacts. It reuses the scenario registry, exact-content deduplication,
+family/control lineage components, deterministic dataset-version-bound assignment,
+and independent leakage lint. The resulting descriptor, commitment, full
+partition manifest, held-out inputs, and exclusion inputs form the one
+`corpus_partition_binding` for this report. No downstream export or example may
+recompute a partition from a subset.
 
 Report:
 
@@ -317,15 +363,43 @@ Report:
 No row-level random split is permitted. A missing registry scenario or conflicting
 scenario hash is a failure, not a fallback split.
 
+The report checks every export candidate against the exact corpus binding. A
+future corpus-bound export entry point must consume that binding directly and
+return a manifest/descriptor bundle whose dataset commitment, full partition,
+held-out/exclusion inputs, source membership, group, and split all match it.
+Equality discovered after independently recomputing a partition is not a binding
+and cannot promote a standalone manifest, even for an accidentally identical
+singleton corpus. A descriptor generated by the existing per-run exporter is
+always `non_corpus_bound_export`; a mismatch is reported, never repaired by copying
+the report's split into that manifest.
+
 ## 12. Governed export and actor-safe examples
 
-For every cumulatively eligible vignette, invoke
-`export_training_data_from_run(..., view_kind="actor", verify=True)`.
-The existing manifest binding, partition, admission, and actor leak checks remain
-authoritative. The preflight catches and classifies a refusal; it does not bypass it.
+The existing `export_training_data_from_run(..., view_kind="actor", verify=True)`
+is a **standalone run-level capability probe only**. It recomputes a singleton
+partition inside `build_dataset([run_dir], ...)`; therefore the preflight MUST NOT
+pool its manifests, use their split fields in corpus statistics, call them
+cumulatively exportable, or pass them to a learner as one dataset. Standalone
+success/refusal counts appear only in a separately named raw-capability section.
 
-Add a small read-only loader over a successful actor export. One example per actor
-decision contains only:
+Revision 002 does not invent a second export manifest or weaken the integrated
+one. Corpus-bound governed export is `unsupported` with
+`corpus_export_manifest_unavailable` until a separately designed batch export can
+consume the exact `corpus_partition_binding` and bind it into every manifest and
+example. Consequently, the current historical report is expected to have zero
+cumulative `exportable` and `task_bearing` artifacts even though a standalone
+run-level export succeeds. That honest zero is preferable to a leakage-prone pool.
+
+Add a small read-only loader over one successful standalone actor export for
+schema/feature inspection only. The loader accepts exactly one manifest,
+descriptor, and projection bundle. It verifies their integrated bindings and
+refuses a collection, concatenation, a foreign report partition, or any request to
+reinterpret the example as corpus-bound. Its result is labeled
+`standalone_non_corpus_training_example`; it demonstrates task shape but does not
+populate the cumulative learner denominator. A later batch-export source must add
+a corpus loader that requires the exact corpus-bound manifest/report commitment.
+
+One standalone example per actor decision contains only:
 
 - content-addressed example id;
 - source evidence id and trajectory manifest id;
@@ -344,12 +418,18 @@ identifiers as semantic features, and post-outcome fields. IDs remain grouping a
 audit metadata, not suggested model features.
 
 Every example is rechecked with `assert_no_privileged_leak`. Input record objects
-are not mutated. JSON examples are emitted in deterministic sequence order.
+are not mutated. JSON examples are emitted in deterministic sequence order. No
+example may acquire a corpus split from the readiness report unless a future
+corpus-bound export manifest authenticates that exact binding.
 
 ## 13. Dataset statistics
 
-Statistics are computed only over successful actor exports and reported by split,
-scenario family, agent regime, and effective unit where available:
+Corpus learner statistics are computed only over successful **corpus-bound** actor
+exports and reported by split, scenario family, agent regime, and effective unit
+where available. In v1 these counts remain zero and unavailable rather than being
+filled from standalone exports. A separate raw-capability appendix may report
+standalone export/example shape, but never a pooled split or cumulative training
+denominator:
 
 - exported trajectories and factual decision examples;
 - effective units and raw attempts;
@@ -386,6 +466,11 @@ Initial factual tasks:
 - termination prediction;
 - next-observation prediction;
 - first-divergence prediction where authenticated matched branches exist.
+
+Until a corpus-bound actor export exists, these tasks may be reported as
+structurally recognizable from the standalone example shape, but their corpus
+`data_status` remains `unavailable` with zero eligible examples. Standalone
+examples never make a corpus task `constructible`.
 
 Preference learning and normative behavioral labels are `gated:T0-B`. Any fitted
 predictor, behavior cloning, LoRA, preference model, RL, or other weight-changing
@@ -428,12 +513,28 @@ build_training_readiness_report(
     held_out_scenarios=(),
     held_out_hashes=(),
     exclusions=(),
-) -> TrainingReadinessReport
+) -> (TrainingReadinessReport, TrainingReadinessRuntimeContext)
 
 iter_actor_examples(export_bundle) -> iterator[dict]
 
 render_training_readiness_markdown(report) -> str
+
+publish_training_readiness_report(
+    report,
+    runtime_context,
+    *,
+    output_root,
+) -> path
 ```
+
+`iter_actor_examples` accepts exactly one standalone export bundle in v1 and
+labels every result non-corpus-bound. `publish_training_readiness_report` accepts a
+directory root only; it derives the report-id directory and all filenames. The
+runtime context is produced only by the builder and necessarily carries every
+resolved discovery root, registry/config input, canonical log root, and the code
+repository root. The publisher augments it by detecting any `.git` ancestor; a
+caller cannot make publication less restrictive by supplying a shorter protected
+root list.
 
 Proposed CLI:
 
@@ -445,11 +546,14 @@ python3 -m coliseum.textlab.training.readiness \
   --run-root live=logs/live-persona-runs \
   --registry configs/registry/scenarios.yaml \
   --config-dir configs/scenarios \
-  --json-out /safe/derived/report.json \
-  --markdown-out /safe/derived/report.md
+  --format json
 ```
 
-Replay is mandatory; there is no `--no-verify` production switch.
+`--format json|markdown` selects the one stdout representation. An optional
+`--output-root /external/derived/training-readiness` publishes both fixed
+representations plus the terminal marker. `--json-out`, `--markdown-out`, and any
+arbitrary output-filename option do not exist. Replay is mandatory; there is no
+`--no-verify` production switch.
 
 ## 17. Determinism and commitments
 
@@ -462,7 +566,9 @@ The report commitment binds:
 - held-out/exclusion inputs;
 - every stage status and reason code;
 - partition and task-availability summaries;
-- actor export manifest ids and dataset commitments;
+- the corpus partition binding, standalone actor-export manifest ids and dataset
+  commitments (explicitly marked non-corpus-bound), and any future corpus-bound
+  export ids;
 - statistics and recorded limitations.
 
 It excludes absolute paths, process ids, temp paths, elapsed time, wall-clock time,
@@ -507,9 +613,17 @@ version produce the same JSON and id.
 - integrated admission reasons are preserved;
 - held-out id/hash and preregistered exclusions fail closed;
 - missing registry, scenario-hash conflict, and leakage straddle fail closed;
+- a sibling/control pair that co-assigns corpus-wide cannot straddle through
+  separately recomputed singleton exports;
+- the corpus partition is computed once and its exact descriptor/commitment is
+  revalidated by every corpus-bound consumer;
+- standalone manifests with singleton commitments are reported as
+  `non_corpus_bound_export` and cannot be pooled or passed to the corpus loader;
 - attempt/report-id export binding failure is reported, not repaired;
 - no spatial run is called exportable before a spatial export manifest exists;
-- current successful vignette actor export remains byte-identical.
+- the current successful standalone vignette actor export remains byte-identical
+  and separately labeled; cumulative corpus exportability remains zero until a
+  corpus-bound manifest exists.
 
 ### Actor examples and tasks
 
@@ -524,9 +638,19 @@ version produce the same JSON and id.
 
 ### Output safety and scale
 
-- default is stdout/read-only;
-- output inside any input/canonical run root is refused;
-- atomic outputs do not overwrite canonical evidence;
+- default is one selected representation on stdout/read-only;
+- no arbitrary JSON/Markdown filename options exist;
+- output inside or containing any input/canonical run root, registry, config tree,
+  source repository, canonical logs tree, or any Git repository is refused;
+- an output root with a symlink in any existing parent component is refused;
+- path aliases and non-existent-parent escapes are resolved and refused before
+  creation;
+- fixed `report.json` and `report.md` names are distinct and cannot alias;
+- an existing report-id directory is refused without overwrite, even when bytes
+  are identical;
+- interruption before `COMPLETE` leaves an unreadable incomplete publication;
+- atomic outputs and the terminal marker do not overwrite registry, config,
+  source, Council, run, or canonical evidence files;
 - report generation does not mutate caller objects;
 - a synthetic 10,000-run corpus stays bounded and deterministic;
 - cached validation is keyed by complete artifact bundle hash and reporter version,
@@ -542,8 +666,9 @@ Implementation is complete only after:
 4. an independent source audit reaches plain GO;
 5. authorized integration is recorded;
 6. the integrated tool runs over the historical corpus with zero provider calls;
-7. JSON and Markdown reports are committed as derived evidence only if separately
-   authorized;
+7. JSON and Markdown reports are published outside every Git repository as derived
+   evidence only if separately authorized; committing or ingesting them later
+   requires a separately audited source;
 8. any numerical/scientific interpretation receives the applicable result audit.
 
 The first historical report must publish its complete denominator ladder and exact
@@ -554,6 +679,8 @@ rejection reasons. It must not summarize the outcome as “646 runs ready.”
 - repairing duplicate/colliding historical identities;
 - choosing canonical attempts;
 - changing the existing export mode/attempt binding;
+- a corpus-bound batch export manifest and pooled learner loader (standalone
+  per-run export capability remains inspectable but non-poolable in v1);
 - a live-persona training projector;
 - a spatial governed export manifest;
 - semantic near-duplicate detection;
