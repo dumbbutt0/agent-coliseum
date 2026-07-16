@@ -1,7 +1,9 @@
 # Blender Workshop Bridge — WSL fixed-staging and manifest-coherence amendment 1
 
-Status: design amendment revision 2; no Blender execution or implementation
-authorization. Revision 2 addresses `AUDIT_BLOCKED` event `001465-fe8ff615`.
+Status: design amendment revision 4; no Blender execution or implementation
+authorization. Revision 4 addresses `AUDIT_BLOCKED` event `001475-b576ce96` and
+preserves the accepted closures from events `001465-fe8ff615` and
+`001470-ad766480`.
 
 Amends: `BLENDER-WORKSHOP-BRIDGE.md` at commit
 `e945f99b432f78baea3023f6572e23dd18e5112e`.
@@ -117,26 +119,53 @@ must:
    file, or parent receives that SID's write ACE; apply a low mandatory-integrity
    label to the current job leaf so the lowbox can write there, while input DACLs
    remain read-only; and
-9. immediately before the denial probe, seal the current leaf and every staged
-   child with an exact, non-inheriting protected DACL. The owner remains the exact
-   queried interactive-user SID, but the DACL contains an `OWNER RIGHTS`
-   (`S-1-3-4`) deny ACE for `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, file/directory
-   create, write, append, delete-child, write-attributes, and write-EA. Presence of
-   that SID suppresses the owner's otherwise implicit `WRITE_DAC`. The DACL removes
-   those same rights from the interactive SID and every enabled SID in its token,
-   including an enabled Administrators group; contains no inherited, creator-owner,
-   or broad user/group write ACE; grants `SYSTEM` the closed broker-control rights;
-   grants the job lowbox only its section-4.8 role rights; and grants the interactive
-   telemetry identity read/traverse only. The guard must already hold the exact
-   write/delete/security broker handles it needs before sealing. It queries back the
-   owner SID, `SE_DACL_PRESENT | SE_DACL_PROTECTED` control flags, canonical ACE
-   order, every SID/mask/type/inheritance bit, mandatory label, and effective access
-   under a duplicated interactive token. That host token must be medium-integrity,
-   non-elevated, and contain no `SeTakeOwnershipPrivilege`, `SeRestorePrivilege`,
-   or `SeSecurityPrivilege`; presence or indeterminate privilege/elevation state
-   refuses. Any inherited/unknown ACE, owner drift, remaining `WRITE_DAC`/
-   `WRITE_OWNER`, or effective create/write/replace/delete/security-descriptor right
-   refuses before a child starts. No DACL or owner change is permitted until
+9. immediately before the denial probe, seal the current leaf and every existing
+   staged child with an exact protected DACL. The owner remains the exact queried
+   interactive-user SID. An `OWNER RIGHTS` (`S-1-3-4`) deny ACE has the exact
+   standard-right mask `WRITE_DAC | WRITE_OWNER` and **no** delete, create, write,
+   append, attribute, EA, generic, or object-specific data bit. Presence of that SID
+   suppresses the owner's otherwise implicit `READ_CONTROL` and `WRITE_DAC`; the
+   explicit read-only user ACE restores only the required read relation. Ordinary-
+   token data denial is by absence of an allow, not by an owner deny that would also
+   match the derived lowbox's retained `TokenUser`.
+
+   The ACL builder uses no generic rights and expands direct-directory,
+   object-inherit, and container-inherit ACEs separately. The exact ordinary-user
+   directory read mask is `READ_CONTROL | SYNCHRONIZE | FILE_LIST_DIRECTORY |
+   FILE_TRAVERSE | FILE_READ_ATTRIBUTES | FILE_READ_EA`; the exact ordinary-user
+   file read mask is `READ_CONTROL | SYNCHRONIZE | FILE_READ_DATA |
+   FILE_READ_ATTRIBUTES | FILE_READ_EA`. Neither includes `DELETE`,
+   `FILE_DELETE_CHILD`, any create/write/append bit, `WRITE_DAC`, or `WRITE_OWNER`.
+   Every enabled SID in the interactive token, including an enabled Administrators
+   group, has no data- or descriptor-mutation allow. There is no creator-owner or
+   broad user/group write ACE.
+
+   The lowbox's direct current-job/scratch directory mask is exactly `READ_CONTROL |
+   SYNCHRONIZE | FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_ADD_FILE |
+   FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES |
+   FILE_READ_EA | FILE_WRITE_EA`; its created-file mask is exactly `READ_CONTROL |
+   SYNCHRONIZE | FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA |
+   FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_READ_EA | FILE_WRITE_EA`.
+   Its input-directory and input-file masks are the corresponding ordinary read
+   masks only. No lowbox ACE grants `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, or
+   `FILE_DELETE_CHILD`. `SYSTEM` alone receives the closed broker-control allow.
+   The current-leaf DACL itself contains no inherited ACE; its explicit object- and
+   container-inherit ACEs produce only these exact child masks. Every later-created
+   child is reopened and query-checked against the exact expected inherited form
+   before telemetry use or terminal admission.
+
+   The guard must already hold the exact write/delete/security broker handles it
+   needs before sealing. It queries back the owner SID, `SE_DACL_PRESENT |
+   SE_DACL_PROTECTED` control flags, canonical ACE order, every SID/mask/type/
+   inheritance bit, mandatory label, and effective access under both a duplicated
+   interactive token and the exact effective lowbox token. The host token must be
+   medium-integrity, non-elevated, and contain no `SeTakeOwnershipPrivilege`,
+   `SeRestorePrivilege`, or `SeSecurityPrivilege`; presence or indeterminate state
+   refuses. The paired preflight must prove the ordinary duplicate lacks DACL,
+   owner, create, write, append, replace, delete, and delete-child access while the
+   lowbox succeeds for its declared current-job create/write role and no other
+   mutation role. Any mismatch, inherited/unknown ACE, owner drift, or descriptor
+   drift refuses before a child starts. No DACL or owner change is permitted until
    terminal validation completes.
 
 The host independently requires that `/mnt/c` is the DrvFs view of the same `C:`
@@ -405,7 +434,7 @@ additive execution fields*. Adding only
 UTF-8 bytes with SHA-256
 `9392c5d4f2fea469c17d1bfa9bd42d457c9b559ac4adeb259c39977e7124c55e`.
 That intermediate value is no longer a complete accepted manifest because it lacks
-`sandbox_execution`. For the normative revision-3 fixture, add exactly the binding
+`sandbox_execution`. For the normative revision-4 fixture, add exactly the binding
 for the complete report above:
 
 ```json
@@ -513,9 +542,13 @@ phase is active. For every staged role it first attempts `SetSecurityInfo`-style
 DACL broadening and owner replacement, then create, replace, write, delete, and
 delete-child. Every security-descriptor and data mutation must fail. The guard
 queries the descriptor and effective token access again afterward and requires
-byte-equivalent owner/control/ACE state. This proves the `OWNER RIGHTS` restriction
-and protected DACL prevent a different same-user process from restoring its own
-write access and injecting a later output.
+byte-equivalent owner/control/ACE state. Against that same queried descriptor, the
+effective lowbox denial probe must create and write its one declared current-job
+probe, must lack `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, and `FILE_DELETE_CHILD`, and
+must fail every other protected role in the complete matrix. This paired result
+proves the narrow `OWNER RIGHTS` restriction blocks owner control without defeating
+the distinct lowbox-SID data allow, while a different same-user process cannot
+restore write access or inject a later output.
 
 The guard retains all section-4 and section-5 handles and uses a Windows Job Object
 with:
@@ -584,16 +617,18 @@ The integrated section-12 matrix remains required. Add ordinary tests proving:
     guard/compiler/binary identity, denial-probe source or binary, SID-derivation
     algorithm or digest, unequal/stale/mixed child probes or aggregate access
     matrix, job, launch, and mixed profile;
-14. a harmless fake child under the actual lowbox token may write its declared
-    current-job probe but every sibling, parent, repository UNC, canonical, Council,
-    repository-source, user-profile, public, temp, registry, network, shell, and
-    process-escape probe is denied, and protected/private read probes are denied;
+14. a paired access check against one exact queried descriptor proves the ordinary
+    pre-seal-token duplicate lacks descriptor and data mutation while a harmless
+    fake child under the actual lowbox token writes its declared current-job probe;
+    every sibling, parent, repository UNC, canonical, Council, repository-source,
+    user-profile, public, temp, registry, network, shell, and process-escape probe
+    is denied, and protected/private read probes are denied;
 15. after child-phase ACL sealing, a second interactive-user process cannot broaden
     the DACL, replace the owner, create, write, replace, or delete a staging input,
     output, telemetry file, or undeclared file, and the exact descriptor is unchanged;
 16. an interactive-user, low-integrity-only, Job-Object-only, or unavailable-token
     fallback is refused before Blender;
-17. complete revision-3 report and manifest construction and reload reproduce the
+17. complete revision-4 report and manifest construction and reload reproduce the
     2751-byte / `a4310fda...e484c` report and 3898-byte /
     `9cd3ce9d...6bf6` manifest fixtures, while the revision-2 vector refuses; and
 18. canonical run bundles and non-protocol Council content remain byte-identical
