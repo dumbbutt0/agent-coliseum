@@ -1,19 +1,22 @@
 # Blender Workshop bridge — design source
 
-Status: **DESIGN ONLY — REVISION 003**. This source authorizes no Blender execution, repository
+Status: **DESIGN ONLY — REVISION 004**. This source authorizes no Blender execution, repository
 implementation, projection of a canonical run, visual claim, asset admission,
 or Council integration. Implementation and the first render proof require a
 separately routed source after this design receives the applicable plain Council
-verdict. Revision 003 preserves the blocked revision-001 and revision-002 lineage
-at Council events `001433-d1bfc40f` and `001438-4a9b7d49`. Revision 002 closed
+verdict. Revision 004 preserves the blocked revision-001, revision-002, and
+revision-003 lineage at Council events `001433-d1bfc40f`, `001438-4a9b7d49`,
+and `001443-8cc845bb`. Revision 002 closed
 job identity/path recursion, fail-open Windows alias handling, and the inspector's
 open prohibited-class set. Revision 003 closes the remaining independently
 reproduced profile-value incompleteness, reviewed-script check/use race, and
-worker-result validation gap.
+worker-result validation gap. Revision 004 closes the independently reproduced
+inventory-construction, mesh/collection/view-layer value-surface, and launch-
+attestation normalization gaps without changing the execution boundary.
 
 Council request: `first-gladiator-blender-workshop-design-002`, document revision
-`003`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
-request so event `001438-4a9b7d49` remains its direct audit lineage; no request or
+`004`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
+request so events `001438-4a9b7d49` and `001443-8cc845bb` remain its direct audit lineage; no request or
 commit history is rewritten.
 
 ## 1. Purpose
@@ -320,7 +323,7 @@ staged_worker_script                # {relative_path, volume_serial_number,
                                     #  file_id_hex, byte_count, sha256}
 factory_profile                     # same exact file keys
 job_spec                            # same exact file keys
-held_ancestors                      # sorted [{role, volume_serial_number,
+held_ancestors                      # canonically ordered [{role, volume_serial_number,
                                     #          file_id_hex}]
 argument_array_sha256
 native_guard_version
@@ -344,7 +347,7 @@ staged_inspector_script             # same exact file keys
 factory_profile                     # same exact file keys
 job_spec                            # same exact file keys
 scene_blend                         # same file keys; fixed relative path scene.blend
-held_ancestors                      # sorted exact identity rows
+held_ancestors                      # canonically ordered exact identity rows
 argument_array_sha256
 native_guard_version
 sharing_policy                      # literal read-only-no-write-delete-share.v1
@@ -356,15 +359,204 @@ inspector argument array names only the guarded staged inspector, job spec, insp
 attestation, factory profile, and scene file. Inspector report and render manifest
 bind its id. No inspector launches before this second attestation exists.
 
-For both records, relative paths are fixed by this design; each digest is 64
+For both records, `native_guard_version` is the literal
+`wsl-windows-native-guard.v1`. Relative paths are fixed by this design; each digest is 64
 lowercase hex, each `file_id_hex` is the 32-lowercase-hex encoding of `FILE_ID_128`,
 byte counts and volume serial numbers are non-negative JSON integers (not booleans),
 and `blender_identity` has the exact section-5 nested schema. Unknown/missing keys,
 duplicate ancestor roles/identities, a path outside the fixed job layout, or any
-mismatch refuses. The applicable output id is excluded exactly once by
+mismatch refuses. `argument_array_sha256` is exactly
+`sha256(UTF-8(schema.canonical_json(argument_array)))`: the argument array is a
+JSON list of exact strings in process order, encoded as UTF-8 with no BOM or
+trailing newline. No path, Unicode, slash, case, or environment normalization is
+performed after the native paths are validated. `held_ancestors` is sorted by the
+total key `(UTF-8 bytes of role, volume_serial_number as an unsigned integer,
+UTF-8 bytes of lowercase file_id_hex)` ascending; identical full keys and duplicate
+roles refuse. The worker record uses ContentRecord domain
+`blender_worker_launch_attestation.v1` and own id field
+`worker_launch_attestation_id`; the inspector uses domain
+`blender_inspector_launch_attestation.v1` and own id field
+`inspector_launch_attestation_id`. The applicable output id is excluded exactly once by
 `ContentRecord` and never occurs in its preimage. Runtime timestamps/handle values
 are nonidentity telemetry. Any identity/digest/argument change after its attestation
 refuses that launch.
+
+The following fixed construction vector is normative. Its paths and repeated hex
+values are fixture data only, but its canonical encodings, ordering, domains, own-id
+exclusions, digests, and resulting ids are permanent regressions. Independent
+construction and reload must reproduce every literal; changing one argument, ancestor
+row/value/order, or preimage field must change the applicable id or refuse.
+
+```json
+{
+  "argument_array_encoding": "sha256(UTF-8(schema.canonical_json(argv)))",
+  "held_ancestors": [
+    {
+      "file_id_hex": "11111111111111111111111111111111",
+      "role": "input_directory",
+      "volume_serial_number": 1
+    },
+    {
+      "file_id_hex": "22222222222222222222222222222222",
+      "role": "job_directory",
+      "volume_serial_number": 1
+    }
+  ],
+  "held_ancestors_sha256": "be46a173345c5c6feeac0e54e4dc649b566028cabfd1fd159fe6ac9f1e55fb3c",
+  "inspector_argument_array": [
+    "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
+    "--background",
+    "--factory-startup",
+    "--disable-autoexec",
+    "--offline-mode",
+    "-noaudio",
+    "--python-exit-code",
+    "17",
+    "--python",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\input\\inspect_scene.py",
+    "--",
+    "--job-spec",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\job.json",
+    "--launch-attestation",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\inspector-launch-attestation.json",
+    "--scene",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\scene.blend",
+    "--result",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\inspector-result.json"
+  ],
+  "inspector_argument_array_sha256": "6e0032f60911008b070f799157733fb055ca68f2464e6f2d2f335011a50ba0ca",
+  "inspector_launch_attestation_id": "2aca6cd643b811aa2d9abc544663f6c939382e94ef80ac26e0861ec129f4424e",
+  "inspector_preimage": {
+    "argument_array_sha256": "6e0032f60911008b070f799157733fb055ca68f2464e6f2d2f335011a50ba0ca",
+    "blender_executable": {
+      "blender_identity": {
+        "build_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform": "Windows",
+        "version": "5.2.0"
+      },
+      "byte_count": 100,
+      "file_id_hex": "01010101010101010101010101010101",
+      "sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+      "volume_serial_number": 1
+    },
+    "factory_profile": {
+      "byte_count": 103,
+      "file_id_hex": "04040404040404040404040404040404",
+      "relative_path": "input/factory-profile.json",
+      "sha256": "4040404040404040404040404040404040404040404040404040404040404040",
+      "volume_serial_number": 1
+    },
+    "held_ancestors": [
+      {
+        "file_id_hex": "11111111111111111111111111111111",
+        "role": "input_directory",
+        "volume_serial_number": 1
+      },
+      {
+        "file_id_hex": "22222222222222222222222222222222",
+        "role": "job_directory",
+        "volume_serial_number": 1
+      }
+    ],
+    "job_id": "7070707070707070707070707070707070707070707070707070707070707070",
+    "job_spec": {
+      "byte_count": 104,
+      "file_id_hex": "05050505050505050505050505050505",
+      "relative_path": "job.json",
+      "sha256": "5050505050505050505050505050505050505050505050505050505050505050",
+      "volume_serial_number": 1
+    },
+    "launch_attestation_schema_version": 1,
+    "native_guard_version": "wsl-windows-native-guard.v1",
+    "scene_blend": {
+      "byte_count": 105,
+      "file_id_hex": "06060606060606060606060606060606",
+      "relative_path": "scene.blend",
+      "sha256": "6060606060606060606060606060606060606060606060606060606060606060",
+      "volume_serial_number": 1
+    },
+    "sharing_policy": "read-only-no-write-delete-share.v1",
+    "staged_inspector_script": {
+      "byte_count": 102,
+      "file_id_hex": "03030303030303030303030303030303",
+      "relative_path": "input/inspect_scene.py",
+      "sha256": "3030303030303030303030303030303030303030303030303030303030303030",
+      "volume_serial_number": 1
+    },
+    "worker_launch_attestation_id": "e68207158627944ef9e584adf5d6089454d8da778a1d554aec0f943c6b6ed418"
+  },
+  "worker_argument_array": [
+    "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
+    "--background",
+    "--factory-startup",
+    "--disable-autoexec",
+    "--offline-mode",
+    "-noaudio",
+    "--python-exit-code",
+    "17",
+    "--python",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\input\\smoke_scene.py",
+    "--",
+    "--job-spec",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\job.json",
+    "--launch-attestation",
+    "C:\\repo\\derived\\jobs\\7070707070707070707070707070707070707070707070707070707070707070\\worker-launch-attestation.json"
+  ],
+  "worker_argument_array_sha256": "299acb851ead7a64505ffb48b95d3cd30901392b71f14ed57b062739c9e64860",
+  "worker_launch_attestation_id": "e68207158627944ef9e584adf5d6089454d8da778a1d554aec0f943c6b6ed418",
+  "worker_preimage": {
+    "argument_array_sha256": "299acb851ead7a64505ffb48b95d3cd30901392b71f14ed57b062739c9e64860",
+    "blender_executable": {
+      "blender_identity": {
+        "build_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform": "Windows",
+        "version": "5.2.0"
+      },
+      "byte_count": 100,
+      "file_id_hex": "01010101010101010101010101010101",
+      "sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+      "volume_serial_number": 1
+    },
+    "factory_profile": {
+      "byte_count": 103,
+      "file_id_hex": "04040404040404040404040404040404",
+      "relative_path": "input/factory-profile.json",
+      "sha256": "4040404040404040404040404040404040404040404040404040404040404040",
+      "volume_serial_number": 1
+    },
+    "held_ancestors": [
+      {
+        "file_id_hex": "11111111111111111111111111111111",
+        "role": "input_directory",
+        "volume_serial_number": 1
+      },
+      {
+        "file_id_hex": "22222222222222222222222222222222",
+        "role": "job_directory",
+        "volume_serial_number": 1
+      }
+    ],
+    "job_id": "7070707070707070707070707070707070707070707070707070707070707070",
+    "job_spec": {
+      "byte_count": 104,
+      "file_id_hex": "05050505050505050505050505050505",
+      "relative_path": "job.json",
+      "sha256": "5050505050505050505050505050505050505050505050505050505050505050",
+      "volume_serial_number": 1
+    },
+    "launch_attestation_schema_version": 1,
+    "native_guard_version": "wsl-windows-native-guard.v1",
+    "sharing_policy": "read-only-no-write-delete-share.v1",
+    "staged_worker_script": {
+      "byte_count": 101,
+      "file_id_hex": "02020202020202020202020202020202",
+      "relative_path": "input/smoke_scene.py",
+      "sha256": "2020202020202020202020202020202020202020202020202020202020202020",
+      "volume_serial_number": 1
+    }
+  }
+}
+```
 
 The host writes `job.json` atomically before execution and opens it through the
 guarded no-follow directory. Immediately before each launch it rereads the applicable staged script,
@@ -510,7 +702,8 @@ The worker assigns and reads back every field above. `factory-profile.json` is a
 closed canonical snapshot produced during the separately audited implementation
 preflight from the exact `blender_identity` under `--factory-startup`; it enumerates
 every remaining writable RNA property in Scene/RenderSettings/Cycles/ViewSettings/
-DisplaySettings/ImageFormatSettings/Camera/Light/World/Material/Object and every
+DisplaySettings/ImageFormatSettings/Camera/Light/World/Material/Object/Mesh/
+MeshVertex/MeshEdge/MeshLoop/MeshPolygon/Collection/ViewLayer/LayerCollection and every
 datablock collection/handler baseline not explicitly overridden above. Each row is
 `{rna_type, property_identifier, normalized_json_type, normalized_value}` in sorted
 order; pointers and volatile/runtime/read-only fields are excluded by a closed
@@ -543,9 +736,10 @@ and creates only this allowlist:
 - world `SMOKE_WORLD`.
 
 The ground is one procedural plane; rooms are three procedural cubes; agents are
-three procedural cylinders. The expected-inventory canonical object is generated
-mechanically from the exact tables/rules below; the implementation fixture may not
-choose or omit values. Its raw canonical JSON SHA-256 enters
+three procedural cylinders. The expected-inventory canonical object is the fully
+expanded literal below; the preceding tables and compact construction aid are only
+human review aids and the implementation may not generate a substitute from them.
+Its raw canonical JSON SHA-256 enters
 `expected_inventory_digest`.
 
 Every object's closed transform record has exactly
@@ -575,13 +769,17 @@ byte-equal to section 6.1 rather than independently defaulted.
 | `SMOKE_CAMERA` | `SMOKE_CAMERA_DATA` | `[9.0,-11.0,11.0]` | none | no mesh; exact object/data record in section 6.1 |
 | `SMOKE_SUN` | `SMOKE_SUN_DATA` | `[0.0,0.0,8.0]` | none | no mesh; exact object/data record in section 6.1 |
 
-Cube vertices are the Cartesian product of the two exact bounds on each axis. A
+Cubes and cylinders are explained here only to aid review; the fully expanded
+normalized arrays in the normative JSON control on any discrepancy. Cube vertices
+are the Cartesian product of the two exact bounds on each axis. A
 cylinder's canonical local-vertex multiset is
 `[round(0.45*cos(2*pi*k/16),12), round(0.45*sin(2*pi*k/16),12), z]` for integer
 `k=0..15` and `z` in `[-0.7,0.7]`; the inspector sorts these triples and binds
-edge/polygon topology. This formula and rounding rule, not Blender's incidental
-vertex insertion order, define the expected geometry. Mesh transforms are applied
-before inspection; object scale remains exactly one.
+edge/polygon topology. The literal sorted vertices, edges, polygon cycles, winding,
+per-polygon smooth flags, per-edge sharp flags, custom-normal absence, and loop-normal
+source in the normative inventory—not Blender's incidental insertion order—define
+the expected geometry. Mesh transforms are applied before inspection; object scale
+remains exactly one.
 
 The seven material records have exactly
 `{name, diffuse_color, use_nodes, surface_render_method, use_backface_culling,
@@ -598,11 +796,11 @@ node_tree}` with `use_nodes: true`, `surface_render_method: "DITHERED"`, and
 | `MAT_AGENT_BO` | `[0.12,0.34,0.72,1.0]` |
 | `MAT_AGENT_CY` | `[0.16,0.58,0.24,1.0]` |
 
-The following closed canonical JSON is the normative expected-inventory value
-fixture. It is not a future worker choice. References to `render_profile.camera` and
-`render_profile.sun` mean exact structural inclusion of those already enumerated
-records. `$MATERIAL_RGBA` means exact substitution from the named material row before
-hashing; no placeholder remains in the expanded canonical bytes.
+The following compact JSON is a **non-normative construction aid** retained only to
+make the repeated scene values readable in review. It is never hashed, accepted as a
+job input, or expanded by an implementation. References and placeholders in this aid
+have no identity authority; the fully expanded canonical value immediately below is
+the only expected inventory.
 
 ```json
 {
@@ -690,19 +888,2056 @@ hashing; no placeholder remains in the expanded canonical bytes.
 }
 ```
 
-Expansion is exact and non-configurable: deep-copy the fixture; for every material
-in listed order replace `$MATERIAL_RGBA` recursively in `material_defaults` and
-`material_node_template`, emit
-`{name, diffuse_color, use_nodes, surface_render_method, use_backface_culling,
-node_tree}`, then remove both template keys. For every mesh object merge
-`object_defaults` followed by the object's explicit keys. For camera/sun replace
-`record_ref` with the corresponding section-6.1 object keys plus `data_name` and the
-complete data record; then remove `object_defaults`. No `$` token or `record_ref` may
-remain. Under `schema.canonical_json`, that expanded object is exactly 14,084 bytes
-and has `expected_inventory_digest =
-eb20cdb92962938da9c4d1716ddeef4b88dd9e49d3214d0d9980779884386bca`.
-Construction tests recompute both the byte count and literal digest from this design
-fixture; drift refuses before job creation.
+The following JSON object is the single normative expected inventory. It is already
+fully expanded: it has no default merge, reference, alias, placeholder, formula
+substitution, or implementation-selected key. Object, material, camera/light data,
+collection/view-layer inclusion, vertex, edge, polygon-winding, smoothing, sharp-edge,
+and custom-normal values are all literal. The compact aid above cannot override it.
+
+```json
+{
+  "collections": [
+    {
+      "children": [],
+      "color_tag": "NONE",
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_offset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "lineart_usage": "INCLUDE",
+      "name": "COLISEUM_SMOKE",
+      "objects": [
+        "SMOKE_GROUND",
+        "SMOKE_ROOM_A",
+        "SMOKE_ROOM_B",
+        "SMOKE_ROOM_C",
+        "SMOKE_AGENT_ADA",
+        "SMOKE_AGENT_BO",
+        "SMOKE_AGENT_CY",
+        "SMOKE_CAMERA",
+        "SMOKE_SUN"
+      ]
+    }
+  ],
+  "counts": {
+    "cameras": 1,
+    "collections": 1,
+    "lights": 1,
+    "master_collections": 1,
+    "materials": 7,
+    "meshes": 7,
+    "objects": 9,
+    "scenes": 1,
+    "view_layers": 1,
+    "worlds": 1
+  },
+  "geometry_normalization": {
+    "coordinate_round_digits": 12,
+    "edge_order": "sorted_endpoint_pairs",
+    "polygon_cycle_rotation": "lowest_vertex_index_first_preserve_winding",
+    "polygon_order": "sorted_lexicographic",
+    "vertex_order": "sorted_lexicographic"
+  },
+  "inventory_schema_version": "coliseum-smoke.inventory.v1",
+  "master_collection": {
+    "children": [
+      "COLISEUM_SMOKE"
+    ],
+    "color_tag": "NONE",
+    "hide_render": false,
+    "hide_viewport": false,
+    "instance_offset": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "lineart_usage": "INCLUDE",
+    "name": "Scene Collection",
+    "objects": []
+  },
+  "materials": [
+    {
+      "diffuse_color": [
+        0.36,
+        0.22,
+        0.1,
+        1.0
+      ],
+      "name": "MAT_GROUND",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.36,
+                0.22,
+                0.1,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.65,
+        0.53,
+        0.34,
+        1.0
+      ],
+      "name": "MAT_ROOM_A",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.65,
+                0.53,
+                0.34,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.55,
+        0.55,
+        0.58,
+        1.0
+      ],
+      "name": "MAT_ROOM_B",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.55,
+                0.55,
+                0.58,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.7,
+        0.64,
+        0.5,
+        1.0
+      ],
+      "name": "MAT_ROOM_C",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.7,
+                0.64,
+                0.5,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.72,
+        0.16,
+        0.12,
+        1.0
+      ],
+      "name": "MAT_AGENT_ADA",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.72,
+                0.16,
+                0.12,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.12,
+        0.34,
+        0.72,
+        1.0
+      ],
+      "name": "MAT_AGENT_BO",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.12,
+                0.34,
+                0.72,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    },
+    {
+      "diffuse_color": [
+        0.16,
+        0.58,
+        0.24,
+        1.0
+      ],
+      "name": "MAT_AGENT_CY",
+      "node_tree": {
+        "links": [
+          {
+            "from_node": "Diffuse BSDF",
+            "from_socket": "BSDF",
+            "to_node": "Material Output",
+            "to_socket": "Surface"
+          }
+        ],
+        "nodes": [
+          {
+            "bl_idname": "ShaderNodeBsdfDiffuse",
+            "hide": false,
+            "inputs": {
+              "Color": [
+                0.16,
+                0.58,
+                0.24,
+                1.0
+              ],
+              "Normal": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "Roughness": 0.65,
+              "Weight": 1.0
+            },
+            "location": [
+              0.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Diffuse BSDF",
+            "width": 140.0
+          },
+          {
+            "bl_idname": "ShaderNodeOutputMaterial",
+            "hide": false,
+            "inputs": {
+              "Displacement": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Surface": {
+                "linked": true
+              },
+              "Thickness": {
+                "default": 0.0,
+                "linked": false
+              },
+              "Volume": {
+                "default": null,
+                "linked": false
+              }
+            },
+            "is_active_output": true,
+            "location": [
+              300.0,
+              0.0
+            ],
+            "mute": false,
+            "name": "Material Output",
+            "target": "ALL",
+            "width": 140.0
+          }
+        ]
+      },
+      "surface_render_method": "DITHERED",
+      "use_backface_culling": false,
+      "use_nodes": true
+    }
+  ],
+  "meshes": [
+    {
+      "custom_split_normals_present": false,
+      "edge_count": 4,
+      "edge_use_edge_sharp": [
+        false,
+        false,
+        false,
+        false
+      ],
+      "loop_normal_source": "flat_polygon_geometric",
+      "names": [
+        "SMOKE_GROUND"
+      ],
+      "normalized_polygon_cycles": [
+        [
+          0,
+          2,
+          3,
+          1
+        ]
+      ],
+      "parameters": {
+        "align": "WORLD",
+        "size": 18.0
+      },
+      "polygon_count": 1,
+      "polygon_use_smooth": [
+        false
+      ],
+      "primitive": "plane",
+      "sorted_edges": [
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          2,
+          3
+        ]
+      ],
+      "sorted_vertices": [
+        [
+          -9.0,
+          -9.0,
+          0.0
+        ],
+        [
+          -9.0,
+          9.0,
+          0.0
+        ],
+        [
+          9.0,
+          -9.0,
+          0.0
+        ],
+        [
+          9.0,
+          9.0,
+          0.0
+        ]
+      ],
+      "vertex_count": 4
+    },
+    {
+      "custom_split_normals_present": false,
+      "edge_count": 12,
+      "edge_use_edge_sharp": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "loop_normal_source": "flat_polygon_geometric",
+      "names": [
+        "SMOKE_ROOM_A",
+        "SMOKE_ROOM_B",
+        "SMOKE_ROOM_C"
+      ],
+      "normalized_polygon_cycles": [
+        [
+          0,
+          1,
+          3,
+          2
+        ],
+        [
+          0,
+          2,
+          6,
+          4
+        ],
+        [
+          0,
+          4,
+          5,
+          1
+        ],
+        [
+          1,
+          5,
+          7,
+          3
+        ],
+        [
+          2,
+          3,
+          7,
+          6
+        ],
+        [
+          4,
+          6,
+          7,
+          5
+        ]
+      ],
+      "parameters": {
+        "align": "WORLD",
+        "dimensions": [
+          4.0,
+          6.0,
+          0.4
+        ],
+        "transform_applied": true
+      },
+      "polygon_count": 6,
+      "polygon_use_smooth": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "primitive": "cube",
+      "sorted_edges": [
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          3,
+          7
+        ],
+        [
+          4,
+          5
+        ],
+        [
+          4,
+          6
+        ],
+        [
+          5,
+          7
+        ],
+        [
+          6,
+          7
+        ]
+      ],
+      "sorted_vertices": [
+        [
+          -2.0,
+          -3.0,
+          -0.2
+        ],
+        [
+          -2.0,
+          -3.0,
+          0.2
+        ],
+        [
+          -2.0,
+          3.0,
+          -0.2
+        ],
+        [
+          -2.0,
+          3.0,
+          0.2
+        ],
+        [
+          2.0,
+          -3.0,
+          -0.2
+        ],
+        [
+          2.0,
+          -3.0,
+          0.2
+        ],
+        [
+          2.0,
+          3.0,
+          -0.2
+        ],
+        [
+          2.0,
+          3.0,
+          0.2
+        ]
+      ],
+      "vertex_count": 8
+    },
+    {
+      "custom_split_normals_present": false,
+      "edge_count": 48,
+      "edge_use_edge_sharp": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "loop_normal_source": "flat_polygon_geometric",
+      "names": [
+        "SMOKE_AGENT_ADA",
+        "SMOKE_AGENT_BO",
+        "SMOKE_AGENT_CY"
+      ],
+      "normalized_polygon_cycles": [
+        [
+          0,
+          1,
+          5,
+          4
+        ],
+        [
+          0,
+          2,
+          3,
+          1
+        ],
+        [
+          0,
+          4,
+          8,
+          12,
+          16,
+          20,
+          24,
+          28,
+          30,
+          26,
+          22,
+          18,
+          14,
+          10,
+          6,
+          2
+        ],
+        [
+          1,
+          3,
+          7,
+          11,
+          15,
+          19,
+          23,
+          27,
+          31,
+          29,
+          25,
+          21,
+          17,
+          13,
+          9,
+          5
+        ],
+        [
+          2,
+          6,
+          7,
+          3
+        ],
+        [
+          4,
+          5,
+          9,
+          8
+        ],
+        [
+          6,
+          10,
+          11,
+          7
+        ],
+        [
+          8,
+          9,
+          13,
+          12
+        ],
+        [
+          10,
+          14,
+          15,
+          11
+        ],
+        [
+          12,
+          13,
+          17,
+          16
+        ],
+        [
+          14,
+          18,
+          19,
+          15
+        ],
+        [
+          16,
+          17,
+          21,
+          20
+        ],
+        [
+          18,
+          22,
+          23,
+          19
+        ],
+        [
+          20,
+          21,
+          25,
+          24
+        ],
+        [
+          22,
+          26,
+          27,
+          23
+        ],
+        [
+          24,
+          25,
+          29,
+          28
+        ],
+        [
+          26,
+          30,
+          31,
+          27
+        ],
+        [
+          28,
+          29,
+          31,
+          30
+        ]
+      ],
+      "parameters": {
+        "align": "WORLD",
+        "depth": 1.4,
+        "end_fill": "NGON",
+        "radius": 0.45,
+        "vertices": 16
+      },
+      "polygon_count": 18,
+      "polygon_use_smooth": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "primitive": "cylinder",
+      "sorted_edges": [
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          3,
+          7
+        ],
+        [
+          4,
+          5
+        ],
+        [
+          4,
+          8
+        ],
+        [
+          5,
+          9
+        ],
+        [
+          6,
+          7
+        ],
+        [
+          6,
+          10
+        ],
+        [
+          7,
+          11
+        ],
+        [
+          8,
+          9
+        ],
+        [
+          8,
+          12
+        ],
+        [
+          9,
+          13
+        ],
+        [
+          10,
+          11
+        ],
+        [
+          10,
+          14
+        ],
+        [
+          11,
+          15
+        ],
+        [
+          12,
+          13
+        ],
+        [
+          12,
+          16
+        ],
+        [
+          13,
+          17
+        ],
+        [
+          14,
+          15
+        ],
+        [
+          14,
+          18
+        ],
+        [
+          15,
+          19
+        ],
+        [
+          16,
+          17
+        ],
+        [
+          16,
+          20
+        ],
+        [
+          17,
+          21
+        ],
+        [
+          18,
+          19
+        ],
+        [
+          18,
+          22
+        ],
+        [
+          19,
+          23
+        ],
+        [
+          20,
+          21
+        ],
+        [
+          20,
+          24
+        ],
+        [
+          21,
+          25
+        ],
+        [
+          22,
+          23
+        ],
+        [
+          22,
+          26
+        ],
+        [
+          23,
+          27
+        ],
+        [
+          24,
+          25
+        ],
+        [
+          24,
+          28
+        ],
+        [
+          25,
+          29
+        ],
+        [
+          26,
+          27
+        ],
+        [
+          26,
+          30
+        ],
+        [
+          27,
+          31
+        ],
+        [
+          28,
+          29
+        ],
+        [
+          28,
+          30
+        ],
+        [
+          29,
+          31
+        ],
+        [
+          30,
+          31
+        ]
+      ],
+      "sorted_vertices": [
+        [
+          -0.45,
+          0.0,
+          -0.7
+        ],
+        [
+          -0.45,
+          0.0,
+          0.7
+        ],
+        [
+          -0.41574578963,
+          -0.172207544564,
+          -0.7
+        ],
+        [
+          -0.41574578963,
+          -0.172207544564,
+          0.7
+        ],
+        [
+          -0.41574578963,
+          0.172207544564,
+          -0.7
+        ],
+        [
+          -0.41574578963,
+          0.172207544564,
+          0.7
+        ],
+        [
+          -0.318198051534,
+          -0.318198051534,
+          -0.7
+        ],
+        [
+          -0.318198051534,
+          -0.318198051534,
+          0.7
+        ],
+        [
+          -0.318198051534,
+          0.318198051534,
+          -0.7
+        ],
+        [
+          -0.318198051534,
+          0.318198051534,
+          0.7
+        ],
+        [
+          -0.172207544564,
+          -0.41574578963,
+          -0.7
+        ],
+        [
+          -0.172207544564,
+          -0.41574578963,
+          0.7
+        ],
+        [
+          -0.172207544564,
+          0.41574578963,
+          -0.7
+        ],
+        [
+          -0.172207544564,
+          0.41574578963,
+          0.7
+        ],
+        [
+          0.0,
+          -0.45,
+          -0.7
+        ],
+        [
+          0.0,
+          -0.45,
+          0.7
+        ],
+        [
+          0.0,
+          0.45,
+          -0.7
+        ],
+        [
+          0.0,
+          0.45,
+          0.7
+        ],
+        [
+          0.172207544564,
+          -0.41574578963,
+          -0.7
+        ],
+        [
+          0.172207544564,
+          -0.41574578963,
+          0.7
+        ],
+        [
+          0.172207544564,
+          0.41574578963,
+          -0.7
+        ],
+        [
+          0.172207544564,
+          0.41574578963,
+          0.7
+        ],
+        [
+          0.318198051534,
+          -0.318198051534,
+          -0.7
+        ],
+        [
+          0.318198051534,
+          -0.318198051534,
+          0.7
+        ],
+        [
+          0.318198051534,
+          0.318198051534,
+          -0.7
+        ],
+        [
+          0.318198051534,
+          0.318198051534,
+          0.7
+        ],
+        [
+          0.41574578963,
+          -0.172207544564,
+          -0.7
+        ],
+        [
+          0.41574578963,
+          -0.172207544564,
+          0.7
+        ],
+        [
+          0.41574578963,
+          0.172207544564,
+          -0.7
+        ],
+        [
+          0.41574578963,
+          0.172207544564,
+          0.7
+        ],
+        [
+          0.45,
+          0.0,
+          -0.7
+        ],
+        [
+          0.45,
+          0.0,
+          0.7
+        ]
+      ],
+      "vertex_count": 32
+    }
+  ],
+  "objects": [
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_GROUND",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "material_names": [
+        "MAT_GROUND"
+      ],
+      "name": "SMOKE_GROUND",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_ROOM_A",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        -5.0,
+        0.0,
+        0.2
+      ],
+      "material_names": [
+        "MAT_ROOM_A"
+      ],
+      "name": "SMOKE_ROOM_A",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_ROOM_B",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        0.0,
+        0.0,
+        0.2
+      ],
+      "material_names": [
+        "MAT_ROOM_B"
+      ],
+      "name": "SMOKE_ROOM_B",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_ROOM_C",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        5.0,
+        0.0,
+        0.2
+      ],
+      "material_names": [
+        "MAT_ROOM_C"
+      ],
+      "name": "SMOKE_ROOM_C",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_AGENT_ADA",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        -5.0,
+        0.0,
+        1.1
+      ],
+      "material_names": [
+        "MAT_AGENT_ADA"
+      ],
+      "name": "SMOKE_AGENT_ADA",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_AGENT_BO",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        0.0,
+        0.0,
+        1.1
+      ],
+      "material_names": [
+        "MAT_AGENT_BO"
+      ],
+      "name": "SMOKE_AGENT_BO",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data_name": "SMOKE_AGENT_CY",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        5.0,
+        0.0,
+        1.1
+      ],
+      "material_names": [
+        "MAT_AGENT_CY"
+      ],
+      "name": "SMOKE_AGENT_CY",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data": {
+        "clip_end": 100.0,
+        "clip_start": 0.1,
+        "dof_aperture_blades": 0,
+        "dof_aperture_fstop": 2.8,
+        "dof_aperture_ratio": 1.0,
+        "dof_aperture_rotation": 0.0,
+        "dof_enabled": false,
+        "dof_focus_distance": 10.0,
+        "dof_focus_object": null,
+        "lens": 50.0,
+        "lens_unit": "MILLIMETERS",
+        "name": "SMOKE_CAMERA_DATA",
+        "ortho_scale": 19.0,
+        "panorama_type": "EQUIRECTANGULAR",
+        "sensor_fit": "AUTO",
+        "sensor_height": 32.0,
+        "sensor_width": 36.0,
+        "shift_x": 0.0,
+        "shift_y": 0.0,
+        "stereo_convergence_distance": 30.0,
+        "stereo_convergence_mode": "OFFAXIS",
+        "stereo_interocular_distance": 0.065,
+        "stereo_pivot": "LEFT",
+        "stereo_pole_merge_angle_from": 1.047198,
+        "stereo_pole_merge_angle_to": 1.308997,
+        "stereo_use_pole_merge": false,
+        "stereo_use_spherical": false,
+        "type": "ORTHO"
+      },
+      "data_name": "SMOKE_CAMERA_DATA",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        9.0,
+        -11.0,
+        11.0
+      ],
+      "material_names": [],
+      "name": "SMOKE_CAMERA",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.872665,
+        0.0,
+        0.698132
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    },
+    {
+      "collection": "COLISEUM_SMOKE",
+      "data": {
+        "angle": 0.0872665,
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "cutoff_distance": 40.0,
+        "diffuse_factor": 1.0,
+        "energy": 2.0,
+        "name": "SMOKE_SUN_DATA",
+        "shadow_soft_size": 0.25,
+        "shape": "SQUARE",
+        "show_cone": false,
+        "size": 0.25,
+        "size_y": 0.25,
+        "specular_factor": 1.0,
+        "spot_blend": 0.15,
+        "spot_size": 0.785398,
+        "transmission_factor": 1.0,
+        "type": "SUN",
+        "use_custom_distance": false,
+        "use_nodes": false,
+        "use_shadow": true,
+        "volume_factor": 1.0
+      },
+      "data_name": "SMOKE_SUN_DATA",
+      "delta_location": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_rotation_euler": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "hide_render": false,
+      "hide_viewport": false,
+      "instance_type": "NONE",
+      "is_holdout": false,
+      "is_shadow_catcher": false,
+      "location": [
+        0.0,
+        0.0,
+        8.0
+      ],
+      "material_names": [],
+      "name": "SMOKE_SUN",
+      "parent": null,
+      "pass_index": 0,
+      "rotation_euler": [
+        0.523599,
+        -0.349066,
+        -0.523599
+      ],
+      "rotation_mode": "XYZ",
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "show_instancer_for_render": true,
+      "visible_camera": true,
+      "visible_diffuse": true,
+      "visible_glossy": true,
+      "visible_shadow": true,
+      "visible_transmission": true,
+      "visible_volume_scatter": true
+    }
+  ],
+  "scene": {
+    "camera": "SMOKE_CAMERA",
+    "child_collections": [
+      "COLISEUM_SMOKE"
+    ],
+    "master_collection": "Scene Collection",
+    "name": "Scene",
+    "view_layer": "ViewLayer",
+    "world": "SMOKE_WORLD"
+  },
+  "view_layers": [
+    {
+      "layer_collections": [
+        {
+          "exclude": false,
+          "hide_viewport": false,
+          "holdout": false,
+          "indirect_only": false,
+          "name": "COLISEUM_SMOKE"
+        }
+      ],
+      "material_override": null,
+      "name": "ViewLayer",
+      "use": true,
+      "use_freestyle": false,
+      "use_pass_combined": true,
+      "use_pass_mist": false,
+      "use_pass_normal": false,
+      "use_pass_position": false,
+      "use_pass_vector": false,
+      "use_pass_z": false,
+      "world_override": null
+    }
+  ],
+  "zero_per_object_counts": {
+    "animation_data": 0,
+    "constraints": 0,
+    "custom_properties": 0,
+    "drivers": 0,
+    "modifiers": 0,
+    "particle_systems": 0,
+    "simulation_settings": 0
+  }
+}
+```
+
+Under the integrated `schema.canonical_json`, the object above is exactly
+17992 bytes and has `expected_inventory_digest =
+1ec5e1c2c6a063d85e0e328925296b21e7e4bc435bf4acaf2869741826bd5f60`. Construction tests parse this exact fenced value, require its complete
+nested key sets, recompute both literals, and refuse before job creation on drift.
+
+The literal mesh projection binds the complete normalized topology and render-facing
+surface state. The exact factory profile additionally covers every remaining writable
+`Mesh`, `MeshVertex`, `MeshEdge`, `MeshLoop`, `MeshPolygon`, `Collection`,
+`ViewLayer`, and `LayerCollection` RNA property under the pinned Blender identity.
+The inspector requires both the literal inventory equality and the factory-profile
+equality; a matching vertex/count projection cannot excuse different smoothing,
+normals, connectivity, winding, collection visibility, layer exclusion, overrides,
+or any other writable value.
 
 Each material node tree has exactly two nodes and one link, with no frame, group, or
 interface sockets:
@@ -1057,9 +3292,16 @@ normal suite:
    `jobs/<job_id>` derivation and reload, strict schema/profile, and rejection of
    an ID-dependent preimage directory, mismatched leaf, placeholder
    substitution, deterministic-setting drift, and immutable-input drift; ordinary
-   fixtures alter one camera object/data, sun object/data/color, material, node,
-   mesh/object transform, color-management, Cycles, and factory-profile value at a
-   time and every mutation refuses under `coliseum-smoke.v1`;
+   tests parse the one fully expanded normative inventory block, require no
+   placeholder/reference/template key, assert every nested key set, and reproduce
+   its literal byte count/digest; fixtures alter one camera object/data, sun
+   object/data/color, material, node, mesh/object transform, polygon smooth flag,
+   loop/custom-normal state, exact edge or polygon connection/winding, collection
+   `hide_render`, layer-collection exclusion, view-layer use/material/world override,
+   color-management, Cycles, or factory-profile value at a time and every mutation
+   refuses under `coliseum-smoke.v1`; the fixed worker/inspector vector independently
+   reconstructs both argument digests, ordered ancestor digest, and both ContentRecord
+   ids, while one argument/ancestor order/value mutation changes identity or refuses;
 4. host-only path-verifier cases for unavailable reparse detection, junction/
    reparse escape, UNC/drive/case/device/alternate-stream and protected-root
    aliases, Linux symlinks, component swaps, safe fresh-leaf creation, Windows
