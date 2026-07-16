@@ -31,6 +31,15 @@
 > journal exports bind authorization, assignment, receipt, and ready-barrier
 > release; and frozen assessment/check declarations map one-to-one into the
 > packaged assessment manifest.
+>
+> **Revision 5:** follows operational watcher failures `001514-e5b3291f` and
+> `001515-cb775026` (canceled without verdict by `001516-03252a46`). The two
+> independent read-only audit logs reproduced two additional native-inventory
+> gaps: repository path `P` could not encode mandatory dot-prefixed native
+> descendants, and native locator/filesystem/file identities lacked one exact
+> derivation. Revision 5 adds a lossless native-byte path/view contract and a
+> single Linux handle/stat identity algebra reused by roots, entries, and the
+> protected scheduler journal. No failed audit log is treated as approval.
 
 ## 1. Objective
 
@@ -272,6 +281,7 @@ P       normalized repository-relative path from §7.1
 N       JSON integer, bool excluded, 0 <= N <= declared bound
 B       JSON boolean
 T       bounded nonempty UTF-8 string
+X       lowercase even-length hexadecimal encoding of bounded nonempty bytes
 REF     exact {"record_id": H, "content_sha256": H}
 NULLREF JSON null or REF
 ```
@@ -319,13 +329,39 @@ FD_RULE = {
   "target_kind": "null" | "pipe"
 }
 
+NATIVE_REL_PATH = {
+  "segments_hex": nonempty array[X]
+}
+
+NATIVE_LOCATOR = {
+  "platform": exactly "linux-bwrap-v1",
+  "anchor_name": S,
+  "anchor_id": H,
+  "segments_hex": array[X],
+  "resolution": exactly "openat2-beneath-no-magiclinks-no-symlinks-v1"
+}
+
+NATIVE_ID_OBSERVATION = {
+  "profile": exactly "linux-native-id-v1",
+  "statx_mount_id": N,
+  "device_major": N,
+  "device_minor": N,
+  "statfs_fsid_word0": N,
+  "statfs_fsid_word1": N,
+  "file_handle_type": N,
+  "file_handle_bytes_hex": X,
+  "inode": N,
+  "file_type": "regular" | "directory",
+  "link_count": N,
+  "native_mode": N
+}
+
 NATIVE_ENTRY = {
-  "path": P,
+  "path": NATIVE_REL_PATH,
+  "native_identity": NATIVE_ID_OBSERVATION,
   "filesystem_id": H,
   "file_id": H,
-  "link_count": N,
   "content_sha256": H | null,
-  "native_mode": N,
   "kind": "regular" | "directory"
 }
 
@@ -335,11 +371,17 @@ NATIVE_ROOT_SPEC = {
                "council-root" | "owner-anchors" | "other-worker-leaves" |
                "canonical-evidence" | "hidden-suites" | "runtime-readonly" |
                "builder-output" | "assessor-output",
+  "view_kind": "full-native-tree-v1" |
+               "checkout-excluding-delegated-dotgit-v1",
   "namespace_id": H,
+  "locator": NATIVE_LOCATOR,
   "locator_sha256": H,
+  "native_identity": NATIVE_ID_OBSERVATION,
   "filesystem_id": H,
   "file_id": H,
-  "workspace_id": H | null
+  "workspace_id": H | null,
+  "delegated_control_root_id": H | null,
+  "delegated_control_identity": NATIVE_ID_OBSERVATION | null
 }
 
 NATIVE_OBSERVATION_REQUIREMENT = {
@@ -388,6 +430,109 @@ METRIC = {
   "unit": S, "value": N | null, "evidence_ref": NULLREF
 }
 ```
+
+`NATIVE_REL_PATH` is not `P` and grants no repository write authority. Each
+`segments_hex` element decodes to 1..255 native bytes, contains neither NUL nor
+`/`, and is not byte-equal to `.` or `..`; 1..256 segments and at most 4096
+decoded bytes including separators are permitted. Dot-prefixed names, including
+`.gitignore` and `.git`, are representable. Lowercase hex is the sole encoding,
+so invalid UTF-8 native names remain lossless. Paths sort by the lexicographic
+tuple of decoded segment bytes; duplicate decoded tuples refuse. A locator uses
+the same segment encoding, but may use an empty array for its enrolled anchor.
+The trusted root-owned anchor registry binds `anchor_id`; no worker chooses it.
+
+The registry row for an anchor is exactly its bounded `anchor_name`, trusted
+host configuration path, `NATIVE_ID_OBSERVATION`, `filesystem_id`, and
+`file_id`. The absolute configuration path is protected operational
+configuration, not worker input and not part of a locator. The host opens that
+configured anchor no-follow, recomputes the observation and ids, then requires:
+
+```text
+anchor_id = domain_hash(
+  "council:native-anchor:v1",
+  {"anchor_name": S, "file_id": H, "filesystem_id": H,
+   "native_identity": canonical NATIVE_ID_OBSERVATION})
+```
+
+`NATIVE_LOCATOR.anchor_name` and `anchor_id` must match exactly one enrolled
+row. Duplicate names, ids, or native objects refuse. This makes locator
+reconstruction independent of an arbitrary caller-supplied `H` while keeping
+the protected absolute host path out of worker-visible records.
+
+The only v1 native identity encoder is `linux-native-id-v1`. The trusted host
+opens each locator/descendant with `openat2` from the enrolled anchor using
+`O_PATH|O_NOFOLLOW` and exactly
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`. It enumerates raw
+names no-follow, captures `statx` mount id plus `fstat` device major/minor,
+inode, type, link count, and the unsigned Linux `st_mode` value, captures the
+two `f_fsid` words from `fstatfs` as unsigned 32-bit integers in declaration
+order, and captures a nonempty persistent file-handle type/bytes with
+`name_to_handle_at`. Numeric values are nonnegative JSON integers; handle bytes
+are 1..256 bytes encoded by `X`. Mount id, inode, and link count are bounded by
+`2^64-1`; device components, fsid words, handle type, and native mode are
+bounded by `2^32-1`. The host repeats the
+handle/stat observation after enumeration; every identity field must be equal.
+Unsupported `openat2`, `statx` mount ids, persistent file handles, stable
+re-observation, or no-follow traversal makes v1 ineligible rather than invoking
+a fallback encoder.
+
+The derivations are exact:
+
+```text
+filesystem_id = domain_hash(
+  "council:linux-filesystem-id:v1",
+  {"device_major": N, "device_minor": N,
+   "statfs_fsid_word0": N, "statfs_fsid_word1": N})
+
+file_id = domain_hash(
+  "council:linux-file-id:v1",
+  {"file_handle_bytes_hex": X, "file_handle_type": N,
+   "file_type": "regular" | "directory", "filesystem_id": H,
+   "inode": N})
+
+locator_sha256 = domain_hash(
+  "council:native-root-locator:v1", canonical NATIVE_LOCATOR)
+
+namespace_id = domain_hash(
+  "council:native-namespace:v1",
+  {"locator_sha256": H, "program_ref": REF, "root_kind": S,
+   "view_kind": S, "workspace_id": H | null})
+
+root_id = domain_hash(
+  "council:native-root:v1",
+  {"program_ref": REF,
+   "root_spec": canonical NATIVE_ROOT_SPEC with root_id omitted})
+```
+
+For every root and entry, the validator recomputes `filesystem_id` and
+`file_id` from the embedded observation and requires type/link/mode/content
+relations to match the observed handle. It recomputes locator, namespace, and
+root ids likewise. An arbitrary caller-supplied H never substitutes for native
+observation. The same native object observed through two namespaces therefore
+derives the same `(filesystem_id, file_id)` and is detectable; distinct native
+objects with equal paths or bytes remain distinct. `statx_mount_id` remains a
+re-observed locator/mount fact but is intentionally excluded from
+`filesystem_id`: two bind-mount views of the same filesystem may have different
+mount ids and still must collide on the same native file identity.
+
+`view_kind` has a closed meaning. `full-native-tree-v1` requires both delegated
+control fields to be null and inventories every descendant, including every
+dot-prefixed name. `checkout-excluding-delegated-dotgit-v1` is legal only for
+an `integration-checkout` root. Its direct child with decoded segment `.git`
+must be a directory; `delegated_control_root_id` must resolve to the program's
+one `common-git` root; that root's locator must equal the checkout locator plus
+the single `.git` segment; and `delegated_control_identity` must byte-equal the
+common-Git root observation. The checkout inventory excludes exactly that
+direct child and its descendants, while the referenced common-Git root uses
+`full-native-tree-v1` and inventories them exhaustively. The copied delegated
+identity is relation evidence, not a second inventory member, and is the sole
+permitted repeated observation. A `.git` regular indirection file, missing or
+additional exclusion, locator mismatch, identity mismatch, overlapping entry,
+or unreferenced delegated root makes Linux v1 ineligible. The common-Git root
+is constructed before the dependent checkout root in the canonical reference
+order; arrays are sorted only after both ids exist. Candidate/export roots use
+the full-tree view and contain no delegated Git control tree; a decoded direct
+child `.git` in such a root refuses rather than being silently excluded.
 
 `PREDICTED_CHANGE` is one exact operation, not a menu. The base commit supplies
 its before fields. `ACTUAL_CHANGE` has the following exhaustive truth table;
@@ -862,7 +1007,9 @@ program_ref: REF
 principal_registry_ref: REF
 scheduler_authority_id: H
 journal_root_id: H
+journal_root_locator: NATIVE_LOCATOR
 journal_root_locator_sha256: H
+journal_root_native_identity: NATIVE_ID_OBSERVATION
 journal_root_filesystem_id: H
 journal_root_file_id: H
 journal_owner_principal_id: S
@@ -901,6 +1048,23 @@ mode, and scheduler authority are identical throughout the chain; owner
 principal/control equal the registry's protected scheduler writer. This
 root-time equality is the membership proof; self-computable entry hashes alone
 never satisfy it.
+The journal locator digest and filesystem/file ids are recomputed by the exact
+native algebra above. Its sole id preimage is:
+
+```text
+journal_root_id = domain_hash(
+  "council:scheduler-journal-root:v1",
+  {"journal_mode": N, "journal_owner_control_id": H,
+   "journal_owner_principal_id": S, "journal_root_file_id": H,
+   "journal_root_filesystem_id": H, "journal_root_locator_sha256": H,
+   "principal_registry_ref": REF, "program_ref": REF})
+```
+
+The journal anchor is an OS-protected enrolled anchor distinct from every
+inventory root/entry; `journal_root_locator`, its digest, its embedded native
+observation, and both derived ids must reconstruct from that anchor before any
+membership check. Equality, a caller-selected H, an alternate encoder, or
+unavailable stable observation refuses.
 
 `worker_sandbox_profile.v1` payload keys:
 
@@ -1020,11 +1184,14 @@ dispatch inventory references that exact assignment, including trusted-host
 observations of central roots; assembly inventories require null assignment.
 Paths are relative to and
 therefore namespaced by that exact root. Entries exhaustively include every
-descendant regular file and directory; the root itself is represented by the
-root spec. Regular files have a non-null byte SHA-256, directories have null
-content, and symlinks/reparse points/special files refuse. File-system id,
-native file id, link count, and native mode come from no-follow `lstat`/`fstat`.
-Unavailable stable native identity makes dispatch or assembly ineligible.
+descendant regular file and directory admitted by the root's exact `view_kind`;
+the root itself is represented by the root spec. Regular files have a non-null
+byte SHA-256, directories have null content, and symlinks/reparse points/special
+files refuse. The path, observation, filesystem id, file id, type, link count,
+mode, and content relations use only the §6 `linux-native-id-v1` encoder and
+no-follow handle enumeration; `lstat`/`fstat` values without the stable handle,
+mount, and filesystem observations are insufficient. Unavailable stable native
+identity makes dispatch or assembly ineligible.
 
 For every observation requirement in the plan, the evidence root contains
 exactly one inventory and no inventory for an undeclared observation. Before and
@@ -1567,9 +1734,10 @@ revalidates the program/root/scope, parses the proposal without shell
 evaluation, refuses binary/symlink/submodule/special-file patches, validates
 every old blob/mode against the frozen base, and applies exact changes in sorted
 `work_item_id` order using handle-relative no-follow operations. Before any
-write it no-follow `lstat`/`fstat`s every affected ancestor and target, requires
-regular targets to have `link_count=1`, requires stable filesystem/file ids,
-and rejects a target id that appears at another candidate or protected path.
+write it opens every affected ancestor and target no-follow and reconstructs
+the exact §6 native observation and filesystem/file ids, requires regular
+targets to have `link_count=1`, and rejects a target id that appears at another
+candidate or protected path.
 Missing stable identity, a regular hardlink, or any native alias refuses before
 proposal bytes are applied.
 
@@ -2003,6 +2171,35 @@ must arise from real Coliseum use and route as bounded audited slices.
 72. freeze one assessor leaf and construct its unique manifest; changing only
     disposition, check id/status/evidence, predecessor, finding membership or
     count, or error reason refuses without changed assessor declaration bytes.
+
+### Revision-5 native construction closure
+
+73. round-trip native path segments for `.gitignore`, `.git`, a nested
+    dot-prefixed name, and one invalid-UTF-8 byte sequence; prove decoded-byte
+    ordering is stable and reject empty segments, NUL, slash, `.`, `..`, odd or
+    uppercase hex, duplicate decoded tuples, excess depth, and excess bytes;
+74. inventory a real checkout containing a tracked dotfile using the exact
+    checkout/common-Git view pair; prove `.git` is excluded exactly once from
+    the checkout and exhaustively present under the referenced full-tree
+    common-Git root, while a `.git` indirection file, missing/extra exclusion,
+    overlap, locator mismatch, identity mismatch, or unreferenced delegated
+    root refuses;
+75. freeze one native observation and independently derive byte-identical
+    anchor, locator, filesystem, file, namespace, and root ids; mutate each
+    stored H while preserving the observation and require refusal; mutate each
+    observation field and require the specified dependent ids to change;
+76. expose one native object through two bind-mount namespaces with different
+    `statx_mount_id` values and require equal filesystem/file ids plus alias
+    refusal; require distinct objects with equal bytes and relative paths to
+    retain distinct file ids;
+77. construct the protected scheduler journal identity solely from its exact
+    locator/observation/preimage and reject a caller-selected id, alternate
+    field order/encoder, anchor alias, inventory-root equality, or any mismatch
+    between embedded observation and derived ids;
+78. make `openat2`, no-follow resolution, `statx` mount identity, `fstatfs`
+    fsid, persistent file handle, or stable re-observation unavailable one at a
+    time and prove writable hierarchical dispatch and assembly fail closed with
+    sequential mode still available.
 
 ## 17. Completion gates
 
