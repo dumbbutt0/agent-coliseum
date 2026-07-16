@@ -23,6 +23,14 @@
 > alias closure; and typed scheduler-owned principal, launch, and finding-root
 > evidence. The filter-safe reroute did not change the source or acceptance
 > criteria.
+>
+> **Revision 4:** addresses the four reproduced findings in `AUDIT_BLOCKED`
+> against commit `6a23a58d4bad`: canonical reference-derived construction
+> ordinals replace contradictory macro-stage peers; a closed native-root plan
+> makes every protected namespace and phase exhaustive; typed per-dispatch
+> journal exports bind authorization, assignment, receipt, and ready-barrier
+> release; and frozen assessment/check declarations map one-to-one into the
+> packaged assessment manifest.
 
 ## 1. Objective
 
@@ -311,14 +319,56 @@ FD_RULE = {
   "target_kind": "null" | "pipe"
 }
 
-NATIVE_FILE = {
+NATIVE_ENTRY = {
   "path": P,
   "filesystem_id": H,
   "file_id": H,
   "link_count": N,
-  "blob_sha256": H,
-  "git_mode": "100644" | "100755",
-  "kind": "regular"
+  "content_sha256": H | null,
+  "native_mode": N,
+  "kind": "regular" | "directory"
+}
+
+NATIVE_ROOT_SPEC = {
+  "root_id": H,
+  "root_kind": "candidate" | "integration-checkout" | "common-git" |
+               "council-root" | "owner-anchors" | "other-worker-leaves" |
+               "canonical-evidence" | "hidden-suites" | "runtime-readonly" |
+               "builder-output" | "assessor-output",
+  "namespace_id": H,
+  "locator_sha256": H,
+  "filesystem_id": H,
+  "file_id": H,
+  "workspace_id": H | null
+}
+
+NATIVE_OBSERVATION_REQUIREMENT = {
+  "observation_id": H,
+  "root_id": H,
+  "phase": "pre-dispatch" | "post-worker" |
+           "pre-assembly" | "post-assembly",
+  "scope": "builder-dispatch" | "assessor-dispatch" | "assembly",
+  "work_item_id": H | null,
+  "role": "builder" | "assessor" | null,
+  "attempt": N | null,
+  "workspace_id": H | null
+}
+
+CHECK_DECLARATION = {
+  "check_id": S,
+  "status": "pass" | "fail" | "error",
+  "evidence_output_relpath": P
+}
+
+JOURNAL_ENTRY = {
+  "ordinal": N,
+  "sequence": N,
+  "entry_kind": "authorization" | "assignment" | "receipt",
+  "record_ref": REF,
+  "entry_sha256": H,
+  "writer_role": "scheduler" | "launcher",
+  "writer_principal_id": S,
+  "writer_control_id": H
 }
 
 BUDGET = {
@@ -387,8 +437,10 @@ Git modes, and unbounded maps are not representable in v1.
 | `section_assignment.v1` | `section_assignment_id` | `council:section-assignment:v1` |
 | `section_launcher_authorization.v1` | `section_launcher_authorization_id` | `council:section-launcher-authorization:v1` |
 | `section_launcher_receipt.v1` | `section_launcher_receipt_id` | `council:section-launcher-receipt:v1` |
+| `section_scheduler_journal_manifest.v1` | `section_scheduler_journal_manifest_id` | `council:section-scheduler-journal-manifest:v1` |
 | `worker_sandbox_profile.v1` | `worker_sandbox_profile_id` | `council:worker-sandbox-profile:v1` |
 | `worker_sandbox_attestation.v1` | `worker_sandbox_attestation_id` | `council:worker-sandbox-attestation:v1` |
+| `section_native_inventory_plan.v1` | `section_native_inventory_plan_id` | `council:section-native-inventory-plan:v1` |
 | `section_native_inventory.v1` | `section_native_inventory_id` | `council:section-native-inventory:v1` |
 | `section_finding.v1` | `section_finding_id` | `council:section-finding:v1` |
 | `section_assessment_manifest.v1` | `section_assessment_manifest_id` | `council:section-assessment-manifest:v1` |
@@ -437,6 +489,10 @@ enrollment_registry_git_blob: O
 enrollment_registry_version: N
 enrollment_registry_digest: H
 scheduler_authority_id: H
+scheduler_writer_principal_id: S
+scheduler_writer_control_id: H
+launcher_writer_principal_id: S
+launcher_writer_control_id: H
 principals: sorted nonempty array by principal_id of {
   "principal_id": S,
   "allowed_role": "builder" | "assessor",
@@ -450,7 +506,8 @@ principals: sorted nonempty array by principal_id of {
 
 The trusted HSC wrapper derives this closed projection from the exact
 owner-reviewed registry file and Git blob in `base_commit`, then cross-checks
-its scheduler authority against the OS-protected scheduler configuration before
+its scheduler authority and its scheduler/launcher writer principals and
+control identities against the OS-protected scheduler configuration before
 `BUILD_STARTED`; workers cannot write either source. Changing the enrollment
 registry requires an ordinary audited source change. `principal_id`,
 `authority_control_id`, control-key
@@ -462,6 +519,9 @@ ineligible. The exact registry record is bound by the program and therefore by
 the existing `BUILD_STARTED` event. This explicit root-owned enrollment is the
 v1 trust boundary; v1 makes no claim that arbitrary self-declared accounts are
 independent principals.
+The scheduler and launcher writer principals are distinct from each other and
+from every worker principal/control identity. Only those protected writers may
+produce the journal entry kinds assigned to them in §6.7.
 
 `section_program.v1` payload keys:
 
@@ -624,12 +684,12 @@ Every referenced non-JSON-record blob is wrapped by
 program_ref: REF
 artifact_type: one of
   "read_inventory" | "assessment_profile" | "assessment_declaration" |
-  "finding_declaration" |
+  "check_declaration" | "finding_declaration" |
   "source_snapshot" | "proposal" | "diff_preview" |
   "test_manifest" | "test_result" | "check_evidence" |
   "finding_evidence" | "reproduction" | "resolution" |
   "operation_log" | "conflict_evidence" | "assembler_binary" |
-  "scheduler_journal_export"
+  "scheduler_failure_evidence"
 storage_relpath: P
 media_type: "application/json" | "text/plain" | "text/x-diff" |
             "application/octet-stream"
@@ -649,14 +709,54 @@ content record with the artifact type implied by the field name. For example,
 `proposal_ref` only to a content record of type `proposal`, and
 `test_result_refs` only to `test_result`. Type substitution is invalid.
 
+Two assessor-owned artifact types have additional closed canonical-JSON byte
+schemas; they are not opaque just because a content record wraps them.
+
+Every `check_declaration` blob is exactly one `CHECK_DECLARATION`. Its evidence
+path is unique in the assessor leaf and resolves to exactly one wrapped
+`check_evidence` file.
+
+Every `assessment_declaration` blob is canonical JSON with exactly:
+
+```text
+{
+  "schema_version": "section-assessment-declaration.v1",
+  "program_ref": REF,
+  "contract_ref": REF,
+  "work_item_id": H,
+  "assessor_assignment_ref": REF,
+  "assessor_context_ref": REF,
+  "proposal_ref": REF,
+  "check_declaration_output_relpaths": sorted nonempty array[P],
+  "finding_declaration_output_relpaths": sorted array[P],
+  "predecessor_assessment_ref": NULLREF,
+  "declared_disposition": "pass" | "blocked" | "error",
+  "error_reason": T | null
+}
+```
+
+Every listed output path is leaf-relative, unique across both arrays, and
+present in the frozen exhaustive output inventory with the named artifact
+type. `error_reason` is non-null exactly for `error`. The declared disposition
+is valid exactly when the deterministic rule in §6.8 derives the same value.
+These bytes are assessor output and are immutable before any reference-bearing
+record is packaged.
+Every embedded `REF`/`NULLREF` in a closed declaration is type-checked against
+the same root and contributes the same target-before-source dependency edge as
+a record-payload reference. Wrapping bytes in a content record never hides a
+cycle, cross-program substitution, or stale predecessor.
+
 ### 6.7 Assignments and structural principal separation
 
-The trusted scheduler writes two exact journaled records. The journal lives in
-an OS-protected directory that is absent from every worker namespace, is opened
-no-follow, and accepts entries with create-exclusive semantics. Its owner/mode,
-monotonic sequence, and bytes are verified before dispatch and exported as a
-`scheduler_journal_export` content record. Any unavailable ownership check,
-sequence gap, replacement, or digest mismatch makes dispatch ineligible.
+The trusted scheduler and launcher write three exact journaled records per
+dispatch. The per-program journal lives in an OS-protected directory that is
+absent from every worker namespace, is opened no-follow, and accepts entries
+with create-exclusive semantics. Its owner/mode, stable root identity,
+contiguous sequence, and bytes are verified before release and exported as the
+closed typed `section_scheduler_journal_manifest.v1` below. A generic opaque
+content blob cannot stand in for this manifest. Any unavailable ownership
+check, sequence gap, writer mismatch, replacement, or digest mismatch makes
+dispatch ineligible.
 
 `section_launcher_authorization.v1` payload keys:
 
@@ -727,6 +827,9 @@ principal_registry_ref: REF
 principal_id: S
 authority_control_id: H
 principal_credential_digest: H
+scheduler_authority_id: H
+scheduler_journal_sequence: N
+scheduler_journal_entry_sha256: H
 launcher_authorization_ref: REF
 session_nonce: H
 attempt: N
@@ -747,6 +850,58 @@ sessions. The builder cannot supply or write any assessor field or journal
 entry. Unequal opaque values without two distinct registry authorities do not
 satisfy this gate.
 
+The assignment entry hash uses domain
+`council:section-assignment-entry:v1` and omits only its own entry-hash field.
+Its scheduler authority matches the authorization and protected registry.
+
+`section_scheduler_journal_manifest.v1` is the direct typed export of one
+completed authorization/assignment/receipt dispatch triple. Payload keys:
+
+```text
+program_ref: REF
+principal_registry_ref: REF
+scheduler_authority_id: H
+journal_root_id: H
+journal_root_locator_sha256: H
+journal_root_filesystem_id: H
+journal_root_file_id: H
+journal_owner_principal_id: S
+journal_owner_control_id: H
+journal_mode: exactly "0700"
+predecessor_journal_manifest_ref: NULLREF
+first_sequence: N
+last_sequence: N
+entries: exactly ordered array[JOURNAL_ENTRY] of length 3
+```
+
+Entry ordinal/kind/writer pairs are exactly
+`(0, authorization, scheduler)`, `(1, assignment, scheduler)`, and
+`(2, receipt, launcher)`. Sequences are `first_sequence + ordinal` and
+`last_sequence = first_sequence + 2`. The first manifest has null predecessor
+and `first_sequence=0`; each later manifest references the immediately prior
+manifest and starts at `predecessor.last_sequence + 1`. The scheduler entries'
+writer identity equals the registry's scheduler writer; the receipt entry's
+writer identity equals its launcher writer; principal and control id must both
+match the applicable registry fields. Each entry REF has the required
+record type, its `sequence` equals that record's
+`scheduler_journal_sequence`, and its `entry_sha256` equals that record's
+`scheduler_journal_entry_sha256` under the record-specific domain.
+
+All three records describe the same program, work item, role, principal,
+session, attempt, context, sandbox, workspace, and output leaf. The
+authorization references no assignment; the assignment references that
+authorization; the receipt references both. The manifest is constructed only
+after the receipt and may therefore reference all three without a cycle.
+
+At evidence-root validation time the journal manifests must form one unbroken,
+unforked chain. Every authorization, assignment, and receipt reachable in the
+root occurs exactly once in the corresponding ordinal of exactly one manifest;
+there are no extra manifest entries or dispatch records. Journal root identity,
+mode, and scheduler authority are identical throughout the chain; owner
+principal/control equal the registry's protected scheduler writer. This
+root-time equality is the membership proof; self-computable entry hashes alone
+never satisfy it.
+
 `worker_sandbox_profile.v1` payload keys:
 
 ```text
@@ -754,6 +909,7 @@ program_ref: REF
 platform: "linux-bwrap-v1"
 launcher_binary_sha256: H
 argv_template_sha256: H
+native_inventory_plan_ref: REF
 source_snapshot_ref: REF
 read_only_mount_refs: sorted nonempty array[REF]
 writable_mountpoint: "/out"
@@ -779,21 +935,104 @@ descriptor table. If descriptor closing or trusted observation is unavailable,
 the profile is ineligible; bwrap control descriptors must be closed before the
 worker entry point and are never added to the permitted worker table.
 
-`section_native_inventory.v1` payload keys:
+`section_native_inventory_plan.v1` is the closed required-root set for one
+exact dispatch attempt or for the one assembly operation. Payload keys:
 
 ```text
 program_ref: REF
 base_commit: G
-inventory_kind: "candidate-before" | "candidate-after" |
-                "protected-before" | "protected-after"
-entries: sorted array[NATIVE_FILE] by path
+scope: "builder-dispatch" | "assessor-dispatch" | "assembly"
+work_item_id: H | null
+role: "builder" | "assessor" | null
+attempt: N | null
+workspace_id: H | null
+roots: sorted nonempty array[NATIVE_ROOT_SPEC] by root_id
+root_count: N
+observations: sorted nonempty array[NATIVE_OBSERVATION_REQUIREMENT]
+    by observation_id
+observation_count: N
+```
+
+The two counts equal their array lengths. Every `root_id`, namespace, locator,
+and stable `(filesystem_id, file_id)` pair is unique. Every plan contains the
+exact central policy roots: candidate, integration checkout, common Git,
+Council root, configured owner anchors, other worker leaves, canonical
+evidence, and hidden suites. A dispatch plan additionally contains its exact
+runtime and private output roots; the assembly plan contains every runtime and
+dispatch-output root used by the program. Omission is not represented as an
+empty inventory: it is a plan mismatch and refuses the program. A root that is
+required absent from a worker namespace is still inventoried by the trusted
+host before and after that worker; mount-table evidence proves its absence in
+the child.
+
+For a dispatch plan, all four dispatch fields are non-null, scope and role
+agree, and observations include one pre/post-worker requirement for every
+protected central root plus that dispatch's exact output/runtime roots. For the
+single assembly plan, all four fields are null and observations include one
+pre/post-assembly requirement for every root. Observation context fields equal
+their containing plan exactly. `observation_id = domain_hash(
+"council:native-observation-requirement:v1", exact requirement with that field
+omitted plus program_ref)`. The closed policy expansion, not a builder-selected
+phase subset, determines the exhaustive requirement set.
+
+Every sandbox profile references the plan for its exact future role/attempt/
+workspace. Authorization, assignment, receipt, journal manifest, attestation,
+and inventory records must all match it. The evidence root contains exactly one
+dispatch plan for every journaled dispatch attempt and exactly one assembly
+plan; no unused, missing, or multiply claimed plan is valid.
+Descriptors for a given central policy root are byte-identical across every
+plan; each output descriptor is unique to its workspace and also appears in the
+assembly plan. The assembly plan's root set is the exact normalized union of
+all central, candidate, runtime, and dispatch-output roots, so a per-dispatch
+plan cannot hide a root from final cross-root comparison.
+
+Central roots use `workspace_id=null`; candidate/output roots bind the exact
+preallocated workspace. `locator_sha256` hashes the canonical configured
+native root locator under domain `council:native-root-locator:v1`; it is not a
+content digest. Root filesystem/file identities come from a no-follow handle
+opened when the plan is frozen. A later replacement handle is not equivalent
+even when directory contents match.
+
+`section_native_inventory.v1` payload keys:
+
+```text
+program_ref: REF
+native_inventory_plan_ref: REF
+base_commit: G
+observation_id: H
+root_id: H
+observer_assignment_ref: NULLREF
+observation_workspace_id: H | null
+phase: "pre-dispatch" | "post-worker" | "pre-assembly" | "post-assembly"
+observed_root_filesystem_id: H
+observed_root_file_id: H
+entries: sorted array[NATIVE_ENTRY] by path
 inventory_sha256: H
 ```
 
 `inventory_sha256 = domain_hash("council:section-native-inventory-content:v1",
-canonical sorted entries)`. Paths are exhaustive for the declared inventory
-root. File-system id, native file id, and link count come from no-follow
-`lstat`/`fstat`; unavailable stable native identity makes assembly ineligible.
+canonical JSON of `native_inventory_plan_ref`, the resolved complete
+`NATIVE_ROOT_SPEC` and `NATIVE_OBSERVATION_REQUIREMENT`,
+`observer_assignment_ref`, `observation_workspace_id`, `phase`, and sorted
+entries)`. The observed root identity and root workspace must equal the root
+spec; phase, scope, and observation workspace must equal the requirement. Every
+dispatch inventory references that exact assignment, including trusted-host
+observations of central roots; assembly inventories require null assignment.
+Paths are relative to and
+therefore namespaced by that exact root. Entries exhaustively include every
+descendant regular file and directory; the root itself is represented by the
+root spec. Regular files have a non-null byte SHA-256, directories have null
+content, and symlinks/reparse points/special files refuse. File-system id,
+native file id, link count, and native mode come from no-follow `lstat`/`fstat`.
+Unavailable stable native identity makes dispatch or assembly ineligible.
+
+For every observation requirement in the plan, the evidence root contains
+exactly one inventory and no inventory for an undeclared observation. Before and
+after comparisons are keyed by root id, never relative path alone. Across the
+complete required set the validator compares every `(filesystem_id, file_id)`
+pair for roots and entries; an identity appearing in two namespaces, an
+unexpected link count, a root swap, or an omitted root refuses even when bytes
+and relative paths are equal.
 
 `worker_sandbox_attestation.v1` payload keys:
 
@@ -801,6 +1040,7 @@ root. File-system id, native file id, and link count come from no-follow
 program_ref: REF
 assignment_ref: REF
 launcher_receipt_ref: REF
+journal_manifest_ref: REF
 sandbox_profile_ref: REF
 observed_mount_table_ref: REF (artifact_type="check_evidence")
 observed_process_status_ref: REF (artifact_type="check_evidence")
@@ -808,8 +1048,10 @@ observed_environment_ref: REF (artifact_type="check_evidence")
 observed_fd_table_ref: REF (artifact_type="check_evidence")
 source_snapshot_ref: REF (artifact_type="source_snapshot")
 output_inventory_ref: REF (artifact_type="read_inventory")
-protected_host_before_ref: REF resolving to section_native_inventory.v1
-protected_host_after_ref: REF resolving to section_native_inventory.v1
+native_inventory_before_refs: sorted nonempty array[REF]
+    resolving to section_native_inventory.v1
+native_inventory_after_refs: sorted nonempty array[REF]
+    resolving to section_native_inventory.v1
 unexpected_fd_count: N
 writable_filesystem_fd_count: N
 external_write_attempt_count: N
@@ -817,11 +1059,18 @@ external_write_success_count: N
 exit_status: N
 ```
 
-Eligibility requires `unexpected_fd_count=0`,
-`writable_filesystem_fd_count=0`, zero external-write successes, and equal
-before/after protected inventories. The fd-table evidence must enumerate
-exactly 0/1/2 with the profile's roles and targets. An attestation is supporting
-evidence, not a substitute for the kernel-enforced mount namespace.
+Eligibility first requires the referenced receipt to have
+`barrier_status="ready"` and to occur in the referenced journal manifest's
+receipt slot. A refused receipt may be preserved only in the journal and typed
+`scheduler_failure_evidence`; it cannot support an attestation, proposal,
+assessment, evidence bundle, or local pass. Eligibility additionally requires
+`unexpected_fd_count=0`, `writable_filesystem_fd_count=0`, zero external-write
+successes, and exact one-to-one `pre-dispatch`/`post-worker` inventories for
+every observation assigned to this exact dispatch. Each before/after root identity
+and protected content is equal; only this dispatch's declared private output
+root may change. The fd-table evidence must enumerate exactly 0/1/2 with the
+profile's roles and targets. An attestation is supporting evidence, not a
+substitute for the kernel-enforced mount namespace.
 
 ### 6.8 Findings and complete assessor ownership
 
@@ -880,12 +1129,15 @@ assessor_context_ref: REF
 proposal_ref: REF (artifact_type="proposal")
 assessment_declaration_ref: REF (artifact_type="assessment_declaration")
 assessor_output_inventory_ref: REF (artifact_type="read_inventory")
+check_declaration_refs: sorted nonempty array[REF]
+    (artifact_type="check_declaration")
 check_results: sorted nonempty array[CHECK_RESULT] by check_id
 finding_refs: sorted array[REF]
 finding_inventory_sha256: H
 finding_count: N
 open_blocking_count: N
 local_assessment: "pass" | "blocked" | "error"
+error_reason: T | null
 predecessor_assessment_ref: NULLREF
 ```
 
@@ -916,10 +1168,33 @@ array must contain exactly `finding_count` records and exactly the sorted
 `finding_refs`; missing, extra, swapped, reordered, unreferenced, or
 non-finding bytes in the findings namespace refuse packaging. The declaration,
 whole-leaf inventory, and manifest must agree on every check and finding.
-`pass` requires
-`open_blocking_count=0`, all required checks present/pass, and complete prior
-lineage. A reassessment references its predecessor and carries every prior
-finding either unchanged or with a valid resolution; dropping one is invalid.
+
+Packaging is one exact field mapping, not a judgment step:
+
+1. Static program/contract/work-item/assignment/context/proposal fields equal
+   the closed assessment declaration and the assessor assignment/context.
+2. Each declared check path wraps exactly one `check_declaration`; each such
+   declaration maps to one `check_declaration_ref` and one `CHECK_RESULT` whose
+   id/status are copied and whose evidence REF is the wrapped evidence path.
+   There are no other check declarations or results.
+3. Each declared finding path maps to exactly one `section_finding.v1` under
+   the field-by-field rule above. The resulting sorted refs, exact inventory
+   hash, count, and open-blocking count are purely recomputed.
+4. `predecessor_assessment_ref` and `error_reason` are copied exactly.
+5. The disposition is derived once: `error` iff `error_reason` is non-null;
+   any check with status `error` requires that condition. Otherwise `blocked`
+   iff a check fails or an open finding has `blocks_local_pass=true`.
+   Otherwise `pass` requires every contract-required check exactly once with
+   status `pass`, zero open blockers, and complete prior lineage. A missing or
+   duplicate required check is invalid rather than silently classified.
+6. `declared_disposition` must equal that derived value, and
+   `local_assessment` copies it. No packager-selected alternative is valid.
+
+A reassessment references its predecessor and carries every prior finding
+either unchanged or with a valid resolution; dropping one is invalid. Thus one
+frozen assessment leaf has exactly one valid manifest. Changing disposition,
+check status/evidence, predecessor, finding membership/count, or error reason
+without changing the corresponding assessor bytes always refuses packaging.
 
 ### 6.9 Section, boundary, comparison, and scope results
 
@@ -934,6 +1209,8 @@ builder_assignment_ref: REF
 assessor_assignment_ref: REF
 builder_launcher_receipt_ref: REF
 assessor_launcher_receipt_ref: REF
+builder_journal_manifest_ref: REF
+assessor_journal_manifest_ref: REF
 builder_context_ref: REF
 assessor_context_ref: REF
 builder_sandbox_attestation_ref: REF
@@ -945,14 +1222,19 @@ test_manifest_ref: REF (artifact_type="test_manifest")
 test_result_refs: sorted array[REF] (artifact_type="test_result")
 invariant_results: sorted nonempty array[CHECK_RESULT] by check_id
 local_assessment: "pass" | "blocked" | "error"
+error_reason: T | null
 resource_metrics: sorted array[METRIC] by metric_id
 dependency_snapshot_ref: REF (artifact_type="read_inventory")
 staleness_input_refs: sorted nonempty array[REF]
 ```
 
-Its launcher receipts must resolve through the same principal registry and
-exact assignments. Its local assessment must equal the assessor manifest and
-cannot be supplied by the builder or packager.
+Its launcher receipts must both have `barrier_status="ready"`, resolve through
+the same principal registry and exact assignments, and occupy the receipt slot
+of their exact journal manifests. Both attestations bind those same manifests.
+A refused, unexported, duplicated, or wrong-sequence receipt makes the bundle
+invalid regardless of its local-assessment value. Its local assessment and
+error reason must equal the assessor manifest and cannot be supplied by the
+builder or packager.
 
 `boundary_impact_report.v1` payload keys:
 
@@ -1060,7 +1342,8 @@ record_count: N
 
 The root enumerates **every** bootstrap content record, principal registry,
 program, contract, context, content record, authorization, assignment, launch
-receipt, sandbox profile/attestation, native inventory, finding, assessment,
+receipt, scheduler journal manifest, sandbox profile/attestation, native
+inventory plan/inventory, finding, assessment,
 evidence bundle, boundary report, comparison report, work graph, and final
 scope record for the source. The validator walks all references, requires one
 reachable acyclic graph, rejects unreachable extras, requires
@@ -1135,45 +1418,46 @@ bootstrap bytes + principal registry -> program -> BUILD_STARTED
     -> request hash -> Codex verdict -> integration
 ```
 
-The validator assigns and checks these construction stages; every `REF` must
-point to a lower stage, except the root's terminal inventory of already built
-records:
+The revision-3 macro-stage table is replaced by one exact reference-derived
+total order. Coarse phases are explanatory only and never participate in
+validity.
 
-| stage | records/data constructed |
-| --- | --- |
-| 0 | raw bootstrap bytes and owner-enrolled registry source |
-| 1 | bootstrap content records and principal registry |
-| 2 | program, then existing `BUILD_STARTED` event binding |
-| 3 | prerequisite content records, sandbox profiles, and native-before inventories |
-| 4 | section contracts |
-| 5 | work graph |
-| 6 | builder contexts |
-| 7 | builder launcher authorizations |
-| 8 | builder assignments |
-| 9 | builder launcher receipts, frozen output packaging/proposals, and native-after inventories |
-| 10 | builder sandbox attestations |
-| 11 | assessor contexts |
-| 12 | assessor launcher authorizations |
-| 13 | assessor assignments |
-| 14 | assessor launcher receipts, frozen output/content packaging, and native-after inventories |
-| 15 | assessor sandbox attestations and packaged finding records |
-| 16 | assessment manifests |
-| 17 | section evidence bundles |
-| 18 | final scope over project changes and realized system paths |
-| 19 | boundary report and any source-local comparison report |
-| 20 | evidence root over stages 1–19, excluding itself |
-| 21 | candidate commit containing fixed scope/root envelopes |
-| 22 | ordinary request string/hash and publication event |
-| 23 | independent verdict and existing integration event |
+The validator constructs the record set named by `record_inventory`, adds a
+directed edge `target -> source` for every internal `REF` in `source`, and adds
+the same kind of edge from each inventory member to the terminal evidence root.
+It then runs this canonical Kahn ordering:
 
-For retries or reassessments the ordering key is `(attempt, stage)`; every prior
-attempt is lower than every record in the next attempt. A record may not point
-to a peer in the same key. Set membership is expressed by the later manifest or
-root, never by reciprocal references.
+1. Reject an unresolved, ill-typed, self, cross-program, or prohibited external
+   reference before ordering.
+2. Initialize `ready` to every node with zero unresolved incoming reference
+   dependencies.
+3. Select exactly one node at a time by the bytewise key
+   `(schema_version UTF-8, record_id)` from `ready`, assign the next contiguous
+   `construction_ordinal` beginning at zero, remove its outgoing edges, and
+   repeat.
+4. Reject if nodes remain after `ready` becomes empty. Reject if any internal
+   REF target's ordinal is not strictly less than its source's ordinal.
+5. Require the evidence root to have the final ordinal and to enumerate every
+   preceding record exactly once. The root never inventories itself.
 
-Stage 19 comparison inputs may reference earlier already sealed *external* roots
-under the explicit exception in §6.1. No stage 0–20 payload contains a stage
-21–23 id, object digest, or back-reference.
+Because one node is selected at a time, there are no peers. The explicit edge
+from prerequisite `source_snapshot` and `read_inventory` content records places
+them before every profile that consumes them. `parent_content_refs` places
+parent content before child content. `upstream_contract_refs` places each
+dependency contract before its consumer regardless of schema equality or DAG
+depth. Authorization -> assignment -> receipt -> journal-manifest references,
+assessment lineage, final-scope references, and every other same-schema chain
+are handled identically; no schema-specific same-stage exception exists.
+
+Raw blob bytes are frozen before their wrapping content record and are verified
+by size/hash rather than modeled as REF nodes. Existing Council events, the base
+Git commit, and the comparison report's two previously sealed external roots
+are the only external terminals; each uses its explicit §6.1 verifier and is
+not assigned an ordinal in the new root. No record payload contains the later
+candidate-commit, ordinary-request, independent-verdict, or integration-event
+identity. Retries and reassessments are ordered by their explicit predecessor
+and journal-chain references, never by an inferred wall clock or a coarse
+attempt/stage tuple.
 
 No speed, quality, completeness, or cost claim is valid without a verified root
 and, where applicable, a verified comparison report.
@@ -1300,11 +1584,15 @@ mode edits. Directories are fsynced after namespace changes. Failure before the
 atomic operation leaves the old path intact; a later failure aborts the entire
 disposable candidate and never publishes a partial tree.
 
-Before and after assembly the trusted host verifies exhaustive candidate,
-protected, integration, and common-Git native inventories; only declared
-candidate path identities may differ. Any drift, alias, external modification,
-semantic/text conflict, or unexpected Git metadata change aborts without
-choosing a winner.
+Before and after assembly the trusted host realizes every
+`pre-assembly`/`post-assembly` pair required by the exact native-inventory plan,
+including candidate, integration checkout, common Git, Council, anchors, other
+leaves, canonical evidence, hidden suites, and every visible runtime root. Only
+declared candidate path identities may differ. Root-id/locator/native identity
+must still match the plan, all required phases must occur exactly once, and the
+complete cross-root native-id comparison must remain alias-free. Any omission,
+root swap, drift, alias, external modification, semantic/text conflict, or
+unexpected Git metadata change aborts without choosing a winner.
 
 The assembled bytes are re-read, hashed into `ACTUAL_CHANGE`, compared with the
 final scope, committed by the normal parent builder, and subjected to the full
@@ -1672,7 +1960,7 @@ must arise from real Coliseum use and route as bounded audited slices.
 56. no improvement claim emitted when confidence/coverage is insufficient;
 57. full existing suite remains green.
 
-### Revision-3 construction and authority closure
+### Revision-4 construction and authority closure
 
 58. construct one minimal instance of every v1 record from raw bytes in the
     specified topological order; ids and bytes are stable across rebuilds;
@@ -1696,7 +1984,25 @@ must arise from real Coliseum use and route as bounded audited slices.
     gap, storage-owner/mode mismatch, or repeated-field mismatch refuses;
 67. recompute the exact finding inventory across permuted, omitted, extra,
     predecessor-substituted, and unrelated leaf files; only one canonical
-    complete tuple inventory is accepted.
+    complete tuple inventory is accepted;
+68. construct a sandbox profile with a nonempty read-only mount list, a
+    parent/child content chain, and a two-contract dependency chain; the
+    canonical Kahn order places every target strictly earlier, while direct and
+    indirect back-edges refuse;
+69. inventory two equal-shaped native roots and prove that swapping/omitting a
+    root, replacing its handle, colliding relative paths across namespaces, or
+    mutating each required integration/common-Git/protected root independently
+    refuses;
+70. omit, add, duplicate, reorder, cross-link, writer-substitute, or gap an
+    authorization/assignment/receipt journal triple; root validation refuses
+    every self-hashed record not present exactly once in the unbroken typed
+    manifest chain;
+71. hold every other field constant between ready/refused receipts; the refused
+    receipt cannot support an attestation, proposal, assessment, evidence
+    bundle, or local pass and remains available only as failure evidence;
+72. freeze one assessor leaf and construct its unique manifest; changing only
+    disposition, check id/status/evidence, predecessor, finding membership or
+    count, or error reason refuses without changed assessor declaration bytes.
 
 ## 17. Completion gates
 
