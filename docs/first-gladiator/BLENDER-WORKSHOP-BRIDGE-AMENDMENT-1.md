@@ -117,11 +117,27 @@ must:
    file, or parent receives that SID's write ACE; apply a low mandatory-integrity
    label to the current job leaf so the lowbox can write there, while input DACLs
    remain read-only; and
-9. immediately before the denial probe, seal the current leaf's protected DACL by
-   removing the interactive user's write/create/delete rights for the rest of the
-   child sequence. The guard must already hold the exact broker rights it needs;
-   the host telemetry adapter receives read-only access. No later ACL broadening is
-   permitted before terminal validation.
+9. immediately before the denial probe, seal the current leaf and every staged
+   child with an exact, non-inheriting protected DACL. The owner remains the exact
+   queried interactive-user SID, but the DACL contains an `OWNER RIGHTS`
+   (`S-1-3-4`) deny ACE for `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, file/directory
+   create, write, append, delete-child, write-attributes, and write-EA. Presence of
+   that SID suppresses the owner's otherwise implicit `WRITE_DAC`. The DACL removes
+   those same rights from the interactive SID and every enabled SID in its token,
+   including an enabled Administrators group; contains no inherited, creator-owner,
+   or broad user/group write ACE; grants `SYSTEM` the closed broker-control rights;
+   grants the job lowbox only its section-4.8 role rights; and grants the interactive
+   telemetry identity read/traverse only. The guard must already hold the exact
+   write/delete/security broker handles it needs before sealing. It queries back the
+   owner SID, `SE_DACL_PRESENT | SE_DACL_PROTECTED` control flags, canonical ACE
+   order, every SID/mask/type/inheritance bit, mandatory label, and effective access
+   under a duplicated interactive token. That host token must be medium-integrity,
+   non-elevated, and contain no `SeTakeOwnershipPrivilege`, `SeRestorePrivilege`,
+   or `SeSecurityPrivilege`; presence or indeterminate privilege/elevation state
+   refuses. Any inherited/unknown ACE, owner drift, remaining `WRITE_DAC`/
+   `WRITE_OWNER`, or effective create/write/replace/delete/security-descriptor right
+   refuses before a child starts. No DACL or owner change is permitted until
+   terminal validation completes.
 
 The host independently requires that `/mnt/c` is the DrvFs view of the same `C:`
 volume. The Windows handle identity is authoritative for staging. Linux descriptor
@@ -305,26 +321,75 @@ status
 above; `job_id` equals the recomputed job and every launch/result record; and
 `status` is `passed` only after both children exit under the required token and all
 access probes pass. `guard` has exactly
-`{version,source_sha256,binary_sha256,compiler_identity_sha256}`. `staging` has
-exactly `{root_volume_serial_number,root_file_id_hex,job_file_id_hex}`.
+`{version,source_sha256,binary_sha256,compiler_identity_sha256,
+denial_probe_source_sha256,denial_probe_binary_sha256,
+sid_derivation_algorithm,sid_derivation_algorithm_sha256}`. The six SHA fields are
+64 lowercase hex and equal the host's reviewed source/binary/compiler/probe
+allowlist. `sid_derivation_algorithm` is the literal
+`windows.DeriveAppContainerSidFromAppContainerName.v1`; its SHA is the digest of
+the canonical UTF-8, no-newline object
+`{api,appcontainer_name,schema_version}`, where `api` is
+`DeriveAppContainerSidFromAppContainerName`, `appcontainer_name` is the report's
+exact derived name, and `schema_version` is
+`blender.appcontainer_sid_derivation.v1`. `staging` has exactly
+`{root_volume_serial_number,root_file_id_hex,job_file_id_hex}`.
 `token_policy` has exactly
 `{appcontainer_name,appcontainer_sid,capability_sids,network_capabilities,
 integrity_level,write_restricted,privileges,handle_inheritance_policy,
-environment_policy}`. Both arrays for capabilities and privileges are empty;
-integrity is `low`; `write_restricted` is true; and the two policy enums are the
-section-9 literals. `worker` and `inspector` each have exactly
+environment_policy}`. The capability, network-capability, and privilege arrays are
+empty; integrity is `low`; `write_restricted` is true; and the two policy enums are
+the section-9 literals. `worker` and `inspector` each have exactly
 `{launch_attestation_id,argument_array_sha256,process_id,appcontainer_sid,
 token_information_sha256,access_probe_sha256,job_object_profile,status}`;
 process id is nonidentity operational telemetry, all SHA fields and attestation ids
 are 64 lowercase hex, both SIDs equal the token policy, job-object profile is
 `blender-bounded-child.v1`, and status is `passed`.
 
+Each child `access_probe_sha256` is the digest of that child's canonical UTF-8,
+no-newline `blender.protected_access_probe.v1` record. That record has exactly
+`{schema_version,job_id,child_role,appcontainer_sid,token_information_sha256,
+probe_source_sha256,probe_binary_sha256,entries}`; the probe identities equal the
+two `guard` fields, `child_role` is respectively `worker` or `inspector`, and
+`entries` is the complete array sorted by `(role,operation)` with each exact entry
+`{role,operation,status,error_code}`. `status` is `allowed` only for the declared
+current-job probe and `denied` for every required denial; `error_code` is the
+observed nonnegative Windows code. Missing, duplicated, reordered, unknown, or
+unprobed roles refuse.
+
+`protected_access_matrix_sha256` is not an independent assertion. It must equal
+SHA-256 over integrated canonical JSON UTF-8 with no newline of exactly:
+
+```json
+{"inspector_access_probe_sha256":"<inspector.access_probe_sha256>","schema_version":"blender.protected_access_matrix.v1","worker_access_probe_sha256":"<worker.access_probe_sha256>"}
+```
+
+The bracketed strings are replaced by the two exact report values before hashing.
+Swapping roles, mixing a stale probe, changing either child digest, or supplying an
+unrelated top-level digest therefore refuses deterministically.
+
 The native guard's fixed protocol returns the token-information and access-probe
 records over a bounded inherited pipe. The host independently revalidates the
-guard source/binary/compiler allowlist, launch attestations, SIDs, array emptiness,
-token flags, access matrix, and child exit before constructing the report. A
-missing, malformed, mixed-profile, mixed-job, stale, or failed report prevents the
-manifest. Neither report nor manifest may be interpreted without the other.
+guard source/binary/compiler and denial-probe source/binary allowlists, the exact
+SID-derivation preimage, launch attestations, SIDs, array emptiness, token flags,
+both child access-probe preimages, their defined aggregate, and child exit before
+constructing the report. A missing, malformed, wrong-allowlist, mixed-profile,
+mixed-job, stale, or failed report prevents the manifest. Neither report nor
+manifest may be interpreted without the other.
+
+This normative report fixture closes every key and relation. Repeated values are
+fixture data, not host assertions. Its SID-derivation preimage hashes to
+`7eeaadd8e88cd300cef0ae438d62f9ad83c09cd047689124dde10bda12e74043`;
+the canonical worker/inspector aggregate preimage hashes to
+`6ec732a93b53b49e7b80609387478cd2fad41bb66e692ff718419d7ed5964602`:
+
+```json
+{"execution_profile":"fixed-windows-staging.v1","guard":{"binary_sha256":"1111111111111111111111111111111111111111111111111111111111111111","compiler_identity_sha256":"1212121212121212121212121212121212121212121212121212121212121212","denial_probe_binary_sha256":"1414141414141414141414141414141414141414141414141414141414141414","denial_probe_source_sha256":"1313131313131313131313131313131313131313131313131313131313131313","sid_derivation_algorithm":"windows.DeriveAppContainerSidFromAppContainerName.v1","sid_derivation_algorithm_sha256":"7eeaadd8e88cd300cef0ae438d62f9ad83c09cd047689124dde10bda12e74043","source_sha256":"1010101010101010101010101010101010101010101010101010101010101010","version":"windows-native-guard.v1"},"inspector":{"access_probe_sha256":"3333333333333333333333333333333333333333333333333333333333333333","appcontainer_sid":"S-1-15-2-111111111-222222222-333333333-444444444-555555555-666666666-777777777","argument_array_sha256":"3131313131313131313131313131313131313131313131313131313131313131","job_object_profile":"blender-bounded-child.v1","launch_attestation_id":"3030303030303030303030303030303030303030303030303030303030303030","process_id":102,"status":"passed","token_information_sha256":"3232323232323232323232323232323232323232323232323232323232323232"},"job_id":"7070707070707070707070707070707070707070707070707070707070707070","protected_access_matrix_sha256":"6ec732a93b53b49e7b80609387478cd2fad41bb66e692ff718419d7ed5964602","sandbox_profile":"windows-appcontainer-job-lowbox.v1","schema_version":"blender.sandbox_execution_report.v1","staging":{"job_file_id_hex":"17171717171717171717171717171717","root_file_id_hex":"16161616161616161616161616161616","root_volume_serial_number":1},"status":"passed","token_policy":{"appcontainer_name":"AgentColiseum.BlenderWorker.v1.7070707070707070707070707070707070707070707070707070707070707070","appcontainer_sid":"S-1-15-2-111111111-222222222-333333333-444444444-555555555-666666666-777777777","capability_sids":[],"environment_policy":"closed-blender-lowbox-env.v1","handle_inheritance_policy":"stdio-pipes-only.v1","integrity_level":"low","network_capabilities":[],"privileges":[],"write_restricted":true},"worker":{"access_probe_sha256":"2323232323232323232323232323232323232323232323232323232323232323","appcontainer_sid":"S-1-15-2-111111111-222222222-333333333-444444444-555555555-666666666-777777777","argument_array_sha256":"2121212121212121212121212121212121212121212121212121212121212121","job_object_profile":"blender-bounded-child.v1","launch_attestation_id":"2020202020202020202020202020202020202020202020202020202020202020","process_id":101,"status":"passed","token_information_sha256":"2222222222222222222222222222222222222222222222222222222222222222"}}
+```
+
+It is exactly 2751 canonical UTF-8 bytes with no newline and SHA-256
+`a4310fdaf5ed23b8f9fba2f050626fa46a2ce12cd2ca1e2ea322e25e581e484c`.
+Independent construction must reproduce the SID preimage, aggregate preimage,
+report length, and all three digests without trusting the document literals.
 
 Starting from section 10's normative fixed vector, replacing only the two
 renderer values produces 3577 canonical UTF-8 bytes and SHA-256:
@@ -340,23 +405,27 @@ additive execution fields*. Adding only
 UTF-8 bytes with SHA-256
 `9392c5d4f2fea469c17d1bfa9bd42d457c9b559ac4adeb259c39977e7124c55e`.
 That intermediate value is no longer a complete accepted manifest because it lacks
-`sandbox_execution`. For the normative revision-2 fixture, add exactly:
+`sandbox_execution`. For the normative revision-3 fixture, add exactly the binding
+for the complete report above:
 
 ```json
-{"byte_count":1300,"relative_path":"sandbox-execution-report.json","sandbox_profile":"windows-appcontainer-job-lowbox.v1","schema_version":"blender.sandbox_execution_report.v1","sha256":"7373737373737373737373737373737373737373737373737373737373737373"}
+{"byte_count":2751,"relative_path":"sandbox-execution-report.json","sandbox_profile":"windows-appcontainer-job-lowbox.v1","schema_version":"blender.sandbox_execution_report.v1","sha256":"a4310fdaf5ed23b8f9fba2f050626fa46a2ce12cd2ca1e2ea322e25e581e484c"}
 ```
 
 as the top-level `sandbox_execution` value. The repeated size/digest are fixture
 data, not an environment assertion. Starting from the original section-10 vector,
 making the two renderer corrections, adding `execution_profile`, and adding that
 exact object produces exactly 3898 canonical UTF-8 bytes with SHA-256
-`7059f24adc39dd45ffd3112c0109303a306f6d9e3c2d997810dffee9724bcfab`.
+`9cd3ce9de5b9964912a2ba8ebfb674a897334452fb3837d6a9355b417fd86bf6`.
 Independent construction and reload must reproduce those literals. This three-step
 lineage prevents confusing the renderer correction, the superseded revision-1
-staging schema, and the complete sandbox-bound schema.
+staging schema, the revision-2 underbound sandbox report, and the complete
+sandbox-bound schema.
 
 Both the old 3588-byte / `dfc2f0...e457` renderer vector and the 3624-byte /
-`9392c5...c55e` staging-only vector remain historical rejection fixtures.
+`9392c5...c55e` staging-only vector remain historical rejection fixtures. The
+revision-2 3898-byte / `7059f24a...bcfab` vector is also rejected because its
+bound report schema cannot carry the required probe and SID-derivation identities.
 
 ## 9. Native AppContainer process containment
 
@@ -438,10 +507,15 @@ through its held identity refuses Blender. Unit tests may use fake roots; the op
 same-host preflight must exercise the real protected identities without modifying
 them.
 
-The denial probe also attempts mutation from a second ordinary process running as
-the interactive user while the sealed child phase is active; the staging job's
-protected DACL and retained handles must deny it. This prevents a different
-same-user process from injecting an output that happens to match a later pathname.
+The denial probe also attempts mutation from a second ordinary process running
+with a duplicate of the guard's pre-seal interactive token while the sealed child
+phase is active. For every staged role it first attempts `SetSecurityInfo`-style
+DACL broadening and owner replacement, then create, replace, write, delete, and
+delete-child. Every security-descriptor and data mutation must fail. The guard
+queries the descriptor and effective token access again afterward and requires
+byte-equivalent owner/control/ACE state. This proves the `OWNER RIGHTS` restriction
+and protected DACL prevent a different same-user process from restoring its own
+write access and injecting a later output.
 
 The guard retains all section-4 and section-5 handles and uses a Windows Job Object
 with:
@@ -507,17 +581,21 @@ The integrated section-12 matrix remains required. Add ordinary tests proving:
 12. a Cycles/1280x720 manifest with a wrong execution or sandbox profile is
     rejected;
 13. the sandbox report rejects wrong SID, capabilities, privileges, token flags,
-    access matrix, guard/compiler/binary identity, job, launch, and mixed profile;
+    guard/compiler/binary identity, denial-probe source or binary, SID-derivation
+    algorithm or digest, unequal/stale/mixed child probes or aggregate access
+    matrix, job, launch, and mixed profile;
 14. a harmless fake child under the actual lowbox token may write its declared
     current-job probe but every sibling, parent, repository UNC, canonical, Council,
     repository-source, user-profile, public, temp, registry, network, shell, and
     process-escape probe is denied, and protected/private read probes are denied;
-15. after child-phase ACL sealing, a second interactive-user process cannot create,
-    replace, or delete a staging input, output, telemetry file, or undeclared file;
+15. after child-phase ACL sealing, a second interactive-user process cannot broaden
+    the DACL, replace the owner, create, write, replace, or delete a staging input,
+    output, telemetry file, or undeclared file, and the exact descriptor is unchanged;
 16. an interactive-user, low-integrity-only, Job-Object-only, or unavailable-token
     fallback is refused before Blender;
-17. complete revision-2 manifest construction and reload reproduce the 3898-byte
-    / `7059f24a...bcfab` fixture; and
+17. complete revision-3 report and manifest construction and reload reproduce the
+    2751-byte / `a4310fda...e484c` report and 3898-byte /
+    `9cd3ce9d...6bf6` manifest fixtures, while the revision-2 vector refuses; and
 18. canonical run bundles and non-protocol Council content remain byte-identical
     across the opt-in smoke execution.
 
