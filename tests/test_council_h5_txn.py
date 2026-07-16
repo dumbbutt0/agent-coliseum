@@ -77,6 +77,38 @@ def test_renew_requires_owner(env):
     locking.release(lock)
 
 
+def test_expired_lease_cannot_be_renewed(env):
+    """Once recovery may act on expiry, the old owner cannot revive the
+    same token and race the rollback decision."""
+    root, *_ = env
+    lock = locking.acquire(root, "lock-expired", "codex", RID,
+                           lease_seconds=-1)
+    with pytest.raises(LockHeld, match="expired or invalid"):
+        locking.renew(lock, lease_seconds=99999)
+    assert locking.lease_is_expired(
+        locking.read_lock(root, "lock-expired")) is True
+    locking.release(lock)
+
+
+def test_renew_fails_if_lease_expires_after_initial_read(env, monkeypatch):
+    """The post-move check closes the check/use boundary: a lease that was
+    live at the first read cannot be revived after it expires mid-renewal."""
+    root, *_ = env
+    lock = locking.acquire(root, "lock-boundary", "codex", RID,
+                           lease_seconds=60)
+    real_check = locking.lease_is_expired
+    checks = iter((False, True))
+    monkeypatch.setattr(locking, "lease_is_expired",
+                        lambda holder: next(checks))
+    with pytest.raises(LockHeld, match="expired during renewal"):
+        locking.renew(lock, lease_seconds=99999)
+    monkeypatch.setattr(locking, "lease_is_expired", real_check)
+    holder = locking.read_lock(root, "lock-boundary")
+    assert holder is not None
+    assert holder["owner_token"] == lock.owner_token
+    locking.release(lock)
+
+
 def test_second_acquire_refused(env):
     root, *_ = env
     lock = locking.acquire(root, "lock-n1", "codex", RID)
@@ -137,6 +169,44 @@ def test_recover_rolls_back_orphaned_claim_txn(env):
     assert locking.read_lock(root, RID) is None
     # idempotent: a second recover is a no-op
     assert txn.recover(root, make_cfg(repo, root, role="codex")) == []
+
+
+def test_recovery_expiry_cannot_be_reversed_by_owner_renewal(
+        env, monkeypatch):
+    """Reproduce the audit boundary: once recovery observes an expired
+    claim, the old owner cannot revive that token before rollback."""
+    root, repo, head, cfg = env
+    _publish(root, cfg, repo, head)
+    lock = locking.acquire(root, RID, "codex", RID, kind="claim",
+                           lease_seconds=-1)
+    os.rename(storage.safe_request_path(root, "ready", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
+                      {"owner_token": lock.owner_token,
+                       "prior_claimed_count": 0})
+    t.mark("locked")
+    t.mark("moved")
+
+    real_check = locking.lease_is_expired
+    attempted = []
+
+    def observe_expiry_then_attempt_renew(holder):
+        if not attempted:
+            attempted.append(True)
+            with pytest.raises(LockHeld, match="expired or invalid"):
+                locking.renew(lock, lease_seconds=99999)
+        return real_check(holder)
+
+    monkeypatch.setattr(locking, "lease_is_expired",
+                        observe_expiry_then_attempt_renew)
+    healed = txn.recover(root, make_cfg(repo, root, role="codex"))
+
+    assert attempted == [True]
+    assert (t.txn_id, "back") in healed
+    assert os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert not os.path.exists(storage.safe_request_path(
+        root, "claimed", RID))
+    assert locking.read_lock(root, RID) is None
 
 
 def test_recover_rolls_forward_committed_claim(env):

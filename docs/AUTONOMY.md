@@ -330,7 +330,10 @@ point). `renew()` is ownership-preserving: it first CONFIRMS ownership by
 reading (a lock that is not ours is left completely untouched and renew
 fails closed — a stale owner never disturbs a replacement), then moves only
 its OWN lock aside and restores it with a non-clobbering `O_EXCL` create; a
-lock re-acquired in the brief swap vacancy is never overwritten. No path
+lock re-acquired in the brief swap vacancy is never overwritten. Renewal is
+permitted only while the existing lease remains valid, with expiry checked
+again after the ownership-preserving move; an expired owner cannot resurrect
+its token after recovery becomes eligible to act. No path
 overwrites another holder's lock. A wrong or absent token is a no-op, so a
 reused PID cannot steal a live lock — authority is the random token, not the
 pid. Expiry only makes a lock ELIGIBLE for the existing logged clearance

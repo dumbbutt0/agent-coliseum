@@ -187,6 +187,12 @@ def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
     if not isinstance(holder, dict) or \
             holder.get("owner_token") != lock.owner_token:
         raise LockHeld("renew refused — not the lock owner")
+    # Expiry is a loss of renewal authority, not a pause button.  Allowing
+    # an expired owner to resurrect its lease would let claim recovery
+    # observe expiry and begin rollback while that same owner concurrently
+    # makes the lease live again.
+    if lease_is_expired(holder) is not False:
+        raise LockHeld("renew refused — lease is expired or invalid")
     # (2) grab OUR lock aside (single-winner rename; compare-and-delete keeps
     #     it ours between the read above and here) and update its lease
     aside = f"{lock.path}.renew.{lock.owner_token}"
@@ -202,6 +208,12 @@ def renew(lock: Lock, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
         # clobbering a replacement) and fail closed.
         _restore_aside(aside, lock.path)
         raise LockHeld("renew refused — ownership changed during renew")
+    # Recheck after the ownership-preserving move.  If the lease crossed its
+    # boundary between the initial read and this exclusive step, restore the
+    # original lock and fail closed rather than reviving it.
+    if lease_is_expired(body) is not False:
+        _restore_aside(aside, lock.path)
+        raise LockHeld("renew refused — lease expired during renewal")
     body["lease_expires_utc"] = _lease_expiry(lease_seconds)
     try:
         placed = _write_lock_excl(lock.path, body)
