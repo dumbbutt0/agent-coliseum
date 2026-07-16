@@ -10,6 +10,12 @@
 > **Priority decision (owner, 2026-07-15):** build one bounded, measured pilot,
 > freeze expansion, then resume Coliseum work through the proven mechanism.
 > This is not an open-ended Council rewrite.
+>
+> **Revision 2:** addresses every reproduced finding in `AUDIT_BLOCKED`
+> `001491-15a91e44`: OS-enforced worker confinement; scheduler-minted distinct
+> principals and assessor-owned complete finding manifests; exact identities
+> and one complete evidence root for every derived record; and a closed
+> exact-path change algebra bound into the ordinary final audit request.
 
 ## 1. Objective
 
@@ -95,7 +101,10 @@ Every implementation and activation must preserve all of these:
 8. Any byte change after an assessment makes that assessment stale.
 9. A section contract cannot widen its event-pinned Section Program or weaken
    policy or an upstream contract.
-10. Section workers cannot write outside mechanically enforced ownership.
+10. Section workers run inside an OS-enforced mount/capability sandbox and can
+    write only a private output leaf and private temporary memory; source,
+    integration, Git metadata, Council state, and all other host paths are
+    read-only or absent.
 11. Parallel work with uncertain conflict status fails closed.
 12. Evidence is canonical data or a content-addressed reference, never a prose
     summary substituted for evidence.
@@ -120,9 +129,9 @@ The existing `tools/council/` package remains the kernel. It continues to own:
 - integration authorization;
 - canonical transactions, leases, and recovery.
 
-No Section Council receives a Council sender credential. Its
-`builder_execution_id` and `assessor_execution_id` are evidence identities,
-not new roles and not authority tokens.
+No Section Council receives a Council sender credential. Its scheduler-minted
+assignments, principal credentials, and launcher receipts are evidence
+identities, not new Council roles and not authority tokens.
 
 ### 4.2 Section Councils
 
@@ -135,11 +144,31 @@ A Section Council is a derived execution unit operating under one immutable
 - adversarial local assessor;
 - evidence packager.
 
-One process may perform several **non-conflicting mechanical** roles, but the
-builder and adversarial assessor identities must differ. Model separation is
-helpful but is not the sole control: exact input identities, separate execution
-contexts, write isolation, and immutable evidence bindings enforce the role
-boundary.
+One process may perform several **non-conflicting mechanical** roles, but never
+the builder and adversarial assessor roles for the same section. Before either
+role starts, the trusted parent scheduler mints a `section_assignment.v1` from
+its event-pinned program. The assignment binds the role, principal credential
+identity, launcher/session receipt, attempt, exact context, sandbox profile,
+workspace, and permitted output leaf. A worker cannot mint, select, or edit its
+assignment.
+
+Builder and assessor assignments must carry different allowlisted
+`principal_id` values and different launcher/session receipts. Unequal opaque
+execution ids alone are explicitly insufficient. In the first model-assisted
+pilot the builder principal is the existing Claude builder context and the
+assessor principal is a separately launched Codex assessor context. A
+deterministic assessor may replace the model only where the assessment profile
+contains no judgment; that result is described as deterministic validation,
+not independent adversarial review.
+
+The assessor writes one sealed `section_assessment_manifest.v1` into an output
+root that is unavailable to the builder. That manifest enumerates the complete
+finding set, check set, input/output digests, and predecessor reassessment
+lineage. The packager inventories the whole sealed assessor root and recomputes
+the manifest; it cannot select favorable findings. Model separation is helpful
+but not the sole control: scheduler-owned assignments, distinct principals,
+separate execution contexts, OS write isolation, complete root inventories,
+and immutable evidence bindings enforce the role boundary.
 
 ### 4.3 Boundary checks
 
@@ -189,259 +218,597 @@ protocol amendment is justified by measured pilot results.
 
 ## 6. Canonical derived records
 
-All records use strict JSON, exact key sets, bounded strings and lists, safe
-repository-relative paths, duplicate-key rejection, and canonical JSON. Every
-digest below is lowercase SHA-256 hex over a domain-separated canonical
-preimage. Operational timestamps are permitted as non-identity metadata only.
+### 6.0 Closed encoding and type algebra
 
-### 6.0 `section_program.v1` and the non-circular root of trust
-
-Domain: `council:section-program:v1`.
-
-Section work starts before the assembled candidate commit and its final audit
-request exist. A Section Contract therefore **must not** bind a future
-`request_payload_hash` or future target commit; doing so would create a hash
-cycle. The pre-build root is instead:
-
-1. deterministically construct `section_program.v1` in memory from the planned
-   request id, repository, current clean base commit, execution mode, complete
-   proposed section declarations (ids, ownership, dependency edges, and
-   budgets), and schema/profile versions; the program does not contain
-   contract ids or its own hash;
-2. compute `section_program_hash` under the domain above;
-3. record an ordinary existing `BUILD_STARTED` whose payload contains that
-   exact hash, mode, and base commit before source work begins;
-4. make every Section Contract bind the resulting `BUILD_STARTED` event id,
-   event hash, and `section_program_hash`.
-
-The program object is then persisted as derived build evidence. Its bytes must
-match the event-pinned hash. Section Contracts and the full work graph are
-derived afterward and bind that program, so no identity is circular. The event
-grants no new authority; it authenticates the builder's declared plan and base
-through the existing append-only chain.
-
-After assembly, the ordinary final audit request binds the finished commit and
-its own `request_payload_hash` exactly as today. That commit contains or
-content-addresses the section evidence bundles. Binding therefore flows in one
-direction with no cycle:
+All HSC records use the existing strict JSON parser and canonical JSON. Every
+top-level record has **exactly three keys**:
 
 ```text
-BUILD_STARTED -> section program -> contracts/work -> final commit
-      -> ordinary audit request -> independent verdict -> integration
+{"schema_version": V, ID_FIELD: H, "payload": OBJECT}
 ```
 
-If a work need appears outside the pinned program, the scheduler escalates. It
-does not amend the program silently. A new/widened program requires a fresh
-source lineage authorized under the existing scope rules.
-
-### 6.1 `section_contract.v1`
-
-Domain: `council:section-contract:v1`.
-
-Identity rule:
+For the domain and `ID_FIELD` assigned in §6.1:
 
 ```text
-section_contract_id = domain_hash(
-    "council:section-contract:v1",
-    the exact contract object with section_contract_id omitted
+record[ID_FIELD] = domain_hash(
+    DOMAIN,
+    {"schema_version": record["schema_version"], "payload": record["payload"]}
 )
 ```
 
-Required fields:
+Missing or extra keys, unknown versions, duplicate keys, a mismatched self-id,
+or a mismatched content-file SHA-256 are refused. A reference is always the
+exact two-key object `{"record_id": H, "content_sha256": H}`. It binds both
+semantic identity and stored bytes. Cross-type use is rejected from the
+referencing field's required schema version.
+
+The schema notation is:
 
 ```text
-schema_version                 = "section_contract.v1"
-section_contract_id            = sha256 hex
-planned_parent_request_id      = ordinary Council request id
-parent_build_event_id          = exact BUILD_STARTED event id
-parent_build_event_hash        = exact BUILD_STARTED event hash
-section_program_hash           = event-pinned sha256 hex
-base_commit                    = clean 40-hex commit at program creation
-section_id                     = bounded slug
-contract_version               = positive integer
-objective                      = bounded string
-owned_paths                    = nonempty normalized path-pattern list
-readable_paths                 = normalized path-pattern list
-forbidden_paths                = nonempty normalized path-pattern list
-allowed_operations             = nonempty enum list
-forbidden_operations           = nonempty enum list
-upstream_dependencies          = list of dependency ids + exact digests
-consumed_interfaces            = list of interface ids + exact versions/digests
-exported_interfaces            = list of interface ids + exact versions/digests
-required_invariants            = nonempty stable-id list
-required_checks                = nonempty stable-id list
-required_evidence              = nonempty stable-id list
-threat_model                   = nonempty stable-id list
-assessment_profile             = exact profile id + version
-resource_budget                = bounded execution budget object
-executor_policy                = allowed executor classes and model policy
-escalation_rules               = nonempty enum list
-completion_conditions          = nonempty stable-id list
-integration_preconditions      = nonempty stable-id list
+H       lowercase [0-9a-f]{64}
+G       lowercase Git commit [0-9a-f]{40}
+E       Council event id [0-9]{6}-[0-9a-f]{8}
+R       existing Council request slug
+S       [a-z0-9][a-z0-9-]{1,63}
+P       normalized repository-relative path from §7.1
+N       JSON integer, bool excluded, 0 <= N <= declared bound
+B       JSON boolean
+T       bounded nonempty UTF-8 string
+REF     exact {"record_id": H, "content_sha256": H}
+NULLREF JSON null or REF
 ```
 
-Contracts may narrow the event-pinned Section Program but cannot widen it.
-`owned_paths` must be a subset of the program's declared source scope; the
-actual final diff must later be a subset of the ordinary audit request scope.
-Readable access is not write ownership. `forbidden_paths` always includes the
-live Council root, `.git/`, root-owned anchors, canonical run/evidence roots
-unless explicitly read-only, hidden-evaluation material, and all other active
-sections' owned paths.
+All set-like arrays are sorted by their canonical JSON bytes and reject
+duplicates. Ordered arrays contain exact objects with contiguous `ordinal: N`
+starting at zero. Maps are forbidden in record payloads unless their exact key
+set is specified below. Timestamps, PID, host scheduling, queue order, and
+mutable status never appear in these identities. They may be captured in a
+non-authoritative operation log whose content file is inventoried by the root,
+but they cannot satisfy a gate.
 
-### 6.2 `section_work_graph.v1`
-
-Domain: `council:section-work-graph:v1`.
-
-The graph binds one frozen set of contracts. Each work item contains:
+Exact nested value types:
 
 ```text
-work_item_id
-section_contract_id
-dependencies
-read_set
-write_set
-shared_interfaces
-required_audit_levels
-priority
-resource_budget
-status
-execution_identity
+REF_ITEM = {"record_id": H, "content_sha256": H}
+
+FILE_REF = {
+  "path": P, "blob_sha256": H,
+  "git_mode": "100644" | "100755", "kind": "file"
+}
+
+PREDICTED_CHANGE = {
+  "path": P,
+  "allowed_kinds": nonempty sorted subset of
+      ["add", "delete", "modify", "mode", "rename"],
+  "rename_source": P | null,
+  "required": B
+}
+
+ACTUAL_CHANGE = {
+  "path": P,
+  "kind": "add" | "delete" | "modify" | "mode" | "rename",
+  "rename_source": P | null,
+  "blob_before": H | null, "blob_after": H | null,
+  "mode_before": "100644" | "100755" | null,
+  "mode_after": "100644" | "100755" | null
+}
+
+BUDGET = {
+  "max_wall_seconds": N, "max_cpu_seconds": N,
+  "max_output_bytes": N, "max_attempts": N
+}
+
+INTERFACE_REF = {"interface_id": S, "version": N, "digest": H}
+
+CHECK_RESULT = {
+  "check_id": S, "status": "pass" | "fail" | "error",
+  "evidence_ref": REF
+}
+
+METRIC = {
+  "metric_id": S, "availability": "measured" | "estimated" | "unavailable",
+  "unit": S, "value": N | null, "evidence_ref": NULLREF
+}
 ```
 
-`work_item_id` is derived from the planned request id, event-pinned program,
-contract, operation, frozen base commit, and input digests. Wall-clock time,
-queue order, PID, and worker completion order are excluded from identity.
+Symlinks, submodules, special files, directories as write grants, arbitrary
+Git modes, and unbounded maps are not representable in v1.
 
-### 6.3 `section_context_bundle.v1`
+### 6.1 Record registry
 
-Domain: `council:section-context-bundle:v1`.
+| `schema_version` | ID field | Domain |
+| --- | --- | --- |
+| `section_program.v1` | `section_program_id` | `council:section-program:v1` |
+| `section_contract.v1` | `section_contract_id` | `council:section-contract:v1` |
+| `section_work_graph.v1` | `section_work_graph_id` | `council:section-work-graph:v1` |
+| `section_context_bundle.v1` | `section_context_bundle_id` | `council:section-context-bundle:v1` |
+| `section_content_record.v1` | `section_content_record_id` | `council:section-content-record:v1` |
+| `section_assignment.v1` | `section_assignment_id` | `council:section-assignment:v1` |
+| `worker_sandbox_profile.v1` | `worker_sandbox_profile_id` | `council:worker-sandbox-profile:v1` |
+| `worker_sandbox_attestation.v1` | `worker_sandbox_attestation_id` | `council:worker-sandbox-attestation:v1` |
+| `section_finding.v1` | `section_finding_id` | `council:section-finding:v1` |
+| `section_assessment_manifest.v1` | `section_assessment_manifest_id` | `council:section-assessment-manifest:v1` |
+| `section_evidence_bundle.v1` | `section_evidence_bundle_id` | `council:section-evidence-bundle:v1` |
+| `boundary_impact_report.v1` | `boundary_impact_report_id` | `council:boundary-impact-report:v1` |
+| `section_comparison_report.v1` | `section_comparison_report_id` | `council:section-comparison-report:v1` |
+| `final_scope_manifest.v1` | `final_scope_manifest_id` | `council:final-scope-manifest:v1` |
+| `section_evidence_root.v1` | `section_evidence_root_id` | `council:section-evidence-root:v1` |
 
-The context bundle is a reproducible, minimal projection. It records:
+Every payload below has exactly the listed keys and types. References are
+type-checked and must resolve inside the same root unless a field explicitly
+names an existing Council event/Git commit or the comparison report's two
+already sealed external evidence roots. External comparison roots are verified
+by exact id/content SHA-256 and are never made members of the new root, avoiding
+a reference cycle.
 
-- section contract id;
-- planned parent request, `BUILD_STARTED` event, and Section Program bindings;
-- base commit;
-- exact source paths and content digests;
-- exact upstream interface paths and digests;
-- exact policy/protocol excerpts and digests;
-- exact relevant tests and digests;
-- prior finding ids affecting the section;
-- omitted-path categories;
-- bundle digest.
+### 6.2 `section_program.v1` — pre-build root
 
-The bundle stores content-addressed references when practical. It cannot omit
-an affected downstream contract merely to reduce context. Minimality follows
-impact analysis; it does not override completeness.
-
-Builder and assessor context bundles differ. The assessor receives the exact
-contract, base, proposed output, full relevant diff, deterministic results,
-affected upstream/downstream contracts, and prior findings. It does not trust
-the builder's narrative summary.
-
-### 6.4 `section_finding.v1`
-
-Every finding binds:
+Payload keys:
 
 ```text
-finding_id
-audit_level
-severity
-section_contract_id
-affected_implementation_digest
-invariant_id
-evidence_refs
-reproduction
-status
-resolution_id_or_null
-reassessment_id_or_null
+planned_request_id: R
+repository: T
+base_commit: G
+execution_mode: "sequential" | "hierarchical"
+section_declarations: sorted nonempty array of {
+  "section_id": S,
+  "predicted_changes": sorted nonempty array[PREDICTED_CHANGE] by path,
+  "read_inventory_refs": sorted array[REF],
+  "dependency_section_ids": sorted array[S],
+  "budget": BUDGET,
+  "assessment_profile_id": S
+}
+schema_profile_refs: sorted nonempty array[REF]
+root_policy_version: N
 ```
 
-Findings are append-only within an evidence lineage. A corrected output gets a
-new digest and reassessment; it never edits a prior finding away.
+Section declarations reject duplicate paths across sections and dependency
+cycles. The program contains no contract ids and no self-id.
 
-### 6.5 `section_evidence_bundle.v1`
-
-Domain: `council:section-evidence-bundle:v1`.
-
-Required fields:
+Before source work, the HSC wrapper computes and stores the record, then emits
+an existing ordinary `BUILD_STARTED` whose payload includes exactly these HSC
+bindings in addition to the normal objective/scope fields:
 
 ```text
-schema_version
-section_evidence_bundle_id
-section_contract_id
-work_item_id
-planned_parent_request_id
-parent_build_event_id
-parent_build_event_hash
-section_program_hash
-base_commit
-implementation_commit_or_tree_digest
-changed_paths
-diff_digest
-builder_execution_id
-assessor_execution_id
-builder_context_bundle_digest
-assessor_context_bundle_digest
-dependency_snapshot_digest
-test_manifest_digest
-test_result_refs
-deterministic_check_refs
-invariant_results
-finding_refs
-resolution_refs
-local_assessment             = pass | blocked | error
-resource_usage
-chain_event_refs
-staleness_inputs
+"section_program_id": H
+"section_program_content_sha256": H
+"hsc_base_commit": G
+"hsc_execution_mode": "sequential" | "hierarchical"
 ```
 
-`builder_execution_id` and `assessor_execution_id` must be unequal and bind
-separate execution records. `local_assessment=pass` is invalid if any required
-check is missing, any blocking finding is unresolved, any digest mismatches, or
-any staleness input differs from the frozen contract.
+The resulting event grants no new authority. Every child record binds the
+program REF and the exact `BUILD_STARTED` event id/hash. The final audit request
+does not yet exist, so this ordering is non-circular.
 
-### 6.6 `boundary_impact_report.v1`
+### 6.3 `section_contract.v1`
 
-Domain: `council:boundary-impact-report:v1`.
+Payload keys:
 
-The report includes the frozen final diff, changed ownership domains, changed
-interfaces, affected contracts, dependency closure, activated boundary checks,
-conflicts, unresolved/unknown classifications, and required top-level audit
-scope. Unknown impact is blocking.
+```text
+program_ref: REF
+planned_request_id: R
+parent_build_event_id: E
+parent_build_event_hash: H
+base_commit: G
+section_id: S
+contract_version: N (>= 1)
+objective: T
+predicted_changes: sorted nonempty array[PREDICTED_CHANGE] by path
+read_inventory_refs: sorted array[REF]
+forbidden_host_roots: sorted nonempty array[T]
+allowed_operations: sorted nonempty subset of
+  ["analyze", "emit_patch", "emit_report", "run_allowlisted_check"]
+forbidden_operations: sorted nonempty subset of
+  ["council_write", "git_write", "integration_write", "network",
+   "process_escape", "unregistered_output"]
+upstream_contract_refs: sorted array[REF]
+consumed_interfaces: sorted array[INTERFACE_REF] by interface_id
+exported_interfaces: sorted array[INTERFACE_REF] by interface_id
+required_invariant_ids: sorted nonempty array[S]
+required_check_ids: sorted nonempty array[S]
+required_evidence_ids: sorted nonempty array[S]
+threat_ids: sorted nonempty array[S]
+assessment_profile_ref: REF
+budget: BUDGET
+executor_profile_ids: sorted nonempty array[S]
+escalation_rule_ids: sorted nonempty array[S]
+completion_condition_ids: sorted nonempty array[S]
+integration_precondition_ids: sorted nonempty array[S]
+```
 
-### 6.7 `section_comparison_report.v1`
+The contract must equal or narrow its program declaration. Every predicted
+write is an exact file path; there is no write glob or owned directory.
 
-This report compares equivalent sequential and hierarchical pilot workloads.
-It binds both workload identities and records:
+### 6.4 `section_work_graph.v1`
 
-- wall-clock and critical-path duration;
-- total executor runtime;
-- model calls and measured/estimated tokens by role;
-- deterministic tool calls;
-- audit cycles and findings by severity;
-- reproduced and unreproduced findings;
-- escaped defects found later;
-- context bytes/tokens and duplicate-context estimate;
-- human interventions;
-- integration conflicts;
-- stale-work count;
-- cost per accepted section;
-- unavailable measurements and limitations.
+Payload keys:
 
-No speed, quality, or cost claim is valid without this bound comparison.
+```text
+program_ref: REF
+contract_refs: sorted nonempty array[REF]
+work_items: sorted nonempty array by work_item_id of {
+  "work_item_id": H,
+  "section_contract_ref": REF,
+  "operation": "analyze" | "emit_patch" | "emit_report" |
+               "run_allowlisted_check",
+  "dependency_work_item_ids": sorted array[H],
+  "read_inventory_refs": sorted array[REF],
+  "predicted_changes": sorted array[PREDICTED_CHANGE] by path,
+  "shared_interfaces": sorted array[INTERFACE_REF] by interface_id,
+  "required_audit_levels": sorted nonempty subset of
+      ["section", "boundary", "system"],
+  "priority": N,
+  "budget": BUDGET
+}
+```
+
+For each work item, `work_item_id = domain_hash(
+"council:section-work-item:v1", exact work-item object with work_item_id
+omitted plus program_ref)`. The graph is frozen membership only. Execution
+identity and mutable status are forbidden in it.
+
+### 6.5 `section_context_bundle.v1`
+
+Payload keys:
+
+```text
+program_ref: REF
+contract_ref: REF
+work_item_id: H
+base_commit: G
+role: "builder" | "assessor"
+source_files: sorted array[FILE_REF] by path
+interface_refs: sorted array[INTERFACE_REF] by interface_id
+policy_files: sorted array[FILE_REF] by path
+test_files: sorted array[FILE_REF] by path
+prior_finding_refs: sorted array[REF]
+proposal_ref: REF | null
+deterministic_result_refs: sorted array[REF]
+omitted_category_ids: sorted array[S]
+```
+
+An assessor context must include the proposal, exact diff preview, required
+deterministic results, all affected upstream/downstream interfaces, and every
+prior finding in the lineage. Context minimality never overrides those
+requirements.
+
+### 6.6 Closed content records
+
+Every referenced non-JSON-record blob is wrapped by
+`section_content_record.v1`. Payload keys:
+
+```text
+program_ref: REF
+artifact_type: one of
+  "schema_profile" | "read_inventory" | "assessment_profile" |
+  "launcher_receipt" | "source_snapshot" | "proposal" | "diff_preview" |
+  "test_manifest" | "test_result" | "check_evidence" |
+  "finding_evidence" | "reproduction" | "resolution" |
+  "protected_inventory" | "operation_log" | "conflict_evidence" |
+  "assembler_binary"
+storage_relpath: P
+media_type: "application/json" | "text/plain" | "text/x-diff" |
+            "application/octet-stream"
+byte_length: N
+blob_sha256: H
+producer_assignment_ref: NULLREF
+parent_content_refs: sorted array[REF]
+```
+
+`storage_relpath` must begin exactly
+`artifacts/section-council/<planned_request_id>/content/`; all segments still
+obey §7.1. No absolute or external path is representable. The packager opens it
+no-follow, verifies size and SHA-256, and inventories the record and blob. Every generic `REF` field in
+this design that does not name another explicit §6.1 schema must resolve to a
+content record with the artifact type implied by the field name. For example,
+`schema_profile_refs` permits only `schema_profile`, `proposal_ref` only
+`proposal`, and `test_result_refs` only `test_result`. Type substitution is
+invalid.
+
+### 6.7 Assignments and structural principal separation
+
+`section_assignment.v1` payload keys:
+
+```text
+program_ref: REF
+contract_ref: REF
+work_item_id: H
+role: "builder" | "assessor"
+principal_id: S
+principal_credential_digest: H
+launcher_receipt_ref: REF (artifact_type="launcher_receipt")
+session_nonce: H
+attempt: N
+context_ref: REF
+sandbox_profile_ref: REF
+workspace_id: H
+output_leaf: S
+```
+
+The parent scheduler writes assignments into its protected orchestration root
+before dispatch. Worker sandboxes receive them read-only. `principal_id` and
+credential digest must match a scheduler-owned allowlist pinned by the program's
+schema profile. For one section, builder and assessor must differ in
+`principal_id`, credential digest, launcher receipt, and session nonce. The
+builder cannot supply the assessor fields.
+
+`worker_sandbox_profile.v1` payload keys:
+
+```text
+platform: "linux-bwrap-v1"
+launcher_binary_sha256: H
+argv_template_sha256: H
+source_snapshot_ref: REF
+read_only_mount_refs: sorted nonempty array[REF]
+writable_mountpoint: "/out"
+private_tmpfs_bytes: N
+unshare_user: true
+unshare_pid: true
+unshare_net: true
+no_new_privileges: true
+capability_set: []
+seccomp_profile_sha256: H
+environment_allowlist: sorted array[S]
+```
+
+`worker_sandbox_attestation.v1` payload keys:
+
+```text
+program_ref: REF
+assignment_ref: REF
+sandbox_profile_ref: REF
+observed_mount_table_ref: REF (artifact_type="check_evidence")
+observed_process_status_ref: REF (artifact_type="check_evidence")
+observed_environment_ref: REF (artifact_type="check_evidence")
+source_snapshot_ref: REF (artifact_type="source_snapshot")
+output_inventory_ref: REF (artifact_type="read_inventory")
+protected_host_before_ref: REF (artifact_type="protected_inventory")
+protected_host_after_ref: REF (artifact_type="protected_inventory")
+external_write_attempt_count: N
+external_write_success_count: N
+exit_status: N
+```
+
+Eligibility requires zero external-write successes and equal before/after
+protected-host digests. An attestation is supporting evidence, not a substitute
+for the kernel-enforced mount namespace.
+
+### 6.8 Findings and complete assessor ownership
+
+`section_finding.v1` payload keys:
+
+```text
+program_ref: REF
+contract_ref: REF
+assessor_assignment_ref: REF
+affected_proposal_ref: REF (artifact_type="proposal")
+audit_level: "section" | "boundary" | "system"
+severity: "INFO" | "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+invariant_id: S
+claim: T
+evidence_ref: REF (artifact_type="finding_evidence")
+reproduction_ref: REF (artifact_type="reproduction")
+affected_path: P | null
+blocks_local_pass: B
+status: "open" | "resolved" | "unreproduced"
+predecessor_finding_ref: NULLREF
+resolution_evidence_ref: NULLREF
+```
+
+`section_assessment_manifest.v1` payload keys:
+
+```text
+program_ref: REF
+contract_ref: REF
+work_item_id: H
+assessor_assignment_ref: REF
+assessor_context_ref: REF
+proposal_ref: REF (artifact_type="proposal")
+check_results: sorted nonempty array[CHECK_RESULT] by check_id
+finding_refs: sorted array[REF]
+finding_inventory_sha256: H
+finding_count: N
+open_blocking_count: N
+local_assessment: "pass" | "blocked" | "error"
+predecessor_assessment_ref: NULLREF
+```
+
+The assessor writes findings and the manifest into its isolated output leaf.
+The trusted packager seals and inventories **every file** in that leaf. The
+recomputed finding inventory must contain exactly `finding_count` finding
+records and exactly the sorted `finding_refs`; missing, extra, swapped, or
+unreferenced finding bytes refuse packaging. `pass` requires
+`open_blocking_count=0`, all required checks present/pass, and complete prior
+lineage. A reassessment references its predecessor and carries every prior
+finding either unchanged or with a valid resolution; dropping one is invalid.
+
+### 6.9 Section, boundary, comparison, and scope results
+
+`section_evidence_bundle.v1` payload keys:
+
+```text
+program_ref: REF
+contract_ref: REF
+work_item_id: H
+base_commit: G
+builder_assignment_ref: REF
+assessor_assignment_ref: REF
+builder_context_ref: REF
+assessor_context_ref: REF
+builder_sandbox_attestation_ref: REF
+assessor_sandbox_attestation_ref: REF
+proposal_ref: REF (artifact_type="proposal")
+diff_preview_ref: REF (artifact_type="diff_preview")
+assessment_manifest_ref: REF
+test_manifest_ref: REF (artifact_type="test_manifest")
+test_result_refs: sorted array[REF] (artifact_type="test_result")
+invariant_results: sorted nonempty array[CHECK_RESULT] by check_id
+local_assessment: "pass" | "blocked" | "error"
+resource_metrics: sorted array[METRIC] by metric_id
+dependency_snapshot_ref: REF (artifact_type="read_inventory")
+staleness_input_refs: sorted nonempty array[REF]
+```
+
+Its local assessment must equal the assessor manifest and cannot be supplied by
+the builder or packager.
+
+`boundary_impact_report.v1` payload keys:
+
+```text
+program_ref: REF
+work_graph_ref: REF
+section_bundle_refs: sorted nonempty array[REF]
+final_scope_ref: REF
+changed_section_ids: sorted array[S]
+changed_interfaces: sorted array[INTERFACE_REF]
+affected_contract_refs: sorted array[REF]
+dependency_closure_ref: REF (artifact_type="read_inventory")
+activated_check_results: sorted nonempty array[CHECK_RESULT]
+conflict_evidence_refs: sorted array[REF]
+unknown_classification_count: N
+required_system_audit_scope_ids: sorted nonempty array[S]
+```
+
+Any conflict evidence or nonzero unknown count blocks publication.
+
+`section_comparison_report.v1` payload keys:
+
+```text
+program_ref: REF
+workload_identity_sha256: H
+sequential_root_ref: REF
+hierarchical_root_ref: REF
+metric_results: sorted nonempty array[METRIC] by metric_id
+seeded_defect_ids: sorted nonempty array[S]
+sequential_detected_defect_ids: sorted array[S]
+hierarchical_detected_defect_ids: sorted array[S]
+escaped_defect_ids: sorted array[S]
+limitations: sorted nonempty array[T]
+conclusion: "improved" | "non_inferior" | "inconclusive" | "worse"
+```
+
+Unknown/unavailable metrics use `availability="unavailable"`, `value=null`,
+and `evidence_ref=null`; they are never encoded as zero.
+
+A comparison report is produced in a later comparison evidence root after both
+input roots are sealed. Its `sequential_root_ref` and `hierarchical_root_ref`
+are the only permitted external HSC-root references. Neither input root may
+inventory the comparison report that references it.
+
+`final_scope_manifest.v1` payload keys:
+
+```text
+program_ref: REF
+work_graph_ref: REF
+base_commit: G
+predicted_changes: sorted nonempty array[PREDICTED_CHANGE] by path
+actual_changes: sorted array[ACTUAL_CHANGE] by (path, kind)
+section_bundle_refs: sorted nonempty array[REF]
+assembler_binary_ref: REF (artifact_type="assembler_binary")
+assembled_tree_sha256: H
+```
+
+Every actual change path must occur in exactly one predicted change and its kind
+must be allowed. Every predicted `required=true` path must occur. No ownership
+directory or glob can authorize an unpredicted child.
+
+### 6.10 Complete root and ordinary request binding
+
+`section_evidence_root.v1` payload keys:
+
+```text
+planned_request_id: R
+program_ref: REF
+parent_build_event_id: E
+parent_build_event_hash: H
+base_commit: G
+work_graph_ref: REF
+final_scope_ref: REF
+record_inventory: sorted nonempty array by (schema_version, record_id) of {
+  "schema_version": one value in §6.1 except section_evidence_root.v1,
+  "record_id": H,
+  "content_sha256": H,
+  "repository_relpath": P
+}
+operation_log_ref: REF (artifact_type="operation_log")
+record_count: N
+```
+
+The root enumerates **every** program, contract, context, content record,
+assignment, sandbox profile/attestation, finding, assessment, evidence bundle,
+boundary report, comparison report, work graph, and final scope record for the
+source. The validator walks all references, requires one reachable acyclic
+graph, rejects unreachable extras, requires
+`record_count == len(record_inventory)`, and rejects member omission, addition,
+reordering, cross-program reuse, or stale child reuse. The root does
+not list itself, so there is no self-cycle.
+
+The committed paths are fixed by v1:
+
+```text
+artifacts/section-council/<planned_request_id>/root.json
+artifacts/section-council/<planned_request_id>/final-scope.json
+```
+
+Before calling the unchanged ordinary publisher, the HSC pre-publish wrapper
+recomputes the root, final scope, actual Git diff, and clean candidate tree. It
+requires one exact scope-list entry:
+
+```text
+HSC_V1 root_path=<P> root_id=<H> root_sha256=<H>
+       scope_path=<P> scope_id=<H> scope_sha256=<H>
+```
+
+The entry is one line with single ASCII spaces, in the shown key order, and no
+extra fields. The wrapper rejects its absence, duplication, malformed spacing,
+or mismatch. Existing `publish_request` then hashes that exact scope string into
+the ordinary `request_payload_hash` and pins it in `AUDIT_REQUESTED`. Thus the
+current request schema and authority remain unchanged while the HSC path gains a
+machine-readable, request-bound scope root. A caller bypassing the HSC wrapper
+has no hierarchical evidence claim and cannot present local bundles as such.
+
+After assembly, binding remains acyclic:
+
+```text
+BUILD_STARTED -> program -> contracts/work/assessments -> scope + evidence root
+    -> final commit -> ordinary request hash -> Codex verdict -> integration
+```
+
+No speed, quality, completeness, or cost claim is valid without a verified root
+and, where applicable, a verified comparison report.
 
 ## 7. Deterministic conflict and scheduling algorithm
 
 ### 7.1 Path normalization
 
-Before dispatch, resolve every declared path relative to the exact repository
-root. Refuse absolute paths, `..`, empty segments, NULs, symlink/reparse escape,
-case-fold collisions on case-insensitive deployments, and any path whose native
-identity cannot be established under the repository's current path rules.
+HSC v1 has no path patterns or write globs. `P` is a POSIX-style relative path
+whose UTF-8 bytes satisfy all of:
 
-The candidate write set is the union of declared `owned_paths` and the
-operation-specific predicted outputs. After execution, the actual real diff is
-recomputed and must be a subset of that write set.
+- total length 1..1024 bytes and at most 64 segments;
+- `/` is the only separator;
+- each segment matches `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`;
+- no segment is `.`, `..`, `.git`, a Windows reserved device name
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9`, case-insensitive),
+  or ends in dot/space;
+- the path is not absolute, drive-qualified, UNC, NUL-containing, or
+  backslash-containing;
+- NFC and case-fold keys are unique across every declared/read/actual path;
+- every existing ancestor is a real directory, not a symlink, reparse point,
+  submodule, mount transition, or special file.
+
+The trusted host validator uses descriptor/handle-relative no-follow traversal
+from an already validated repository-root handle. String prefix checks never
+grant access. A not-yet-created output is valid only when every existing
+ancestor passes that traversal and the exact file path appears in one
+`PREDICTED_CHANGE`.
+
+Write authority is the exact set of predicted file paths and permitted change
+kinds. A directory name confers no authority over its children. Rename requires
+both the exact `rename_source` and destination; delete and mode change are
+explicit kinds. The actual diff is an exact sorted list of `ACTUAL_CHANGE`
+objects and no actual path may be absent from the predicted list. A required
+predicted path may not be absent. The final scope manifest independently
+recomputes blobs and modes from Git, not worker claims.
 
 ### 7.2 Conflict relation
 
@@ -457,9 +824,10 @@ dependency closure is satisfied
 neither item is stale or blocked
 ```
 
-Any glob ambiguity, platform path ambiguity, generated-path uncertainty, or
-unclassified shared fixture means conflict. The scheduler fails closed and
-serializes or escalates; it never asks workers to avoid overlap voluntarily.
+Any path ambiguity, unpredicted generated path, rename-source collision,
+case-fold/NFC collision, or unclassified shared fixture means conflict. The
+scheduler fails closed and serializes or escalates; it never asks workers to
+avoid overlap voluntarily.
 
 ### 7.3 Dispatch order
 
@@ -475,19 +843,50 @@ must produce the same admitted work set and equivalent content evidence.
 
 ### 7.4 Isolation
 
-Each source-writing section receives a separate git worktree rooted at the
-same frozen base commit. It may write only its owned paths. No two active
-sections write the integration worktree. Outputs are admitted into the final
-candidate by a deterministic assembler only after local assessment and
-conflict revalidation.
+Git worktrees are explicitly **not** a security boundary: they share reachable
+Git metadata and a same-user worker can address another checkout. A writable
+HSC worker instead uses `linux-bwrap-v1`:
 
-The assembler applies section outputs in sorted `work_item_id` order, verifies
-the resulting file digests against each bundle, and refuses textual or semantic
-conflicts. It does not resolve conflicts by preference. The assembled commit is
-new evidence and must pass the complete top-level audit.
+1. The trusted host exports the exact base commit into a content-inventoried
+   source snapshot with no `.git` directory.
+2. Bubblewrap creates new user, PID, and network namespaces with no
+   capabilities and `no_new_privileges`; a pinned seccomp profile applies.
+3. The source snapshot and required tool/runtime image are mounted read-only.
+4. The integration checkout, its `.git`/common Git metadata, the live Council
+   root, root-owned anchors, other worker leaves, canonical evidence, hidden
+   suites, and arbitrary host user paths are absent from the namespace; if a
+   runtime dependency forces visibility, it is read-only and named in the
+   sandbox profile.
+5. Exactly one private output leaf is writable. `/tmp` is a bounded private
+   tmpfs. No host environment variable or inherited descriptor exposes another
+   writable path. Network is unshared.
+6. The worker emits a reviewed patch/report plus its closed output inventory;
+   it never edits a Git checkout.
+7. A separate assessor sandbox receives the same read-only source plus the
+   sealed proposal and deterministic evidence, and has a different output
+   leaf unavailable to the builder.
 
-Read-only or deterministic-check sections may share an immutable checkout when
-their output directories are isolated.
+If `bwrap`, mount namespaces, no-follow source export, seccomp, or a required
+read-only/absent-root assertion is unavailable, writable hierarchical execution
+is **ineligible**. The task may use the existing sequential Council, but it may
+not claim section isolation. Windows or macOS require a future separately
+audited equivalent profile; v1 does not silently emulate one.
+
+The trusted deterministic assembler is the only HSC component permitted to
+write the integration checkout. It runs only after a complete assessor pass,
+revalidates the program/root/scope, parses the proposal without shell
+evaluation, refuses binary/symlink/submodule/special-file patches, validates
+every old blob/mode against the frozen base, and applies exact changes in sorted
+`work_item_id` order using handle-relative no-follow operations. Before and
+after each application it verifies protected integration and common-Git
+metadata inventories; only the declared candidate paths may differ. Any drift,
+external modification, semantic/text conflict, or unexpected Git metadata
+change aborts without choosing a winner.
+
+The assembled bytes are re-read, hashed into `ACTUAL_CHANGE`, compared with the
+final scope, committed by the normal parent builder, and subjected to the full
+existing top-level audit. Read-only/deterministic workers may share one source
+snapshot, but their writable output leaves and assignments remain distinct.
 
 ## 8. State machines
 
@@ -511,9 +910,12 @@ Rules:
 
 - `validated` requires a schema-valid contract whose parent bindings verify.
 - `eligible` requires satisfied dependencies and no conflicts.
-- `built` requires complete outputs and a real-diff scope pass.
-- `checked` requires every deterministic required check.
-- `passed` requires independent assessor identity and no blocking findings.
+- `built` requires a sealed proposal/output inventory from the confined builder
+  sandbox; no integration-tree write has occurred.
+- `checked` requires every deterministic required check and an exact predicted
+  change/diff-preview pass.
+- `passed` requires structurally distinct principal assignments, a complete
+  sealed assessor manifest, and no blocking findings.
 - any relevant input mutation moves the item to `stale`.
 - `packaged` is allowed for pass, blocked, error, or escalated so failures are
   never suppressed.
@@ -527,8 +929,9 @@ The parent remains an ordinary source request. It can be published only after:
 - boundary impact is known and all required checks pass;
 - the final assembled tree is clean and committed;
 - the complete existing suite passes;
-- the request scope names the entire actual final diff and relevant global
-  invariants.
+- the final scope manifest exactly matches the actual diff;
+- the request carries the one exact HSC root/scope binding string from §6.10 and
+  names the relevant global invariants in its remaining prose scope entries.
 
 Then the normal Codex audit begins. A blocked local section prevents publication
 but does not create canonical Council authority. A top-level Codex blocker
@@ -545,8 +948,12 @@ A section bundle becomes stale when any of these changes:
 - required policy/protocol excerpt;
 - relevant test or fixture;
 - evidence bundle bytes;
+- scheduler assignment, principal credential/launcher receipt, sandbox profile,
+  or protected-host attestation;
+- assessor manifest inventory or any finding member;
 - upstream blocking finding or resolution;
 - boundary-impact closure;
+- final scope or evidence-root membership;
 - assessor profile or required quorum.
 
 Staleness is computed, not declared by a worker. Only downstream dependents of
@@ -615,8 +1022,9 @@ a future, separately audited capability, consistent with `AUTONOMY.md`.
   outputs.
 - Duplicate dispatch of one `work_item_id` has one winner; a late worker cannot
   overwrite a completed bundle.
-- Retry creates a new `execution_id` but retains the work-item identity and
-  records the failed predecessor.
+- Retry creates a new scheduler assignment with a new session nonce, launcher
+  receipt, and incremented attempt while retaining the work-item identity and
+  recording the failed predecessor assessment/output inventory.
 - A crashed or expired worker never causes its local result to be inferred as a
   pass.
 - STOP prevents new dispatch and assembly. In-flight processes are terminated
@@ -671,14 +1079,21 @@ Why it is eligible:
 The implementation fixture contains two genuinely independent work items:
 
 1. **Request evidence index** — validate and inventory an isolated, frozen
-   request fixture; write only `pilot/output/request-index/`.
+   request fixture; emit the exact predicted proposal files in its private
+   `/out` leaf.
 2. **Test evidence index** — validate and inventory an isolated, frozen test
-   manifest fixture; write only `pilot/output/test-index/`.
+   manifest fixture; emit a disjoint exact predicted proposal in its private
+   `/out` leaf.
 
 A third boundary work item consumes both verified indexes and produces only a
 `boundary_impact_report.v1`. It cannot run until both dependencies pass. The
 same workload runs once sequentially and once with two parallel eligible
 workers. Outputs must be content-equivalent and independently reassessed.
+Each fixture uses a scheduler-assigned deterministic builder executable and a
+different allowlisted deterministic assessor executable, with different binary
+digests, credentials/launcher receipts, sessions, contexts, and sealed output
+leaves. This proves structural separation and complete evidence ingestion; it
+does not claim model-diverse adversarial judgment.
 
 ### 14.2 Pilot acceptance
 
@@ -687,7 +1102,8 @@ The pilot proves only:
 - contract and evidence identities;
 - scope enforcement;
 - deterministic conflict refusal;
-- separate builder/assessor execution identities;
+- scheduler-owned distinct builder/assessor principal assignments and complete
+  assessor finding manifests;
 - pass/blocked/error local semantics;
 - dependency-aware staleness;
 - equivalent admitted work under sequential and parallel scheduling;
@@ -703,10 +1119,11 @@ work, or equal global defect detection. Those remain hypotheses.
 
 Add the isolated executor package with:
 
-- Section Contract, work graph, context bundle, finding, evidence bundle,
-  boundary report, and comparison report validation;
+- every §6 record schema, nested type, exact key set, domain-separated self-id,
+  typed reference walk, and complete evidence-root validation;
 - domain-separated hashing;
-- normalized-path and scope validation;
+- the closed exact-path/change algebra, final-scope validator, and fixed HSC
+  ordinary-request binding parser;
 - deterministic conflict classification;
 - dependency and staleness calculation;
 - no worker launch and no Council mutation.
@@ -715,9 +1132,13 @@ Route as a normal source request and independently audit the exact commit.
 
 ### Slice HSC-B — single-section executor pilot
 
-Add isolated work roots, deterministic tool execution, real-diff enforcement,
-separate external assessment ingestion, evidence packaging, and crash-safe
-derived journals. Run one section without parallelism.
+Add the pinned `linux-bwrap-v1` launcher, read-only no-Git source export,
+private proposal output, protected-host integrity attestation, trusted patch
+assembler, scheduler-minted principal assignments, sealed assessor output,
+complete finding-manifest ingestion, real-diff enforcement, evidence-root
+packaging, and crash-safe derived journals. Run one section without
+parallelism. If the OS profile cannot be proven, this slice fails closed rather
+than falling back to an unconfined hierarchical worker.
 
 ### Slice HSC-C — controlled parallel pilot
 
@@ -750,60 +1171,77 @@ must arise from real Coliseum use and route as bounded audited slices.
 7. undeclared output path refused;
 8. unsupported operation/executor/profile refused;
 9. evidence bundle digest mismatch refused;
-10. builder/assessor identity collision refused.
+10. builder/assessor same principal with different opaque ids refused;
+11. builder-minted or swapped assessor assignment/launcher receipt refused;
+12. every §6.1 record rejects missing/extra keys, self-id mismatch, wrong
+    domain/version, parent substitution, cross-program replay, member
+    omission/addition/reordering, unreachable extras, and stale-child reuse;
+13. root record count/inventory mismatch or final request root/scope binding
+    mismatch refused.
 
 ### Scope and conflict
 
-11. builder attempts a forbidden-path write;
-12. actual diff exceeds owned paths;
-13. two sections overlap writes;
-14. one section writes another's mutable read;
-15. immutable pinned read permits safe sharing;
-16. ambiguous glob/case/symlink identity fails closed;
-17. hidden cross-section impact not declared by builder is detected from the
+14. hostile worker relative, absolute, symlink/reparse, mount, and shared-Git
+    writes fail inside the OS sandbox; integration/common-Git/protected-root
+    digests remain unchanged;
+15. only an assembler-authorized exact proposal can alter the candidate;
+16. actual diff contains a path/kind absent from exact predicted changes,
+    including an unpredicted child inside a declared sibling directory;
+17. two sections overlap writes or rename sources/destinations;
+18. one section writes another's mutable read;
+19. immutable inventory-pinned read permits safe sharing;
+20. ambiguous case/NFC/rename/symlink/reparse/native identity fails closed;
+21. rename, delete, and mode changes without exact old/new bindings refuse;
+22. hidden cross-section impact not declared by builder is detected from the
     real final diff;
-18. uncertain conflict classification blocks dispatch;
-19. parallel and sequential admission sets are identical;
-20. worker completion order does not change assembled content.
+23. uncertain conflict classification blocks dispatch;
+24. parallel and sequential admission sets are identical;
+25. worker completion order does not change assembled content.
 
 ### Assessment and authority
 
-21. local pass presented as integration approval is refused;
-22. builder-authored assessment is refused;
-23. implementation changes after assessment make it stale;
-24. missing required evidence blocks pass;
-25. unresolved blocking finding blocks pass;
-26. finding survives repair and links to its resolution/reassessment;
-27. top-level publication cannot omit a required section bundle;
-28. ordinary Codex audit remains required;
-29. ordinary `CHANGE_INTEGRATED` remains the only integration event;
-30. sequential mode behavior is unchanged.
+26. local pass presented as integration approval is refused;
+27. builder-authored assessment or builder-writable assessor root is refused;
+28. swapped assessor output or manifest/input/proposal mismatch is refused;
+29. missing, extra, unreferenced, or reordered finding files are refused;
+30. omitted open blocker or false finding count/open count is refused;
+31. repair assessment that drops a predecessor finding or reassessment link is
+    refused;
+32. implementation changes after assessment make it stale;
+33. missing required evidence blocks pass;
+34. unresolved blocking finding blocks pass;
+35. finding survives repair and links to its resolution/reassessment;
+36. top-level publication cannot omit a required section bundle or root member;
+37. ordinary Codex audit remains required;
+38. ordinary `CHANGE_INTEGRATED` remains the only integration event;
+39. sequential mode behavior is unchanged.
 
 ### Dependency and recovery
 
-31. dependency version/interface/policy/test change invalidates only affected
+40. dependency version/interface/policy/test change invalidates only affected
     work;
-32. shared-dependency blocker marks dependents blocked or stale;
-33. interrupted work resumes without duplicate outputs;
-34. duplicate dispatch has one winner;
-35. expired/wrong lease token cannot overwrite or remove another worker;
-36. partial bundle cannot be interpreted as pass;
-37. STOP prevents new dispatch and assembly;
-38. malformed journal fails closed with preserved diagnostics;
-39. retry links the failed execution without reusing its assessment;
-40. assembler detects post-assessment drift.
+41. shared-dependency blocker marks dependents blocked or stale;
+42. interrupted work resumes without duplicate outputs;
+43. duplicate dispatch has one winner;
+44. expired/wrong lease token cannot overwrite or remove another worker;
+45. partial bundle cannot be interpreted as pass;
+46. STOP prevents new dispatch and assembly;
+47. malformed journal fails closed with preserved diagnostics;
+48. retry links the failed assignment/assessment without reusing either;
+49. assembler detects post-assessment drift and any protected-host digest
+    change.
 
 ### Measurement and negative controls
 
-41. sequential/hierarchical workload identities are equivalent;
-42. unavailable token/cost measures are reported unavailable, not zero;
-43. wall-clock time is telemetry, never identity;
-44. artificial delay fixture demonstrates real overlap without brittle
+50. sequential/hierarchical workload identities are equivalent;
+51. unavailable token/cost measures are reported unavailable, not zero;
+52. wall-clock time is telemetry, never identity;
+53. artificial delay fixture demonstrates real overlap without brittle
     production wall-clock assertions;
-45. seeded defect is detected in both modes;
-46. seeded boundary defect is not cleared by two local passes;
-47. no improvement claim emitted when confidence/coverage is insufficient;
-48. full existing suite remains green.
+54. seeded defect is detected in both modes;
+55. seeded boundary defect is not cleared by two local passes;
+56. no improvement claim emitted when confidence/coverage is insufficient;
+57. full existing suite remains green.
 
 ## 17. Completion gates
 
@@ -823,12 +1261,14 @@ and provenance.
 
 | Threat | Required control |
 | --- | --- |
-| builder selects/impersonates assessor | orchestrator assigns distinct execution identity and context; equality refuses |
+| builder selects/impersonates assessor | scheduler-owned assignments bind distinct allowlisted principals, credentials, launcher receipts, sessions, contexts, and sealed output roots |
 | local pass becomes global approval | local enum is not `GO`; no canonical authority event; final existing audit remains mandatory |
-| scope creep | parent-subset validation plus actual real-diff enforcement |
-| overlapping parallel writes | normalized write/read conflict graph; isolated worktrees; fail closed on uncertainty |
+| scope creep | exact predicted changes, exact final scope manifest, root-bound request entry, and independently recomputed real diff |
+| overlapping/ambient writes | kernel mount sandbox exposes no host writable path except private output; workers emit proposals; only the deterministic assembler writes the integration tree |
 | incompatible section identities | exact interface/dependency digests and boundary closure |
 | summary laundering | integration consumes raw content-addressed evidence, not builder prose |
+| assessor finding suppression | assessor-owned sealed output inventory; manifest count/root must equal every finding file; predecessor findings cannot disappear |
+| record/member substitution | exact three-key schemas, unique domains, typed references, and one acyclic complete evidence root bound into the ordinary request |
 | stale verdict/bundle | deterministic invalidation on every bound input and final-commit recheck |
 | finding suppression | append-only finding lineage; dependent work invalidation |
 | builder/auditor scratch sharing | separate contexts and execution roots; scratch is never evidence |
