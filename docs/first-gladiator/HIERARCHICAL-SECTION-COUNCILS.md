@@ -1054,7 +1054,7 @@ native algebra above. Its sole id preimage is:
 ```text
 journal_root_id = domain_hash(
   "council:scheduler-journal-root:v1",
-  {"journal_mode": N, "journal_owner_control_id": H,
+  {"journal_mode": exactly "0700", "journal_owner_control_id": H,
    "journal_owner_principal_id": S, "journal_root_file_id": H,
    "journal_root_filesystem_id": H, "journal_root_locator_sha256": H,
    "principal_registry_ref": REF, "program_ref": REF})
@@ -1065,6 +1065,13 @@ inventory root/entry; `journal_root_locator`, its digest, its embedded native
 observation, and both derived ids must reconstruct from that anchor before any
 membership check. Equality, a caller-selected H, an alternate encoder, or
 unavailable stable observation refuses.
+`journal_mode` is the JSON string literal `"0700"` in both the manifest and the
+id preimage; no numeric or alternate text encoding is legal. The journal root
+observation must have `file_type="directory"`, and
+`journal_root_native_identity.native_mode & 4095` must equal decimal `448`
+(permission bits 0700). Type bits remain in the observed unsigned
+`native_mode`; this mask relation is the sole conversion from the canonical
+manifest string to native permission bits.
 
 `worker_sandbox_profile.v1` payload keys:
 
@@ -2195,7 +2202,10 @@ must arise from real Coliseum use and route as bounded audited slices.
 77. construct the protected scheduler journal identity solely from its exact
     locator/observation/preimage and reject a caller-selected id, alternate
     field order/encoder, anchor alias, inventory-root equality, or any mismatch
-    between embedded observation and derived ids;
+    between embedded observation and derived ids; independently derive one
+    byte-identical id from the manifest and verifier, then reject numeric 448,
+    alternate strings, mode/type mismatches, and any second accepted mode
+    encoding;
 78. make `openat2`, no-follow resolution, `statx` mount identity, `fstatfs`
     fsid, persistent file handle, or stable re-observation unavailable one at a
     time and prove writable hierarchical dispatch and assembly fail closed with
