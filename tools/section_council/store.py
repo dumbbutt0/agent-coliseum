@@ -1,0 +1,1421 @@
+"""Typed reference resolution and complete HSC evidence-root validation."""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+import hashlib
+from typing import Any, Iterable, Mapping
+
+from tools.council.schemas import canonical_json, domain_hash
+
+from .core import (
+    HSCValidationError,
+    change_sort_key,
+    fail,
+    predicted_matches_actual,
+    require_bool,
+    require_h,
+    require_int,
+    require_literal,
+    require_request_id,
+    require_slug,
+    require_sorted_unique,
+    require_string,
+    require_unique_paths,
+    strict_json_bytes,
+    validate_path,
+    validate_ref,
+)
+from .records import (
+    RECORD_TYPES,
+    RefRequirement,
+    id_field_for,
+    record_id,
+    record_ref,
+    validate_record,
+)
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    program_id: str
+    root_id: str
+    record_count: int
+    construction_order: tuple[str, ...]
+    construction_ordinals: Mapping[str, int]
+
+
+class RecordStore:
+    """An immutable validation view over one proposed HSC evidence root.
+
+    ``blobs`` maps the repository storage path declared by bootstrap/content
+    records to exact bytes. ``external_roots`` maps a permitted comparison
+    root id to its exact content SHA-256. Neither collection grants I/O.
+    """
+
+    def __init__(self, records: Iterable[Mapping[str, Any]], *,
+                 blobs: Mapping[str, bytes] | None = None,
+                 external_roots: Mapping[str, str] | None = None):
+        self.records = tuple(copy.deepcopy(record) for record in records)
+        self.blobs = dict(blobs or {})
+        self.external_roots = dict(external_roots or {})
+        self.by_id: dict[str, dict] = {}
+        self.refs: dict[str, list[RefRequirement]] = {}
+        for record in self.records:
+            requirements = validate_record(record)
+            rid = record_id(record)
+            if rid in self.by_id:
+                fail(f"duplicate record id {rid}")
+            self.by_id[rid] = record
+            self.refs[rid] = list(requirements)
+        self._closed_blob_refs: dict[str, list[RefRequirement]] = {}
+        self.closed_values: dict[str, Any] = {}
+
+    def get(self, ref: Mapping[str, str], *, versions: Iterable[str] = (),
+            artifacts: Iterable[str] = (), external: bool = False) -> dict:
+        validate_ref(ref, "reference")
+        rid = ref["record_id"]
+        if external:
+            if rid not in self.external_roots or \
+                    self.external_roots[rid] != ref["content_sha256"]:
+                fail(f"external root {rid} is not sealed by the supplied authority")
+            return {"schema_version": "section_evidence_root.v1",
+                    "section_evidence_root_id": rid, "payload": {}}
+        try:
+            record = self.by_id[rid]
+        except KeyError as exc:
+            raise HSCValidationError(f"unresolved reference {rid}") from exc
+        if compute_content_sha(record) != ref["content_sha256"]:
+            fail(f"reference content SHA mismatch for {rid}")
+        allowed_versions = tuple(versions)
+        if allowed_versions and record["schema_version"] not in allowed_versions:
+            fail(f"reference type substitution at {rid}")
+        allowed_artifacts = tuple(artifacts)
+        if allowed_artifacts:
+            if record["schema_version"] == "section_bootstrap_content.v1":
+                artifact = record["payload"]["artifact_type"]
+            elif record["schema_version"] == "section_content_record.v1":
+                artifact = record["payload"]["artifact_type"]
+            else:
+                fail(f"artifact reference {rid} does not target content")
+            if artifact not in allowed_artifacts:
+                fail(f"artifact type substitution at {rid}")
+        return record
+
+    def validate_all(self) -> None:
+        for source_id, requirements in self.refs.items():
+            for requirement in requirements:
+                self.get(requirement.ref,
+                         versions=requirement.expected_versions,
+                         artifacts=requirement.artifact_types,
+                         external=requirement.external)
+        self._validate_blobs()
+
+    def validate_root(self, root: Mapping[str, Any], *,
+                      build_event: Mapping[str, Any]) \
+            -> ValidationReport:
+        validate_record(root)
+        if root["schema_version"] != "section_evidence_root.v1":
+            fail("root must be section_evidence_root.v1")
+        root_id = record_id(root)
+        if root_id in self.by_id:
+            fail("evidence root must not inventory itself")
+        root_requirements = validate_record(root)
+        self.validate_all()
+        for requirement in root_requirements:
+            self.get(requirement.ref, versions=requirement.expected_versions,
+                     artifacts=requirement.artifact_types,
+                     external=requirement.external)
+        payload = root["payload"]
+        self._validate_inventory(payload)
+        program = self.get(payload["program_ref"], versions=("section_program.v1",))
+        program_id = record_id(program)
+        self._validate_program_bindings(program, root, build_event)
+        self._validate_program_membership(program)
+        self._validate_relations(program, root)
+        order, ordinals = self._topological_order(root, root_requirements)
+        return ValidationReport(program_id, root_id, len(self.records),
+                                tuple(order), ordinals)
+
+    def _validate_inventory(self, p: Mapping[str, Any]) -> None:
+        rows = p["record_inventory"]
+        if len(rows) != len(self.records):
+            fail("evidence-root inventory is not the complete record set")
+        expected_ids = set(self.by_id)
+        seen_ids: set[str] = set()
+        paths: set[str] = set()
+        for row in rows:
+            rid = row["record_id"]
+            if rid not in expected_ids or rid in seen_ids:
+                fail("evidence-root inventory has an omitted, extra, or duplicate id")
+            record = self.by_id[rid]
+            if row["schema_version"] != record["schema_version"] or \
+                    row["content_sha256"] != compute_content_sha(record):
+                fail("evidence-root inventory row does not bind exact record bytes")
+            if row["repository_relpath"] in paths:
+                fail("two records claim the same repository path")
+            paths.add(row["repository_relpath"])
+            seen_ids.add(rid)
+        if seen_ids != expected_ids:
+            fail("evidence-root inventory does not enumerate every record")
+
+    def _validate_blobs(self) -> None:
+        declared_paths: set[str] = set()
+        for record in self.records:
+            if record["schema_version"] not in (
+                    "section_bootstrap_content.v1", "section_content_record.v1"):
+                continue
+            payload = record["payload"]
+            path = payload["storage_relpath"]
+            if path in declared_paths:
+                fail(f"duplicate raw content path {path}")
+            declared_paths.add(path)
+            if path not in self.blobs:
+                fail(f"raw content bytes missing for {path}")
+            data = self.blobs[path]
+            if not isinstance(data, bytes) or len(data) != payload["byte_length"] or \
+                    hashlib.sha256(data).hexdigest() != payload["blob_sha256"]:
+                fail(f"raw content size or digest mismatch for {path}")
+            refs, value = self._validate_closed_blob(record, data)
+            self._closed_blob_refs[record_id(record)] = refs
+            if value is not None:
+                self.closed_values[record_id(record)] = value
+        extras = set(self.blobs) - declared_paths
+        if extras:
+            fail(f"unreferenced raw content bytes: {sorted(extras)!r}")
+
+    def _validate_closed_blob(self, record: Mapping[str, Any], data: bytes) \
+            -> tuple[list[RefRequirement], Any | None]:
+        payload = record["payload"]
+        artifact = payload["artifact_type"]
+        if payload["media_type"] != "application/json":
+            return [], None
+        value = strict_json_bytes(data, payload["storage_relpath"])
+        if artifact == "check_declaration":
+            return _closed_check_declaration(value), value
+        if artifact == "finding_declaration":
+            return _closed_finding_declaration(value), value
+        if artifact == "assessment_declaration":
+            return _closed_assessment_declaration(value), value
+        # Bootstrap schema/read inventories and the remaining JSON content are
+        # still closed canonical JSON, but their domain-specific shape belongs
+        # to the schema/profile that consumed them.
+        return [], value
+
+    def _validate_program_bindings(self, program: Mapping[str, Any],
+                                   root: Mapping[str, Any],
+                                   event: Mapping[str, Any]) -> None:
+        pp = program["payload"]
+        rp = root["payload"]
+        if rp["planned_request_id"] != pp["planned_request_id"] or \
+                rp["base_commit"] != pp["base_commit"]:
+            fail("root/program request or base commit mismatch")
+        if not isinstance(event, dict):
+            fail("canonical BUILD_STARTED event is required")
+        if event.get("event_id") != rp["parent_build_event_id"] or \
+                event.get("event_hash") != rp["parent_build_event_hash"] or \
+                event.get("event_type") != "BUILD_STARTED" or \
+                event.get("request_id") != pp["planned_request_id"] or \
+                event.get("repository") != pp["repository"] or \
+                event.get("target_commit") != pp["base_commit"]:
+            fail("BUILD_STARTED event does not bind the HSC program")
+        ep = event.get("payload", {})
+        pref = record_ref(program)
+        if ep.get("section_program_id") != pref["record_id"] or \
+                ep.get("section_program_content_sha256") != pref["content_sha256"] or \
+                ep.get("hsc_base_commit") != pp["base_commit"] or \
+                ep.get("hsc_execution_mode") != pp["execution_mode"]:
+            fail("BUILD_STARTED HSC payload binding mismatch")
+        for contract in _records(self, "section_contract.v1"):
+            cp = contract["payload"]
+            if cp["parent_build_event_id"] != event["event_id"] or \
+                    cp["parent_build_event_hash"] != event["event_hash"]:
+                fail("contract BUILD_STARTED binding mismatch")
+
+    def _validate_program_membership(self, program: Mapping[str, Any]) -> None:
+        pref = record_ref(program)
+        pp = program["payload"]
+        programs = _records(self, "section_program.v1")
+        registries = _records(self, "section_principal_registry.v1")
+        if len(programs) != 1 or record_id(programs[0]) != record_id(program):
+            fail("evidence root must contain exactly its bound Section Program")
+        if len(registries) != 1 or \
+                record_ref(registries[0]) != pp["principal_registry_ref"]:
+            fail("evidence root must contain exactly its bound principal registry")
+        prefix = f"artifacts/section-council/{pp['planned_request_id']}/"
+        envelopes = {prefix + "root.json", prefix + "final-scope.json"}
+        for change in pp["system_artifact_predictions"]:
+            if not change["path"].startswith(prefix) or change["path"] in envelopes:
+                fail("program system artifact prediction escapes its fixed namespace")
+        for record in self.records:
+            schema = record["schema_version"]
+            payload = record["payload"]
+            if schema in ("section_bootstrap_content.v1",
+                          "section_principal_registry.v1",
+                          "section_program.v1"):
+                if "program_ref" in payload:
+                    fail(f"{schema} must not contain a program back-reference")
+                continue
+            if payload.get("program_ref") != pref:
+                fail(f"cross-program or missing program_ref in {schema}")
+            if schema == "section_content_record.v1" and not \
+                    payload["storage_relpath"].startswith(prefix + "content/"):
+                fail("content record path does not match program request id")
+        for record in _records(self, "section_bootstrap_content.v1"):
+            if record["payload"]["planned_request_id"] != \
+                    pp["planned_request_id"]:
+                fail("bootstrap record request id differs from program")
+        declared_bootstrap = set(_ref_ids(pp["schema_profile_refs"]))
+        for declaration in pp["section_declarations"]:
+            declared_bootstrap.update(_ref_ids(
+                declaration["read_inventory_refs"]))
+        if declared_bootstrap != {
+                record_id(record)
+                for record in _records(self, "section_bootstrap_content.v1")}:
+            fail("program does not bind every and only bootstrap content record")
+        for ref in pp["schema_profile_refs"]:
+            target = self.get(ref, versions=("section_bootstrap_content.v1",),
+                              artifacts=("schema_profile",))
+            if target["payload"]["planned_request_id"] != pp["planned_request_id"]:
+                fail("bootstrap schema profile request id mismatch")
+        registry = self.get(pp["principal_registry_ref"],
+                            versions=("section_principal_registry.v1",))
+        rpay = registry["payload"]
+        if (rpay["planned_request_id"], rpay["repository"], rpay["base_commit"]) != \
+                (pp["planned_request_id"], pp["repository"], pp["base_commit"]):
+            fail("principal registry does not bind the program root")
+
+    def _validate_relations(self, program: Mapping[str, Any],
+                            root: Mapping[str, Any]) -> None:
+        self._validate_contracts_and_graph(program)
+        self._validate_dispatches(program)
+        self._validate_contexts(program)
+        self._validate_native_plans(program)
+        self._validate_native_inventories()
+        self._validate_attestations()
+        self._validate_assessments(root)
+        self._validate_bundles()
+        self._validate_final_scope(program, root)
+        self._validate_boundary_reports(root)
+        self._validate_rooted_paths(program, root)
+
+    def _topological_order(self, root: Mapping[str, Any],
+                           root_requirements: list[RefRequirement]) \
+            -> tuple[list[str], dict[str, int]]:
+        root_id = record_id(root)
+        nodes = dict(self.by_id)
+        nodes[root_id] = dict(root)
+        requirements = {key: list(value) for key, value in self.refs.items()}
+        requirements[root_id] = list(root_requirements)
+        for source_id, embedded in self._closed_blob_refs.items():
+            requirements.setdefault(source_id, []).extend(embedded)
+        outgoing: dict[str, set[str]] = {rid: set() for rid in nodes}
+        indegree = {rid: 0 for rid in nodes}
+        for source_id, refs in requirements.items():
+            for requirement in refs:
+                if requirement.external:
+                    continue
+                target = requirement.ref["record_id"]
+                if target == source_id:
+                    fail("self reference in HSC root")
+                if target not in nodes:
+                    fail("unresolved internal reference in HSC root")
+                if source_id not in outgoing[target]:
+                    outgoing[target].add(source_id)
+                    indegree[source_id] += 1
+        # Inventory membership is an explicit target-before-terminal edge.
+        for member_id in self.by_id:
+            if root_id not in outgoing[member_id]:
+                outgoing[member_id].add(root_id)
+                indegree[root_id] += 1
+        def key(rid: str) -> tuple[bytes, str]:
+            return (nodes[rid]["schema_version"].encode("utf-8"), rid)
+        ready = sorted((rid for rid, degree in indegree.items() if degree == 0),
+                       key=key)
+        order: list[str] = []
+        while ready:
+            rid = ready.pop(0)
+            order.append(rid)
+            for child in sorted(outgoing[rid], key=key):
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    ready.append(child)
+                    ready.sort(key=key)
+        if len(order) != len(nodes):
+            fail("HSC record graph contains a cycle")
+        if order[-1] != root_id:
+            fail("evidence root is not the final construction record")
+        ordinals = {rid: index for index, rid in enumerate(order)}
+        return order, ordinals
+
+    def _validate_contracts_and_graph(self, program: Mapping[str, Any]) -> None:
+        pp = program["payload"]
+        declarations = {row["section_id"]: row
+                        for row in pp["section_declarations"]}
+        contracts = [record for record in self.records
+                     if record["schema_version"] == "section_contract.v1"]
+        by_section: dict[str, dict] = {}
+        for contract in contracts:
+            cp = contract["payload"]
+            sid = cp["section_id"]
+            if sid in by_section or sid not in declarations:
+                fail("contract section is duplicate or absent from program")
+            by_section[sid] = contract
+            declaration = declarations[sid]
+            if (cp["planned_request_id"], cp["base_commit"]) != \
+                    (pp["planned_request_id"], pp["base_commit"]):
+                fail("contract request/base differs from its program")
+            _require_narrow_changes(declaration["predicted_changes"],
+                                    cp["predicted_changes"],
+                                    f"contract {sid}")
+            if not set(_ref_ids(cp["read_inventory_refs"])) <= \
+                    set(_ref_ids(declaration["read_inventory_refs"])):
+                fail("contract widens its program read inventory")
+            _require_budget_narrow(declaration["budget"], cp["budget"],
+                                   f"contract {sid}")
+        if set(by_section) != set(declarations):
+            fail("program has a section without exactly one contract")
+        for sid, contract in by_section.items():
+            upstream = {self.get(ref, versions=("section_contract.v1",))
+                        ["payload"]["section_id"]
+                        for ref in contract["payload"]["upstream_contract_refs"]}
+            if upstream != set(declarations[sid]["dependency_section_ids"]):
+                fail("contract upstream refs do not equal program dependencies")
+        graphs = [record for record in self.records
+                  if record["schema_version"] == "section_work_graph.v1"]
+        if len(graphs) != 1:
+            fail("root must contain exactly one work graph")
+        graph = graphs[0]
+        gp = graph["payload"]
+        if set(_ref_ids(gp["contract_refs"])) != {record_id(c) for c in contracts}:
+            fail("work graph contract membership is incomplete")
+        items = {item["work_item_id"]: item for item in gp["work_items"]}
+        section_for_item: dict[str, str] = {}
+        for item in items.values():
+            contract = self.get(item["section_contract_ref"],
+                                versions=("section_contract.v1",))
+            cp = contract["payload"]
+            section_for_item[item["work_item_id"]] = cp["section_id"]
+            if item["operation"] not in cp["allowed_operations"]:
+                fail("work item operation is not contract-authorized")
+            _require_narrow_changes(cp["predicted_changes"],
+                                    item["predicted_changes"], "work item")
+            _require_budget_narrow(cp["budget"], item["budget"], "work item")
+            if not set(_ref_ids(item["read_inventory_refs"])) <= \
+                    set(_ref_ids(cp["read_inventory_refs"])):
+                fail("work item widens its contract read inventory")
+            allowed_interfaces = {
+                row["interface_id"]: row
+                for row in (cp["consumed_interfaces"] +
+                            cp["exported_interfaces"])
+            }
+            for interface in item["shared_interfaces"]:
+                if allowed_interfaces.get(interface["interface_id"]) != interface:
+                    fail("work item changes an undeclared shared interface")
+        for item in items.values():
+            sid = section_for_item[item["work_item_id"]]
+            allowed_sections = set(declarations[sid]["dependency_section_ids"]) | {sid}
+            for dep in item["dependency_work_item_ids"]:
+                if section_for_item[dep] not in allowed_sections:
+                    fail("work item dependency crosses an undeclared section edge")
+
+    def _validate_dispatches(self, program: Mapping[str, Any]) -> None:
+        pp = program["payload"]
+        registry = self.get(pp["principal_registry_ref"],
+                            versions=("section_principal_registry.v1",))
+        rp = registry["payload"]
+        principals = {row["principal_id"]: row for row in rp["principals"]}
+        auths = _records(self, "section_launcher_authorization.v1")
+        assignments = _records(self, "section_assignment.v1")
+        receipts = _records(self, "section_launcher_receipt.v1")
+        graphs = _records(self, "section_work_graph.v1")
+        graph_items = {} if not graphs else {
+            item["work_item_id"]: item
+            for item in graphs[0]["payload"]["work_items"]
+        }
+        for auth in auths:
+            ap = auth["payload"]
+            row = principals.get(ap["principal_id"])
+            if row is None or row["allowed_role"] != ap["role"] or \
+                    (row["authority_control_id"],
+                     row["principal_credential_digest"]) != \
+                    (ap["authority_control_id"],
+                     ap["principal_credential_digest"]):
+                fail("launcher authorization does not resolve to its registry principal")
+            if ap["scheduler_authority_id"] != rp["scheduler_authority_id"] or \
+                    ap["principal_registry_ref"] != record_ref(registry):
+                fail("launcher authorization registry authority mismatch")
+            item = graph_items.get(ap["work_item_id"])
+            if item is None or item["section_contract_ref"] != ap["contract_ref"]:
+                fail("launcher authorization is outside the frozen work graph")
+            profile = self.get(ap["sandbox_profile_ref"],
+                               versions=("worker_sandbox_profile.v1",))
+            if profile["payload"]["launcher_binary_sha256"] != \
+                    ap["launcher_executable_sha256"]:
+                fail("authorization launcher differs from sandbox profile")
+        for assignment in assignments:
+            sp = assignment["payload"]
+            auth = self.get(sp["launcher_authorization_ref"],
+                            versions=("section_launcher_authorization.v1",))
+            _require_repeated_dispatch(auth["payload"], sp,
+                                       omit={"launcher_executable_sha256",
+                                             "contract_ref",
+                                             "principal_registry_ref"})
+            if sp["contract_ref"] != auth["payload"]["contract_ref"] or \
+                    sp["principal_registry_ref"] != \
+                    auth["payload"]["principal_registry_ref"]:
+                fail("assignment changed authorization contract or registry")
+        for receipt in receipts:
+            rp_receipt = receipt["payload"]
+            auth = self.get(rp_receipt["authorization_ref"],
+                            versions=("section_launcher_authorization.v1",))
+            assignment = self.get(rp_receipt["assignment_ref"],
+                                  versions=("section_assignment.v1",))
+            _require_repeated_dispatch(auth["payload"], rp_receipt,
+                                       omit={"contract_ref", "work_item_id",
+                                             "principal_registry_ref"})
+            _require_repeated_dispatch(assignment["payload"], rp_receipt,
+                                       omit={"contract_ref", "work_item_id",
+                                             "principal_registry_ref",
+                                             "launcher_authorization_ref",
+                                             "launcher_executable_sha256"})
+            if assignment["payload"]["launcher_authorization_ref"] != record_ref(auth):
+                fail("receipt assignment does not point at receipt authorization")
+        self._validate_journal_chain(registry, auths, assignments, receipts)
+
+    def _validate_contexts(self, program: Mapping[str, Any]) -> None:
+        graphs = _records(self, "section_work_graph.v1")
+        if len(graphs) != 1:
+            return
+        items = {item["work_item_id"]: item
+                 for item in graphs[0]["payload"]["work_items"]}
+        contexts = {record_id(record): record
+                    for record in _records(self, "section_context_bundle.v1")}
+        used: set[str] = set()
+        for assignment in _records(self, "section_assignment.v1"):
+            ap = assignment["payload"]
+            context = self.get(ap["context_ref"],
+                               versions=("section_context_bundle.v1",))
+            context_id = record_id(context)
+            if context_id not in contexts:
+                fail("dispatch context is missing from the evidence root")
+            used.add(context_id)
+            cp = context["payload"]
+            item = items.get(ap["work_item_id"])
+            if item is None or item["section_contract_ref"] != ap["contract_ref"]:
+                fail("assignment is outside the frozen work graph")
+            if (cp["program_ref"], cp["contract_ref"], cp["work_item_id"],
+                cp["base_commit"], cp["role"]) != \
+                    (record_ref(program), ap["contract_ref"],
+                     ap["work_item_id"], program["payload"]["base_commit"],
+                     ap["role"]):
+                fail("dispatch context does not bind its exact assignment")
+        if used != set(contexts):
+            fail("unassigned context bundle is present in the evidence root")
+
+    def _validate_journal_chain(self, registry: Mapping[str, Any],
+                                auths: list[dict], assignments: list[dict],
+                                receipts: list[dict]) -> None:
+        manifests = _records(self, "section_scheduler_journal_manifest.v1")
+        if not (auths or assignments or receipts or manifests):
+            return
+        if not manifests:
+            fail("dispatch records exist without a typed journal manifest")
+        by_id = {record_id(manifest): manifest for manifest in manifests}
+        successors: dict[str, list[str]] = {}
+        heads = []
+        seen_dispatch: set[str] = set()
+        registry_payload = registry["payload"]
+        journal_identity = None
+        for manifest in manifests:
+            mp = manifest["payload"]
+            predecessor = mp["predecessor_journal_manifest_ref"]
+            if predecessor is None:
+                heads.append(manifest)
+            else:
+                predecessor_id = predecessor["record_id"]
+                successors.setdefault(predecessor_id, []).append(record_id(manifest))
+                pred = self.get(predecessor,
+                                versions=("section_scheduler_journal_manifest.v1",))
+                if mp["first_sequence"] != pred["payload"]["last_sequence"] + 1:
+                    fail("journal predecessor sequence is not contiguous")
+            identity = tuple(mp[field] for field in (
+                "journal_root_id", "journal_root_locator_sha256",
+                "journal_root_filesystem_id", "journal_root_file_id",
+                "journal_owner_principal_id", "journal_owner_control_id",
+                "journal_mode", "scheduler_authority_id"))
+            if journal_identity is None:
+                journal_identity = identity
+            elif journal_identity != identity:
+                fail("journal root identity changes within one chain")
+            if mp["scheduler_authority_id"] != \
+                    registry_payload["scheduler_authority_id"] or \
+                    (mp["journal_owner_principal_id"],
+                     mp["journal_owner_control_id"]) != \
+                    (registry_payload["scheduler_writer_principal_id"],
+                     registry_payload["scheduler_writer_control_id"]):
+                fail("journal protected writer identity mismatch")
+            for index, entry in enumerate(mp["entries"]):
+                target = self.get(entry["record_ref"])
+                tp = target["payload"]
+                if entry["record_ref"]["record_id"] in seen_dispatch:
+                    fail("dispatch record occurs more than once in journal")
+                seen_dispatch.add(entry["record_ref"]["record_id"])
+                if entry["sequence"] != tp["scheduler_journal_sequence"] or \
+                        entry["entry_sha256"] != tp["scheduler_journal_entry_sha256"]:
+                    fail("journal entry does not bind dispatch record")
+                writer = (registry_payload["scheduler_writer_principal_id"],
+                          registry_payload["scheduler_writer_control_id"]) \
+                    if index < 2 else \
+                    (registry_payload["launcher_writer_principal_id"],
+                     registry_payload["launcher_writer_control_id"])
+                if (entry["writer_principal_id"], entry["writer_control_id"]) \
+                        != writer:
+                    fail("journal entry writer substitution")
+            auth = self.get(mp["entries"][0]["record_ref"])["payload"]
+            assignment = self.get(mp["entries"][1]["record_ref"])["payload"]
+            receipt = self.get(mp["entries"][2]["record_ref"])["payload"]
+            _require_repeated_dispatch(auth, assignment,
+                                       omit={"launcher_executable_sha256",
+                                             "contract_ref",
+                                             "principal_registry_ref"})
+            _require_repeated_dispatch(auth, receipt,
+                                       omit={"contract_ref", "work_item_id",
+                                             "principal_registry_ref"})
+        if len(heads) != 1 or any(len(children) != 1
+                                  for children in successors.values()):
+            fail("journal manifests do not form one unbroken unforked chain")
+        all_dispatch = {record_id(record) for record in auths + assignments + receipts}
+        if seen_dispatch != all_dispatch:
+            fail("journal membership omits or adds a dispatch record")
+
+    def _validate_native_plans(self, program: Mapping[str, Any]) -> None:
+        """Close dispatch-plan membership and the assembly union.
+
+        A locally valid plan proves only its own shape.  The complete root must
+        additionally prove that there is one plan for every journaled dispatch,
+        no unused plan, one assembly plan, byte-identical central descriptors,
+        and an assembly root set equal to the normalized union.
+        """
+        plans = _records(self, "section_native_inventory_plan.v1")
+        profiles = _records(self, "worker_sandbox_profile.v1")
+        assignments = _records(self, "section_assignment.v1")
+        if not plans:
+            fail("complete HSC evidence lacks native inventory plans")
+        assembly = [plan for plan in plans
+                    if plan["payload"]["scope"] == "assembly"]
+        dispatch = [plan for plan in plans
+                    if plan["payload"]["scope"] != "assembly"]
+        if len(assembly) != 1:
+            fail("evidence root requires exactly one native assembly plan")
+
+        pp = program["payload"]
+        for plan in plans:
+            if plan["payload"]["base_commit"] != pp["base_commit"]:
+                fail("native plan base commit differs from its program")
+
+        dispatch_by_key: dict[tuple[str, str, int], dict] = {}
+        for plan in dispatch:
+            payload = plan["payload"]
+            key = (payload["work_item_id"], payload["role"],
+                   payload["attempt"])
+            if key in dispatch_by_key:
+                fail("multiple native plans claim one dispatch attempt")
+            dispatch_by_key[key] = plan
+
+        assignment_by_key: dict[tuple[str, str, int], dict] = {}
+        for assignment in assignments:
+            payload = assignment["payload"]
+            key = (payload["work_item_id"], payload["role"],
+                   payload["attempt"])
+            if key in assignment_by_key:
+                fail("multiple assignments claim one dispatch attempt")
+            assignment_by_key[key] = assignment
+        if set(dispatch_by_key) != set(assignment_by_key):
+            fail("native dispatch plans do not exactly match journaled dispatches")
+
+        profile_ids = {record_id(profile) for profile in profiles}
+        used_profiles: set[str] = set()
+        used_plan_ids: set[str] = set()
+        for key, assignment in assignment_by_key.items():
+            ap = assignment["payload"]
+            profile = self.get(ap["sandbox_profile_ref"],
+                               versions=("worker_sandbox_profile.v1",))
+            profile_id = record_id(profile)
+            if profile_id not in profile_ids or profile_id in used_profiles:
+                fail("sandbox profile is missing, extra, or reused by a dispatch")
+            used_profiles.add(profile_id)
+            plan = self.get(profile["payload"]["native_inventory_plan_ref"],
+                            versions=("section_native_inventory_plan.v1",))
+            if record_id(plan) != record_id(dispatch_by_key[key]):
+                fail("dispatch profile does not reference its unique native plan")
+            if plan["payload"]["workspace_id"] != ap["workspace_id"]:
+                fail("dispatch plan workspace differs from its assignment")
+            used_plan_ids.add(record_id(plan))
+        if used_profiles != profile_ids or \
+                used_plan_ids != {record_id(plan) for plan in dispatch}:
+            fail("unused sandbox profile or native dispatch plan")
+
+        central_kinds = {
+            "candidate", "integration-checkout", "common-git", "council-root",
+            "owner-anchors", "other-worker-leaves", "canonical-evidence",
+            "hidden-suites",
+        }
+        central: dict[str, dict] = {}
+        union_by_id: dict[str, dict] = {}
+        for plan in dispatch:
+            for root in plan["payload"]["roots"]:
+                root_id = root["root_id"]
+                prior = union_by_id.get(root_id)
+                if prior is not None and prior != root:
+                    fail("one native root id has conflicting descriptors")
+                union_by_id[root_id] = root
+                if root["root_kind"] in central_kinds:
+                    previous = central.get(root["root_kind"])
+                    if previous is not None and previous != root:
+                        fail("central native root descriptor differs across plans")
+                    central[root["root_kind"]] = root
+        if set(central) != central_kinds:
+            fail("dispatch plans do not share the complete central root set")
+
+        output_owners: dict[str, tuple[str, str, int]] = {}
+        for key, plan in dispatch_by_key.items():
+            payload = plan["payload"]
+            expected_kind = f"{payload['role']}-output"
+            output = [root for root in payload["roots"]
+                      if root["root_kind"] == expected_kind]
+            runtime = [root for root in payload["roots"]
+                       if root["root_kind"] == "runtime-readonly"]
+            if len(output) != 1 or len(runtime) != 1:
+                fail("dispatch plan must contain one exact runtime and output")
+            workspace = payload["workspace_id"]
+            if output[0]["workspace_id"] != workspace or \
+                    runtime[0]["workspace_id"] != workspace:
+                fail("dispatch runtime/output does not bind its workspace")
+            prior = output_owners.get(output[0]["root_id"])
+            if prior is not None and prior != key:
+                fail("private output root is shared by two dispatches")
+            output_owners[output[0]["root_id"]] = key
+
+        assembly_roots = {root["root_id"]: root
+                          for root in assembly[0]["payload"]["roots"]}
+        if assembly_roots != union_by_id:
+            fail("assembly native roots are not the exact dispatch-root union")
+
+    def _validate_native_inventories(self) -> None:
+        plans = _records(self, "section_native_inventory_plan.v1")
+        inventories = _records(self, "section_native_inventory.v1")
+        if not plans and not inventories:
+            return
+        requirements: dict[tuple[str, str], tuple[dict, dict]] = {}
+        observed: dict[tuple[str, str, str], dict] = {}
+        for plan in plans:
+            pp = plan["payload"]
+            roots = {row["root_id"]: row for row in pp["roots"]}
+            checkout = next(row for row in pp["roots"]
+                            if row["root_kind"] == "integration-checkout")
+            common_git = next(row for row in pp["roots"]
+                              if row["root_kind"] == "common-git")
+            if checkout["view_kind"] != \
+                    "checkout-excluding-delegated-dotgit-v1" or \
+                    common_git["view_kind"] != "full-native-tree-v1" or \
+                    checkout["delegated_control_root_id"] != common_git["root_id"] or \
+                    checkout["delegated_control_identity"] != \
+                    common_git["native_identity"]:
+                fail("checkout/common-Git delegated view relation mismatch")
+            expected_locator = dict(checkout["locator"])
+            expected_locator["segments_hex"] = (
+                list(expected_locator["segments_hex"]) + ["2e676974"])
+            if common_git["locator"] != expected_locator:
+                fail("common-Git locator is not checkout locator plus .git")
+            for requirement in pp["observations"]:
+                key = (record_id(plan), requirement["observation_id"])
+                requirements[key] = (requirement, roots[requirement["root_id"]])
+        seen: set[tuple[str, str]] = set()
+        native_objects: dict[tuple[str, str], tuple[str, tuple[bytes, ...]]] = {}
+        for inventory in inventories:
+            ip = inventory["payload"]
+            plan = self.get(ip["native_inventory_plan_ref"],
+                            versions=("section_native_inventory_plan.v1",))
+            key = (record_id(plan), ip["observation_id"])
+            if key in seen or key not in requirements:
+                fail("native inventory duplicates or invents an observation")
+            seen.add(key)
+            requirement, root = requirements[key]
+            observed[(record_id(plan), root["root_id"], ip["phase"])] = ip
+            if ip["root_id"] != requirement["root_id"] or \
+                    ip["phase"] != requirement["phase"] or \
+                    ip["base_commit"] != plan["payload"]["base_commit"] or \
+                    ip["observation_workspace_id"] != requirement["workspace_id"] or \
+                    (ip["observed_root_filesystem_id"],
+                     ip["observed_root_file_id"]) != \
+                    (root["filesystem_id"], root["file_id"]):
+                fail("native inventory does not equal its plan requirement/root")
+            if requirement["scope"] == "assembly":
+                if ip["observer_assignment_ref"] is not None:
+                    fail("assembly inventory must have null observer assignment")
+            else:
+                assignment = self.get(ip["observer_assignment_ref"],
+                                      versions=("section_assignment.v1",))
+                ap = assignment["payload"]
+                if (ap["work_item_id"], ap["role"], ap["attempt"],
+                    ap["workspace_id"]) != \
+                        (requirement["work_item_id"], requirement["role"],
+                         requirement["attempt"], requirement["workspace_id"]):
+                    fail("native inventory observer assignment mismatch")
+            expected_hash = domain_hash(
+                "council:section-native-inventory-content:v1", {
+                    "native_inventory_plan_ref": ip["native_inventory_plan_ref"],
+                    "root_spec": root,
+                    "observation_requirement": requirement,
+                    "observer_assignment_ref": ip["observer_assignment_ref"],
+                    "observation_workspace_id": ip["observation_workspace_id"],
+                    "phase": ip["phase"],
+                    "entries": ip["entries"],
+                })
+            if ip["inventory_sha256"] != expected_hash:
+                fail("native inventory content hash mismatch")
+            if root["root_kind"] in ("candidate", "builder-output",
+                                     "assessor-output") and any(
+                    entry["path"]["segments_hex"] and
+                    entry["path"]["segments_hex"][0] == "2e676974"
+                    for entry in ip["entries"]):
+                fail("full-tree candidate/output inventory contains .git")
+            if root["root_kind"] == "integration-checkout" and any(
+                    entry["path"]["segments_hex"] and
+                    entry["path"]["segments_hex"][0] == "2e676974"
+                    for entry in ip["entries"]):
+                fail("checkout inventory did not exclude delegated .git")
+            root_object = (root["filesystem_id"], root["file_id"])
+            _claim_native_object(native_objects, root_object,
+                                 root["root_id"], ())
+            for entry in ip["entries"]:
+                decoded = tuple(bytes.fromhex(item)
+                                for item in entry["path"]["segments_hex"])
+                _claim_native_object(native_objects,
+                                     (entry["filesystem_id"], entry["file_id"]),
+                                     root["root_id"], decoded)
+        if seen != set(requirements):
+            fail("native inventory omits a required observation")
+        inventory_root_ids = {
+            root["root_id"] for plan in plans for root in plan["payload"]["roots"]
+        }
+        for manifest in _records(
+                self, "section_scheduler_journal_manifest.v1"):
+            mp = manifest["payload"]
+            if mp["journal_root_id"] in inventory_root_ids:
+                fail("scheduler journal anchor aliases an inventory root id")
+            _claim_native_object(
+                native_objects,
+                (mp["journal_root_filesystem_id"], mp["journal_root_file_id"]),
+                "journal:" + mp["journal_root_id"], ())
+        for plan in plans:
+            pp = plan["payload"]
+            phases = (("pre-assembly", "post-assembly")
+                      if pp["scope"] == "assembly"
+                      else ("pre-dispatch", "post-worker"))
+            mutable_kind = ("candidate" if pp["scope"] == "assembly"
+                            else f"{pp['role']}-output")
+            for root in pp["roots"]:
+                before = observed[(record_id(plan), root["root_id"], phases[0])]
+                after = observed[(record_id(plan), root["root_id"], phases[1])]
+                if root["root_kind"] != mutable_kind and \
+                        before["entries"] != after["entries"]:
+                    fail("protected native root changed across its observation pair")
+
+    def _validate_attestations(self) -> None:
+        for attestation in _records(self, "worker_sandbox_attestation.v1"):
+            ap = attestation["payload"]
+            assignment = self.get(ap["assignment_ref"],
+                                  versions=("section_assignment.v1",))
+            receipt = self.get(ap["launcher_receipt_ref"],
+                               versions=("section_launcher_receipt.v1",))
+            manifest = self.get(ap["journal_manifest_ref"], versions=(
+                "section_scheduler_journal_manifest.v1",))
+            profile = self.get(ap["sandbox_profile_ref"],
+                               versions=("worker_sandbox_profile.v1",))
+            if receipt["payload"]["barrier_status"] != "ready" or \
+                    receipt["payload"]["assignment_ref"] != record_ref(assignment) or \
+                    manifest["payload"]["entries"][2]["record_ref"] != \
+                    record_ref(receipt) or assignment["payload"]["sandbox_profile_ref"] \
+                    != record_ref(profile):
+                fail("sandbox attestation lacks an eligible exact dispatch")
+            plan = self.get(profile["payload"]["native_inventory_plan_ref"],
+                            versions=("section_native_inventory_plan.v1",))
+            pp, sp = plan["payload"], assignment["payload"]
+            if (pp["work_item_id"], pp["role"], pp["attempt"],
+                pp["workspace_id"]) != \
+                    (sp["work_item_id"], sp["role"], sp["attempt"],
+                     sp["workspace_id"]):
+                fail("sandbox profile native plan does not match assignment")
+            if ap["source_snapshot_ref"] != profile["payload"]["source_snapshot_ref"]:
+                fail("attestation source snapshot differs from sandbox profile")
+            expected_before = {row["observation_id"] for row in pp["observations"]
+                               if row["phase"] == "pre-dispatch"}
+            expected_after = {row["observation_id"] for row in pp["observations"]
+                              if row["phase"] == "post-worker"}
+            before = {self.get(ref, versions=("section_native_inventory.v1",))
+                      ["payload"]["observation_id"]
+                      for ref in ap["native_inventory_before_refs"]}
+            after = {self.get(ref, versions=("section_native_inventory.v1",))
+                     ["payload"]["observation_id"]
+                     for ref in ap["native_inventory_after_refs"]}
+            if before != expected_before or after != expected_after:
+                fail("attestation native inventory membership is incomplete")
+
+    def _validate_assessments(self, root: Mapping[str, Any]) -> None:
+        inventory_paths = {row["record_id"]: row["repository_relpath"]
+                           for row in root["payload"]["record_inventory"]}
+        findings = {record_id(record): record
+                    for record in _records(self, "section_finding.v1")}
+        for finding in findings.values():
+            fp = finding["payload"]
+            declaration_record = self.get(
+                fp["finding_declaration_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("finding_declaration",))
+            declaration = self.closed_values.get(record_id(declaration_record))
+            if declaration is None:
+                fail("finding declaration bytes were not closed JSON")
+            mapping = {
+                "audit_level": "audit_level", "severity": "severity",
+                "invariant_id": "invariant_id", "claim": "claim",
+                "affected_path": "affected_path",
+                "blocks_local_pass": "blocks_local_pass", "status": "status",
+            }
+            for output_field, declared_field in mapping.items():
+                if fp[output_field] != declaration[declared_field]:
+                    fail("packaged finding changes assessor declaration judgment")
+            if fp["predecessor_finding_ref"] != \
+                    declaration["predecessor_finding_ref"]:
+                fail("packaged finding changes predecessor lineage")
+        assessments = _records(self, "section_assessment_manifest.v1")
+        for assessment in assessments:
+            ap = assessment["payload"]
+            contract = self.get(ap["contract_ref"],
+                                versions=("section_contract.v1",))
+            assignment = self.get(ap["assessor_assignment_ref"],
+                                  versions=("section_assignment.v1",))
+            context = self.get(ap["assessor_context_ref"],
+                               versions=("section_context_bundle.v1",))
+            proposal = self.get(ap["proposal_ref"],
+                                versions=("section_content_record.v1",),
+                                artifacts=("proposal",))
+            asp, ctp = assignment["payload"], context["payload"]
+            if asp["role"] != "assessor" or \
+                    (asp["contract_ref"], asp["work_item_id"],
+                     asp["context_ref"]) != \
+                    (ap["contract_ref"], ap["work_item_id"],
+                     ap["assessor_context_ref"]) or \
+                    (ctp["role"], ctp["contract_ref"], ctp["work_item_id"],
+                     ctp["proposal_ref"]) != \
+                    ("assessor", ap["contract_ref"], ap["work_item_id"],
+                     ap["proposal_ref"]):
+                fail("assessment does not bind its exact assessor dispatch")
+            declaration_record = self.get(
+                ap["assessment_declaration_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("assessment_declaration",))
+            if declaration_record["payload"]["producer_assignment_ref"] != \
+                    ap["assessor_assignment_ref"]:
+                fail("assessment declaration is not assessor-owned")
+            declaration = self.closed_values.get(record_id(declaration_record))
+            if declaration is None:
+                fail("assessment declaration bytes were not closed JSON")
+            exact_fields = {
+                "program_ref": ap["program_ref"],
+                "contract_ref": ap["contract_ref"],
+                "work_item_id": ap["work_item_id"],
+                "assessor_assignment_ref": ap["assessor_assignment_ref"],
+                "assessor_context_ref": ap["assessor_context_ref"],
+                "proposal_ref": ap["proposal_ref"],
+                "predecessor_assessment_ref": ap["predecessor_assessment_ref"],
+                "declared_disposition": ap["local_assessment"],
+                "error_reason": ap["error_reason"],
+            }
+            for field, value in exact_fields.items():
+                if declaration[field] != value:
+                    fail("assessment manifest changes its sealed declaration")
+            check_declarations = []
+            for ref in ap["check_declaration_refs"]:
+                record = self.get(ref, versions=("section_content_record.v1",),
+                                  artifacts=("check_declaration",))
+                if record["payload"]["producer_assignment_ref"] != \
+                        ap["assessor_assignment_ref"]:
+                    fail("check declaration is not assessor-owned")
+                check_declarations.append(self.closed_values[record_id(record)])
+            declared_check_paths = declaration["check_declaration_output_relpaths"]
+            actual_check_paths = [self.get(ref)["payload"]["storage_relpath"]
+                                  for ref in ap["check_declaration_refs"]]
+            if [path.rsplit("/", 1)[-1] for path in actual_check_paths] != \
+                    [path.rsplit("/", 1)[-1] for path in declared_check_paths]:
+                fail("assessment check declarations differ from sealed membership")
+            declared_by_id = {row["check_id"]: row for row in check_declarations}
+            result_by_id = {row["check_id"]: row for row in ap["check_results"]}
+            if set(declared_by_id) != set(result_by_id):
+                fail("assessment check result membership mismatch")
+            for check_id, result in result_by_id.items():
+                if result["status"] != declared_by_id[check_id]["status"]:
+                    fail("assessment changes a declared check status")
+                evidence = self.get(result["evidence_ref"],
+                                    versions=("section_content_record.v1",),
+                                    artifacts=("check_evidence",))
+                declared_path = declared_by_id[check_id][
+                    "evidence_output_relpath"]
+                if evidence["payload"]["producer_assignment_ref"] != \
+                        ap["assessor_assignment_ref"] or \
+                        evidence["payload"]["storage_relpath"].rsplit(
+                            "/", 1)[-1] != declared_path.rsplit("/", 1)[-1]:
+                    fail("check evidence does not map to assessor declaration")
+            finding_records = [self.get(ref, versions=("section_finding.v1",))
+                               for ref in ap["finding_refs"]]
+            declared_finding_paths = declaration[
+                "finding_declaration_output_relpaths"]
+            actual_finding_paths = [self.get(
+                finding["payload"]["finding_declaration_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("finding_declaration",))["payload"][
+                    "storage_relpath"] for finding in finding_records]
+            if [path.rsplit("/", 1)[-1] for path in actual_finding_paths] != \
+                    [path.rsplit("/", 1)[-1]
+                     for path in declared_finding_paths]:
+                fail("assessment finding declarations differ from sealed membership")
+            for finding in finding_records:
+                fp = finding["payload"]
+                declaration_content = self.get(
+                    fp["finding_declaration_ref"],
+                    versions=("section_content_record.v1",),
+                    artifacts=("finding_declaration",))
+                if (fp["contract_ref"], fp["assessor_assignment_ref"],
+                    fp["affected_proposal_ref"]) != \
+                        (ap["contract_ref"], ap["assessor_assignment_ref"],
+                         ap["proposal_ref"]) or \
+                        declaration_content["payload"][
+                            "producer_assignment_ref"] != \
+                        ap["assessor_assignment_ref"]:
+                    fail("finding is not owned by the exact assessment dispatch")
+            tuples = sorted(({
+                "record_relpath": inventory_paths[record_id(finding)],
+                "record_id": record_id(finding),
+                "content_sha256": compute_content_sha(finding),
+            } for finding in finding_records),
+                key=lambda row: row["record_relpath"])
+            expected_inventory = domain_hash(
+                "council:section-finding-inventory:v1", tuples)
+            if ap["finding_inventory_sha256"] != expected_inventory or \
+                    ap["finding_count"] != len(finding_records):
+                fail("assessment finding inventory is incomplete")
+            open_blockers = sum(
+                1 for finding in finding_records
+                if finding["payload"]["status"] == "open" and
+                finding["payload"]["blocks_local_pass"])
+            if ap["open_blocking_count"] != open_blockers:
+                fail("assessment open blocking count mismatch")
+            required_checks = set(contract["payload"]["required_check_ids"])
+            if set(result_by_id) != required_checks:
+                fail("assessment is missing or adds contract-required checks")
+            statuses = {row["status"] for row in ap["check_results"]}
+            if "error" in statuses and ap["error_reason"] is None:
+                fail("an errored check requires a sealed error reason")
+            expected_disposition = "error" if ap["error_reason"] is not None \
+                else "blocked" if "fail" in statuses or open_blockers \
+                else "pass"
+            if ap["local_assessment"] != expected_disposition:
+                fail("assessment disposition is not deterministically derived")
+            predecessor = ap["predecessor_assessment_ref"]
+            if predecessor is not None:
+                prior = self.get(predecessor,
+                                 versions=("section_assessment_manifest.v1",))
+                prior_findings = set(_ref_ids(prior["payload"]["finding_refs"]))
+                carried = set()
+                for finding in finding_records:
+                    fpred = finding["payload"]["predecessor_finding_ref"]
+                    carried.add(fpred["record_id"] if fpred else record_id(finding))
+                if not prior_findings <= carried:
+                    fail("reassessment drops a predecessor finding")
+
+    def _validate_bundles(self) -> None:
+        graphs = _records(self, "section_work_graph.v1")
+        graph_items = {} if not graphs else {
+            item["work_item_id"]: item
+            for item in graphs[0]["payload"]["work_items"]
+        }
+        bundles = _records(self, "section_evidence_bundle.v1")
+        bundle_by_item: dict[str, dict] = {}
+        for bundle in bundles:
+            bp = bundle["payload"]
+            if bp["work_item_id"] in bundle_by_item:
+                fail("work item has more than one terminal evidence bundle")
+            bundle_by_item[bp["work_item_id"]] = bundle
+            item = graph_items.get(bp["work_item_id"])
+            if item is None or item["section_contract_ref"] != bp["contract_ref"]:
+                fail("evidence bundle is outside the frozen work graph")
+            builder = self.get(bp["builder_assignment_ref"],
+                               versions=("section_assignment.v1",))
+            assessor = self.get(bp["assessor_assignment_ref"],
+                                versions=("section_assignment.v1",))
+            bpa, apa = builder["payload"], assessor["payload"]
+            if bpa["role"] != "builder" or apa["role"] != "assessor" or \
+                    bpa["work_item_id"] != bp["work_item_id"] or \
+                    apa["work_item_id"] != bp["work_item_id"] or \
+                    bpa["contract_ref"] != bp["contract_ref"] or \
+                    apa["contract_ref"] != bp["contract_ref"]:
+                fail("bundle assignment role/work-item mismatch")
+            if bp["base_commit"] != self.get(
+                    bp["contract_ref"], versions=("section_contract.v1",))[
+                        "payload"]["base_commit"]:
+                fail("bundle base commit differs from its contract")
+            registry = self.get(bpa["principal_registry_ref"],
+                                versions=("section_principal_registry.v1",))
+            if apa["principal_registry_ref"] != record_ref(registry):
+                fail("builder and assessor use different registries")
+            rows = {row["principal_id"]: row
+                    for row in registry["payload"]["principals"]}
+            br, ar = rows[bpa["principal_id"]], rows[apa["principal_id"]]
+            distinct = (
+                bpa["principal_id"] != apa["principal_id"],
+                bpa["authority_control_id"] != apa["authority_control_id"],
+                br["authority_control_key_digest"] !=
+                ar["authority_control_key_digest"],
+                bpa["principal_credential_digest"] !=
+                apa["principal_credential_digest"],
+                bpa["session_nonce"] != apa["session_nonce"],
+                bpa["workspace_id"] != apa["workspace_id"],
+                bpa["output_leaf"] != apa["output_leaf"],
+            )
+            if not all(distinct):
+                fail("builder and assessor are not structurally independent")
+            for role in ("builder", "assessor"):
+                receipt = self.get(bp[f"{role}_launcher_receipt_ref"],
+                                   versions=("section_launcher_receipt.v1",))
+                if receipt["payload"]["barrier_status"] != "ready":
+                    fail("refused receipt cannot support an evidence bundle")
+                if receipt["payload"]["assignment_ref"] != \
+                        bp[f"{role}_assignment_ref"]:
+                    fail("bundle receipt does not bind exact assignment")
+                manifest = self.get(bp[f"{role}_journal_manifest_ref"],
+                                    versions=(
+                                        "section_scheduler_journal_manifest.v1",))
+                if record_ref(receipt) != \
+                        manifest["payload"]["entries"][2]["record_ref"]:
+                    fail("bundle receipt is not the journal receipt slot")
+                assignment_ref = bp[f"{role}_assignment_ref"]
+                context_ref = bp[f"{role}_context_ref"]
+                attestation = self.get(
+                    bp[f"{role}_sandbox_attestation_ref"],
+                    versions=("worker_sandbox_attestation.v1",))
+                atp = attestation["payload"]
+                if atp["assignment_ref"] != assignment_ref or \
+                        atp["launcher_receipt_ref"] != \
+                        bp[f"{role}_launcher_receipt_ref"] or \
+                        atp["journal_manifest_ref"] != \
+                        bp[f"{role}_journal_manifest_ref"]:
+                    fail("bundle attestation does not bind its dispatch evidence")
+                assignment = self.get(assignment_ref,
+                                      versions=("section_assignment.v1",))
+                if assignment["payload"]["context_ref"] != context_ref:
+                    fail("bundle context differs from its assignment")
+            assessment = self.get(bp["assessment_manifest_ref"],
+                                  versions=("section_assessment_manifest.v1",))
+            if (bp["local_assessment"], bp["error_reason"]) != \
+                    (assessment["payload"]["local_assessment"],
+                     assessment["payload"]["error_reason"]):
+                fail("bundle changes assessor disposition")
+            asp = assessment["payload"]
+            if (asp["contract_ref"], asp["work_item_id"],
+                asp["assessor_assignment_ref"], asp["assessor_context_ref"],
+                asp["proposal_ref"]) != \
+                    (bp["contract_ref"], bp["work_item_id"],
+                     bp["assessor_assignment_ref"], bp["assessor_context_ref"],
+                     bp["proposal_ref"]):
+                fail("bundle assessment does not bind the bundle inputs")
+            proposal = self.get(bp["proposal_ref"],
+                                versions=("section_content_record.v1",),
+                                artifacts=("proposal",))
+            if proposal["payload"]["producer_assignment_ref"] != \
+                    bp["builder_assignment_ref"]:
+                fail("bundle proposal is not owned by its builder")
+            contract = self.get(bp["contract_ref"],
+                                versions=("section_contract.v1",))
+            if {row["check_id"] for row in bp["invariant_results"]} != \
+                    set(contract["payload"]["required_invariant_ids"]):
+                fail("bundle invariant results do not equal contract requirements")
+        if set(bundle_by_item) != set(graph_items):
+            fail("complete evidence lacks exactly one bundle per work item")
+
+    def _validate_final_scope(self, program: Mapping[str, Any],
+                              root: Mapping[str, Any]) -> None:
+        final_scope = self.get(root["payload"]["final_scope_ref"],
+                               versions=("final_scope_manifest.v1",))
+        fp = final_scope["payload"]
+        pp = program["payload"]
+        if fp["base_commit"] != pp["base_commit"] or \
+                fp["work_graph_ref"] != root["payload"]["work_graph_ref"]:
+            fail("final scope base commit or work graph mismatch")
+        program_changes = [change for declaration in pp["section_declarations"]
+                           for change in declaration["predicted_changes"]]
+        program_changes.sort(key=change_sort_key)
+        _require_narrow_changes(program_changes, fp["predicted_changes"],
+                                "final scope")
+        actual_by_key = {(change["path"], change["kind"],
+                          change["rename_source"]): change
+                         for change in fp["actual_changes"]}
+        predicted_by_key = {(change["path"], change["kind"],
+                             change["rename_source"]): change
+                            for change in fp["predicted_changes"]}
+        if not set(actual_by_key) <= set(predicted_by_key):
+            fail("actual scope contains an unpredicted change")
+        for key, actual in actual_by_key.items():
+            if not predicted_matches_actual(predicted_by_key[key], actual):
+                fail("actual change does not match its exact prediction")
+        for key, predicted in predicted_by_key.items():
+            if predicted["required"] and key not in actual_by_key:
+                fail("required predicted change was not realized")
+        prefix = f"artifacts/section-council/{pp['planned_request_id']}/"
+        expected_envelopes = sorted((prefix + "final-scope.json",
+                                     prefix + "root.json"))
+        if fp["envelope_paths"] != expected_envelopes:
+            fail("final scope envelope paths are not the fixed v1 paths")
+        system_predictions = {change["path"]
+                              for change in pp["system_artifact_predictions"]}
+        realized = set(fp["realized_system_artifact_paths"])
+        if not realized <= system_predictions:
+            fail("realized system artifact path was not predeclared")
+        project_paths = {change["path"] for change in fp["actual_changes"]}
+        if realized & (project_paths | set(expected_envelopes)):
+            fail("project, system, and envelope path domains overlap")
+        bundles = {record_id(record)
+                   for record in _records(self, "section_evidence_bundle.v1")}
+        if set(_ref_ids(fp["section_bundle_refs"])) != bundles:
+            fail("final scope omits or adds a section evidence bundle")
+
+    def _validate_boundary_reports(self, root: Mapping[str, Any]) -> None:
+        reports = _records(self, "boundary_impact_report.v1")
+        if len(reports) != 1:
+            fail("complete HSC evidence requires exactly one boundary report")
+        report = reports[0]
+        bp = report["payload"]
+        if bp["work_graph_ref"] != root["payload"]["work_graph_ref"] or \
+                bp["final_scope_ref"] != root["payload"]["final_scope_ref"]:
+            fail("boundary report does not bind final graph and scope")
+        bundles = _records(self, "section_evidence_bundle.v1")
+        if set(_ref_ids(bp["section_bundle_refs"])) != \
+                {record_id(record) for record in bundles}:
+            fail("boundary report omits or adds a section bundle")
+        if bp["unknown_classification_count"] != 0 or \
+                bp["conflict_evidence_refs"]:
+            fail("unknown or conflicting boundary classification blocks publication")
+        if any(result["status"] != "pass"
+               for result in bp["activated_check_results"]):
+            fail("boundary check did not pass")
+        for bundle in bundles:
+            if bundle["payload"]["local_assessment"] != "pass":
+                fail("non-passing section bundle blocks publication")
+
+    def _validate_rooted_paths(self, program: Mapping[str, Any],
+                               root: Mapping[str, Any]) -> None:
+        rp = root["payload"]
+        pp = program["payload"]
+        prefix = f"artifacts/section-council/{pp['planned_request_id']}/"
+        final_scope_path = prefix + "final-scope.json"
+        final_scope = self.get(rp["final_scope_ref"],
+                               versions=("final_scope_manifest.v1",))
+        paths = set()
+        for row in rp["record_inventory"]:
+            if not row["repository_relpath"].startswith(prefix):
+                fail("HSC record path escapes its fixed request namespace")
+            if row["schema_version"] == "final_scope_manifest.v1":
+                if row["record_id"] != record_id(final_scope) or \
+                        row["repository_relpath"] != final_scope_path:
+                    fail("final-scope record is not at its fixed envelope path")
+            else:
+                if row["repository_relpath"] in paths:
+                    fail("duplicate rooted system path")
+                paths.add(row["repository_relpath"])
+        for record in self.records:
+            if record["schema_version"] in (
+                    "section_bootstrap_content.v1", "section_content_record.v1"):
+                path = record["payload"]["storage_relpath"]
+                if path in paths:
+                    fail("record/raw content path alias")
+                paths.add(path)
+        require_unique_paths(sorted(paths), "rooted system paths")
+        if paths != set(final_scope["payload"]["realized_system_artifact_paths"]):
+            fail("rooted system paths do not equal final-scope realization")
+
+
+def compute_content_sha(record: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
+
+
+def _records(store: RecordStore, schema_version: str) -> list[dict]:
+    return [record for record in store.records
+            if record["schema_version"] == schema_version]
+
+
+def _ref_ids(refs: Iterable[Mapping[str, str]]) -> list[str]:
+    return [ref["record_id"] for ref in refs]
+
+
+def _change_key(change: Mapping[str, Any]) -> tuple:
+    return (change["path"], change["kind"], change["rename_source"],
+            change["blob_before"], change["mode_before"])
+
+
+def _require_narrow_changes(parent: Iterable[Mapping[str, Any]],
+                            child: Iterable[Mapping[str, Any]],
+                            where: str) -> None:
+    parent_map = {_change_key(change): change for change in parent}
+    child_map = {_change_key(change): change for change in child}
+    if not set(child_map) <= set(parent_map):
+        fail(f"{where} widens its predicted change set")
+    for key, change in parent_map.items():
+        if change["required"] and key not in child_map:
+            fail(f"{where} drops a required predicted change")
+    for key, change in child_map.items():
+        if change["required"] != parent_map[key]["required"]:
+            fail(f"{where} changes a prediction's required flag")
+
+
+def _require_budget_narrow(parent: Mapping[str, int], child: Mapping[str, int],
+                           where: str) -> None:
+    if any(child[field] > parent[field] for field in parent):
+        fail(f"{where} widens its budget")
+
+
+def _require_repeated_dispatch(left: Mapping[str, Any],
+                               right: Mapping[str, Any], *,
+                               omit: set[str] | None = None) -> None:
+    excluded = set(omit or ()) | {"scheduler_journal_sequence",
+                                  "scheduler_journal_entry_sha256",
+                                  "authorization_ref", "assignment_ref",
+                                  "barrier_status"}
+    repeated = {
+        "program_ref", "contract_ref", "work_item_id", "role",
+        "principal_registry_ref", "principal_id", "authority_control_id",
+        "principal_credential_digest", "scheduler_authority_id",
+        "launcher_executable_sha256", "session_nonce", "attempt", "context_ref",
+        "sandbox_profile_ref", "workspace_id", "output_leaf",
+    }
+    for field in sorted(repeated - excluded):
+        if field in left and field in right and left[field] != right[field]:
+            fail(f"dispatch repeated field {field} changed")
+
+
+def _claim_native_object(seen: dict[tuple[str, str],
+                                    tuple[str, tuple[bytes, ...]]],
+                         native_id: tuple[str, str], root_id: str,
+                         path: tuple[bytes, ...]) -> None:
+    location = (root_id, path)
+    prior = seen.get(native_id)
+    if prior is not None and prior != location:
+        fail("native file identity aliases two namespaces or paths")
+    seen[native_id] = location
+
+
+def _closed_check_declaration(value: Any) -> list[RefRequirement]:
+    if not isinstance(value, dict):
+        fail("check declaration must be an object")
+    if set(value) != {"check_id", "status", "evidence_output_relpath"}:
+        fail("check declaration exact keys mismatch")
+    require_slug(value["check_id"], "check_declaration.check_id")
+    require_literal(value["status"], ("pass", "fail", "error"),
+                    "check_declaration.status")
+    validate_path(value["evidence_output_relpath"],
+                  "check_declaration.evidence_output_relpath")
+    return []
+
+
+def _closed_finding_declaration(value: Any) -> list[RefRequirement]:
+    keys = {"audit_level", "severity", "invariant_id", "claim",
+            "evidence_output_relpath", "reproduction_output_relpath",
+            "affected_path", "blocks_local_pass", "status",
+            "predecessor_finding_ref", "resolution_output_relpath"}
+    if not isinstance(value, dict) or set(value) != keys:
+        fail("finding declaration exact keys mismatch")
+    require_literal(value["audit_level"], ("section", "boundary", "system"),
+                    "finding_declaration.audit_level")
+    require_literal(value["severity"],
+                    ("INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"),
+                    "finding_declaration.severity")
+    require_slug(value["invariant_id"], "finding_declaration.invariant_id")
+    require_string(value["claim"], "finding_declaration.claim")
+    validate_path(value["evidence_output_relpath"],
+                  "finding_declaration.evidence_output_relpath")
+    validate_path(value["reproduction_output_relpath"],
+                  "finding_declaration.reproduction_output_relpath")
+    if value["affected_path"] is not None:
+        validate_path(value["affected_path"], "finding_declaration.affected_path")
+    require_bool(value["blocks_local_pass"],
+                 "finding_declaration.blocks_local_pass")
+    status = require_literal(value["status"],
+                             ("open", "resolved", "unreproduced"),
+                             "finding_declaration.status")
+    predecessor = validate_ref(value["predecessor_finding_ref"],
+                               "finding_declaration.predecessor_finding_ref",
+                               nullable=True)
+    if value["resolution_output_relpath"] is not None:
+        validate_path(value["resolution_output_relpath"],
+                      "finding_declaration.resolution_output_relpath")
+    if status == "resolved" and (predecessor is None or
+                                  value["resolution_output_relpath"] is None):
+        fail("resolved finding declaration lacks lineage or resolution")
+    if status != "resolved" and value["resolution_output_relpath"] is not None:
+        fail("non-resolved finding declaration carries resolution")
+    return ([] if predecessor is None else [RefRequirement(
+        predecessor, "finding_declaration.predecessor_finding_ref",
+        ("section_finding.v1",))])
+
+
+def _closed_assessment_declaration(value: Any) -> list[RefRequirement]:
+    keys = {"schema_version", "program_ref", "contract_ref", "work_item_id",
+            "assessor_assignment_ref", "assessor_context_ref", "proposal_ref",
+            "check_declaration_output_relpaths",
+            "finding_declaration_output_relpaths", "predecessor_assessment_ref",
+            "declared_disposition", "error_reason"}
+    if not isinstance(value, dict) or set(value) != keys:
+        fail("assessment declaration exact keys mismatch")
+    require_literal(value["schema_version"],
+                    ("section-assessment-declaration.v1",),
+                    "assessment_declaration.schema_version")
+    refs = []
+    typed = (
+        ("program_ref", "section_program.v1"),
+        ("contract_ref", "section_contract.v1"),
+        ("assessor_assignment_ref", "section_assignment.v1"),
+        ("assessor_context_ref", "section_context_bundle.v1"),
+        ("proposal_ref", "section_content_record.v1"),
+    )
+    for field, version in typed:
+        ref = validate_ref(value[field], f"assessment_declaration.{field}")
+        artifacts = ("proposal",) if field == "proposal_ref" else ()
+        refs.append(RefRequirement(ref, f"assessment_declaration.{field}",
+                                   (version,), artifacts))
+    require_h(value["work_item_id"], "assessment_declaration.work_item_id")
+    all_paths = []
+    for field in ("check_declaration_output_relpaths",
+                  "finding_declaration_output_relpaths"):
+        require_sorted_unique(value[field], f"assessment_declaration.{field}",
+                              nonempty=field.startswith("check"))
+        for index, path in enumerate(value[field]):
+            validate_path(path, f"assessment_declaration.{field}[{index}]")
+            all_paths.append(path)
+    if len(all_paths) != len(set(all_paths)):
+        fail("assessment declaration output paths overlap")
+    predecessor = validate_ref(value["predecessor_assessment_ref"],
+                               "assessment_declaration.predecessor_assessment_ref",
+                               nullable=True)
+    if predecessor:
+        refs.append(RefRequirement(
+            predecessor, "assessment_declaration.predecessor_assessment_ref",
+            ("section_assessment_manifest.v1",)))
+    disposition = require_literal(value["declared_disposition"],
+                                  ("pass", "blocked", "error"),
+                                  "assessment_declaration.declared_disposition")
+    if disposition == "error":
+        require_string(value["error_reason"],
+                       "assessment_declaration.error_reason")
+    elif value["error_reason"] is not None:
+        fail("only error declaration carries error_reason")
+    return refs
