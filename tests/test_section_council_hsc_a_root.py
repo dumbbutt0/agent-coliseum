@@ -7,8 +7,11 @@ import hashlib
 
 import pytest
 
-from tools.council.schemas import canonical_json, domain_hash
-from tools.section_council import HSCValidationError, RecordStore
+from tools.council.schemas import (GENESIS_HASH, canonical_json,
+                                   compute_event_hash, domain_hash,
+                                   protocol_version)
+from tools.section_council import (HSCValidationError, RecordStore,
+                                   compute_bundle_staleness_inputs)
 from tools.section_council.core import file_id, filesystem_id, locator_sha256
 from tools.section_council.records import (
     make_record,
@@ -20,8 +23,6 @@ from tools.section_council.store import compute_content_sha
 
 REQUEST = "hsc-a-root-001"
 BASE = "0" * 40
-EVENT_ID = "001552-1234abcd"
-EVENT_HASH = "e" * 64
 H0 = "0" * 64
 H1 = "1" * 64
 H2 = "2" * 64
@@ -169,8 +170,33 @@ def _entry_hash(domain, payload):
     return domain_hash(domain, preimage)
 
 
+def _inventory_bytes(owned_records):
+    rows = sorted(({
+        "leaf_relpath": record["payload"]["storage_relpath"].rsplit("/", 1)[-1],
+        "artifact_type": record["payload"]["artifact_type"],
+        "media_type": record["payload"]["media_type"],
+        "byte_length": record["payload"]["byte_length"],
+        "blob_sha256": record["payload"]["blob_sha256"],
+    } for record in owned_records), key=lambda row: row["leaf_relpath"])
+    return canonical_json({"schema_version": "section-output-inventory.v1",
+                           "outputs": rows}).encode("utf-8")
+
+
 class RootFixture:
-    """Construct one small but complete evidence root in canonical order."""
+    """Construct one small but complete evidence root in canonical order.
+
+    ``tweaks`` maps a hook name to a mutator applied while building, so a
+    regression can inject exactly one adversarial change and every dependent
+    identity, reference, inventory, and root regenerates consistently:
+
+    - ``contract``: fn(contract_payload)
+    - ``bundle``: fn(bundle_payload)  (after staleness inputs are computed)
+    - ``staleness``: fn(list_of_refs) -> list_of_refs
+    - ``final_scope``: fn(final_scope_payload)
+    - ``boundary``: fn(boundary_payload)
+    - ``assessor_inventory_data``: fn(bytes) -> bytes
+    - ``extra_content``: fn(fixture, program_ref)  (may call fixture.content)
+    """
 
     def __init__(self):
         self.records = []
@@ -180,7 +206,10 @@ class RootFixture:
         self.content_slot = 0
         self.prefix = f"artifacts/section-council/{REQUEST}/"
         self.event = None
+        self.chain = None
         self.root = None
+        self.candidate_tree = None
+        self.base_tree = None
 
     def _record_path(self):
         path = f"{self.prefix}records/{self.record_slot:03d}.json"
@@ -326,7 +355,20 @@ class RootFixture:
             "section_scheduler_journal_manifest.v1", journal_payload))
         return authorization, assignment, receipt, journal
 
-    def build(self):
+    def validate(self, *, records=None, root=None, event=None, chain=None,
+                 candidate_tree=None, base_tree=None, blobs=None):
+        return RecordStore(
+            self.records if records is None else records,
+            blobs=self.blobs if blobs is None else blobs).validate_root(
+                self.root if root is None else root,
+                build_event=self.event if event is None else event,
+                chain=self.chain if chain is None else chain,
+                candidate_tree=(self.candidate_tree if candidate_tree is None
+                                else candidate_tree),
+                base_tree=self.base_tree if base_tree is None else base_tree)
+
+    def build(self, tweaks=None):
+        tweaks = tweaks or {}
         bootstrap_data = canonical_json({"schema": "hsc-v1"}).encode("utf-8")
         bootstrap = self.add(make_record("section_bootstrap_content.v1", {
             "planned_request_id": REQUEST,
@@ -410,11 +452,15 @@ class RootFixture:
             "root_policy_version": 1,
         }))
         pref = record_ref(program)
+
+        # A canonical, hash-valid, genesis-linked BUILD_STARTED authority.
         self.event = {
-            "event_id": EVENT_ID,
-            "event_hash": EVENT_HASH,
+            "protocol_version": protocol_version(),
+            "event_id": "000001-0000000a",
             "event_type": "BUILD_STARTED",
             "request_id": REQUEST,
+            "sender": "claude",
+            "timestamp_utc": "2026-07-16T00:00:00Z",
             "repository": "/home/dummy/agent-coliseum",
             "target_commit": BASE,
             "payload": {
@@ -423,7 +469,12 @@ class RootFixture:
                 "hsc_base_commit": BASE,
                 "hsc_execution_mode": "hierarchical",
             },
+            "previous_event_hash": GENESIS_HASH,
         }
+        self.event["event_hash"] = compute_event_hash(self.event)
+        self.chain = [self.event]
+        event_id = self.event["event_id"]
+        event_hash = self.event["event_hash"]
 
         assessment_profile = self.content(pref, "assessment_profile")
         source_snapshot = self.content(pref, "source_snapshot")
@@ -433,14 +484,13 @@ class RootFixture:
             pref, "assembler_binary", b"fixture-assembler",
             media="application/octet-stream")
         dependency_snapshot = self.content(pref, "read_inventory")
-        dependency_closure = self.content(pref, "read_inventory")
         operation_log = self.content(pref, "operation_log")
 
-        contract = self.add(make_record("section_contract.v1", {
+        contract_payload = {
             "program_ref": pref,
             "planned_request_id": REQUEST,
-            "parent_build_event_id": EVENT_ID,
-            "parent_build_event_hash": EVENT_HASH,
+            "parent_build_event_id": event_id,
+            "parent_build_event_hash": event_hash,
             "base_commit": BASE,
             "section_id": "section-a",
             "contract_version": 1,
@@ -455,7 +505,7 @@ class RootFixture:
             "exported_interfaces": [INTERFACE],
             "required_invariant_ids": ["invariant-1"],
             "required_check_ids": ["check-1"],
-            "required_evidence_ids": ["evidence-1"],
+            "required_evidence_ids": ["check-1", "invariant-1"],
             "threat_ids": ["scope-escape"],
             "assessment_profile_ref": record_ref(assessment_profile),
             "budget": BUDGET,
@@ -463,7 +513,11 @@ class RootFixture:
             "escalation_rule_ids": ["fail-closed"],
             "completion_condition_ids": ["report-emitted"],
             "integration_precondition_ids": ["council-audit"],
-        }))
+        }
+        if "contract" in tweaks:
+            tweaks["contract"](contract_payload)
+        contract = self.add(make_record("section_contract.v1",
+                                        contract_payload))
         item = {
             "work_item_id": H0,
             "section_contract_ref": record_ref(contract),
@@ -487,6 +541,14 @@ class RootFixture:
             "contract_refs": [record_ref(contract)],
             "work_items": [item],
         }))
+        closure_data = canonical_json({
+            "schema_version": "section-dependency-closure.v1",
+            "closure": {work_item_id: []},
+        }).encode("utf-8")
+        if "closure_data" in tweaks:
+            closure_data = tweaks["closure_data"](closure_data)
+        dependency_closure_record = self.content(
+            pref, "read_inventory", closure_data)
 
         candidate_workspace = "f" * 64
         builder_workspace = "b" * 64
@@ -586,8 +648,14 @@ class RootFixture:
         proposal = self.content(pref, "proposal", producer=builder_assignment)
         diff_preview = self.content(
             pref, "diff_preview", producer=builder_assignment)
+        builder_observed = [self.content(
+            pref, "check_evidence", producer=builder_assignment)
+            for _ in range(4)]
         builder_output_inventory = self.content(
-            pref, "read_inventory", producer=builder_assignment)
+            pref, "read_inventory",
+            _inventory_bytes([proposal, diff_preview] + builder_observed),
+            producer=builder_assignment)
+
         assessor_context = self.add(make_record(
             "section_context_bundle.v1", {
                 "program_ref": pref,
@@ -612,8 +680,48 @@ class RootFixture:
                 credential="6" * 64, workspace=assessor_workspace,
                 context=assessor_context, profile=assessor_profile,
                 first_sequence=3, predecessor=builder_journal)
+
+        assessor_observed = [self.content(
+            pref, "check_evidence", producer=assessor_assignment)
+            for _ in range(4)]
+        check_evidence = self.content(
+            pref, "check_evidence", producer=assessor_assignment)
+        check_data = canonical_json({
+            "check_id": "check-1",
+            "status": "pass",
+            "evidence_output_relpath": check_evidence["payload"][
+                "storage_relpath"].rsplit("/", 1)[-1],
+        }).encode("utf-8")
+        check_declaration = self.content(
+            pref, "check_declaration", check_data,
+            producer=assessor_assignment)
+        assessment_data = canonical_json({
+            "schema_version": "section-assessment-declaration.v1",
+            "program_ref": pref,
+            "contract_ref": record_ref(contract),
+            "work_item_id": work_item_id,
+            "assessor_assignment_ref": record_ref(assessor_assignment),
+            "assessor_context_ref": record_ref(assessor_context),
+            "proposal_ref": record_ref(proposal),
+            "check_declaration_output_relpaths": [
+                check_declaration["payload"]["storage_relpath"].rsplit("/", 1)[-1]],
+            "finding_declaration_output_relpaths": [],
+            "predecessor_assessment_ref": None,
+            "declared_disposition": "pass",
+            "error_reason": None,
+        }).encode("utf-8")
+        assessment_declaration = self.content(
+            pref, "assessment_declaration", assessment_data,
+            producer=assessor_assignment)
+        assessor_inventory_data = _inventory_bytes(
+            assessor_observed + [check_evidence, check_declaration,
+                                 assessment_declaration])
+        if "assessor_inventory_data" in tweaks:
+            assessor_inventory_data = tweaks["assessor_inventory_data"](
+                assessor_inventory_data)
         assessor_output_inventory = self.content(
-            pref, "read_inventory", producer=assessor_assignment)
+            pref, "read_inventory", assessor_inventory_data,
+            producer=assessor_assignment)
 
         assignment_for = {
             record_id(builder_plan): builder_assignment,
@@ -663,26 +771,18 @@ class RootFixture:
             inventory_for[(record_id(plan), "before")] = before
             inventory_for[(record_id(plan), "after")] = after
 
-        observed_evidence = [self.content(
-            pref, "check_evidence", producer=assignment)
-            for assignment in (builder_assignment,) * 4 + (assessor_assignment,) * 4]
-
-        def attestation(role, assignment, receipt, journal, profile_record,
-                        plan, output_inventory, offset):
+        def attestation(assignment, receipt, journal, profile_record,
+                        plan, output_inventory, observed):
             return self.add(make_record("worker_sandbox_attestation.v1", {
                 "program_ref": pref,
                 "assignment_ref": record_ref(assignment),
                 "launcher_receipt_ref": record_ref(receipt),
                 "journal_manifest_ref": record_ref(journal),
                 "sandbox_profile_ref": record_ref(profile_record),
-                "observed_mount_table_ref": record_ref(
-                    observed_evidence[offset]),
-                "observed_process_status_ref": record_ref(
-                    observed_evidence[offset + 1]),
-                "observed_environment_ref": record_ref(
-                    observed_evidence[offset + 2]),
-                "observed_fd_table_ref": record_ref(
-                    observed_evidence[offset + 3]),
+                "observed_mount_table_ref": record_ref(observed[0]),
+                "observed_process_status_ref": record_ref(observed[1]),
+                "observed_environment_ref": record_ref(observed[2]),
+                "observed_fd_table_ref": record_ref(observed[3]),
                 "source_snapshot_ref": record_ref(source_snapshot),
                 "output_inventory_ref": record_ref(output_inventory),
                 "native_inventory_before_refs": inventory_for[
@@ -697,42 +797,14 @@ class RootFixture:
             }))
 
         builder_attestation = attestation(
-            "builder", builder_assignment, builder_receipt, builder_journal,
-            builder_profile, builder_plan, builder_output_inventory, 0)
+            builder_assignment, builder_receipt, builder_journal,
+            builder_profile, builder_plan, builder_output_inventory,
+            builder_observed)
         assessor_attestation = attestation(
-            "assessor", assessor_assignment, assessor_receipt,
-            assessor_journal, assessor_profile, assessor_plan,
-            assessor_output_inventory, 4)
+            assessor_assignment, assessor_receipt, assessor_journal,
+            assessor_profile, assessor_plan, assessor_output_inventory,
+            assessor_observed)
 
-        check_evidence = self.content(
-            pref, "check_evidence", producer=assessor_assignment)
-        check_data = canonical_json({
-            "check_id": "check-1",
-            "status": "pass",
-            "evidence_output_relpath": check_evidence["payload"][
-                "storage_relpath"].rsplit("/", 1)[-1],
-        }).encode("utf-8")
-        check_declaration = self.content(
-            pref, "check_declaration", check_data,
-            producer=assessor_assignment)
-        assessment_data = canonical_json({
-            "schema_version": "section-assessment-declaration.v1",
-            "program_ref": pref,
-            "contract_ref": record_ref(contract),
-            "work_item_id": work_item_id,
-            "assessor_assignment_ref": record_ref(assessor_assignment),
-            "assessor_context_ref": record_ref(assessor_context),
-            "proposal_ref": record_ref(proposal),
-            "check_declaration_output_relpaths": [
-                check_declaration["payload"]["storage_relpath"].rsplit("/", 1)[-1]],
-            "finding_declaration_output_relpaths": [],
-            "predecessor_assessment_ref": None,
-            "declared_disposition": "pass",
-            "error_reason": None,
-        }).encode("utf-8")
-        assessment_declaration = self.content(
-            pref, "assessment_declaration", assessment_data,
-            producer=assessor_assignment)
         check_result = {
             "check_id": "check-1",
             "status": "pass",
@@ -766,7 +838,7 @@ class RootFixture:
                 "error_reason": None,
                 "predecessor_assessment_ref": None,
             }))
-        bundle = self.add(make_record("section_evidence_bundle.v1", {
+        bundle_payload = {
             "program_ref": pref,
             "contract_ref": record_ref(contract),
             "work_item_id": work_item_id,
@@ -798,8 +870,19 @@ class RootFixture:
                 "evidence_ref": None,
             }],
             "dependency_snapshot_ref": record_ref(dependency_snapshot),
-            "staleness_input_refs": [record_ref(contract)],
-        }))
+        }
+        staleness = compute_bundle_staleness_inputs(
+            self.records, self.blobs, bundle_payload)
+        if "staleness" in tweaks:
+            staleness = tweaks["staleness"](staleness)
+        bundle_payload["staleness_input_refs"] = staleness
+        if "bundle" in tweaks:
+            tweaks["bundle"](bundle_payload)
+        bundle = self.add(make_record("section_evidence_bundle.v1",
+                                      bundle_payload))
+
+        if "extra_content" in tweaks:
+            tweaks["extra_content"](self, pref)
 
         anticipated_boundary_path = (
             f"{self.prefix}records/{self.record_slot:03d}.json")
@@ -815,7 +898,11 @@ class RootFixture:
             "mode_before": None,
             "mode_after": "100644",
         }
-        final_scope = self.add(make_record("final_scope_manifest.v1", {
+        assembled_tree_sha256 = domain_hash(
+            "council:section-project-tree:v1",
+            [{"path": PROJECT_PREDICTION["path"], "blob_sha256": H2,
+              "git_mode": "100644", "kind": "file"}])
+        final_scope_payload = {
             "program_ref": pref,
             "work_graph_ref": record_ref(graph),
             "base_commit": BASE,
@@ -824,13 +911,18 @@ class RootFixture:
             "realized_system_artifact_paths": realized,
             "section_bundle_refs": [record_ref(bundle)],
             "assembler_binary_ref": record_ref(assembler),
-            "assembled_tree_sha256": H2,
+            "assembled_tree_sha256": assembled_tree_sha256,
             "envelope_paths": [
                 f"{self.prefix}final-scope.json",
                 f"{self.prefix}root.json",
             ],
-        }), path=f"{self.prefix}final-scope.json")
-        boundary = self.add(make_record("boundary_impact_report.v1", {
+        }
+        if "final_scope" in tweaks:
+            tweaks["final_scope"](final_scope_payload)
+        final_scope = self.add(
+            make_record("final_scope_manifest.v1", final_scope_payload),
+            path=f"{self.prefix}final-scope.json")
+        boundary_payload = {
             "program_ref": pref,
             "work_graph_ref": record_ref(graph),
             "section_bundle_refs": [record_ref(bundle)],
@@ -838,12 +930,16 @@ class RootFixture:
             "changed_section_ids": ["section-a"],
             "changed_interfaces": [INTERFACE],
             "affected_contract_refs": [record_ref(contract)],
-            "dependency_closure_ref": record_ref(dependency_closure),
+            "dependency_closure_ref": record_ref(dependency_closure_record),
             "activated_check_results": [check_result],
             "conflict_evidence_refs": [],
             "unknown_classification_count": 0,
-            "required_system_audit_scope_ids": ["system-scope"],
-        }))
+            "required_system_audit_scope_ids": ["section-a"],
+        }
+        if "boundary" in tweaks:
+            tweaks["boundary"](boundary_payload)
+        boundary = self.add(make_record("boundary_impact_report.v1",
+                                        boundary_payload))
         assert self.paths[record_id(boundary)] == anticipated_boundary_path
 
         inventory = sorted(({
@@ -856,8 +952,8 @@ class RootFixture:
         self.root = make_record("section_evidence_root.v1", {
             "planned_request_id": REQUEST,
             "program_ref": pref,
-            "parent_build_event_id": EVENT_ID,
-            "parent_build_event_hash": EVENT_HASH,
+            "parent_build_event_id": event_id,
+            "parent_build_event_hash": event_hash,
             "base_commit": BASE,
             "work_graph_ref": record_ref(graph),
             "final_scope_ref": record_ref(final_scope),
@@ -865,6 +961,23 @@ class RootFixture:
             "operation_log_ref": record_ref(operation_log),
             "record_count": len(inventory),
         })
+
+        self.base_tree = []
+        tree = [{"path": PROJECT_PREDICTION["path"], "blob_sha256": H2,
+                 "git_mode": "100644", "kind": "file"}]
+        for row in inventory:
+            tree.append({"path": row["repository_relpath"],
+                         "blob_sha256": row["content_sha256"],
+                         "git_mode": "100644", "kind": "file"})
+        for path, data in self.blobs.items():
+            tree.append({"path": path,
+                         "blob_sha256": hashlib.sha256(data).hexdigest(),
+                         "git_mode": "100644", "kind": "file"})
+        tree.append({"path": f"{self.prefix}root.json",
+                     "blob_sha256": compute_content_sha(self.root),
+                     "git_mode": "100644", "kind": "file"})
+        tree.sort(key=lambda row: row["path"])
+        self.candidate_tree = tree
         return self
 
 
@@ -876,8 +989,7 @@ def complete_fixture():
 def test_complete_evidence_root_validates_and_orders_every_member(
         complete_fixture):
     fixture = complete_fixture
-    report = RecordStore(fixture.records, blobs=fixture.blobs).validate_root(
-        fixture.root, build_event=fixture.event)
+    report = fixture.validate()
     assert report.record_count == len(fixture.records)
     assert report.construction_order[-1] == record_id(fixture.root)
     assert sorted(report.construction_ordinals.values()) == list(
@@ -888,13 +1000,11 @@ def test_complete_root_refuses_member_omission_and_event_substitution(
         complete_fixture):
     fixture = complete_fixture
     with pytest.raises(HSCValidationError, match="complete record set"):
-        RecordStore(fixture.records[:-1], blobs=fixture.blobs).validate_root(
-            fixture.root, build_event=fixture.event)
+        fixture.validate(records=fixture.records[:-1])
     bad_event = copy.deepcopy(fixture.event)
     bad_event["target_commit"] = "f" * 40
-    with pytest.raises(HSCValidationError, match="does not bind"):
-        RecordStore(fixture.records, blobs=fixture.blobs).validate_root(
-            fixture.root, build_event=bad_event)
+    with pytest.raises(HSCValidationError, match="canonical Council event"):
+        fixture.validate(event=bad_event)
 
 
 def test_complete_root_refuses_dispatch_plan_or_assembly_union_substitution(
@@ -929,10 +1039,244 @@ def test_complete_root_rebuild_is_byte_stable(complete_fixture):
     assert second.records == complete_fixture.records
     assert second.blobs == complete_fixture.blobs
     assert second.root == complete_fixture.root
-    first_report = RecordStore(
-        complete_fixture.records, blobs=complete_fixture.blobs).validate_root(
-            complete_fixture.root, build_event=complete_fixture.event)
-    second_report = RecordStore(
-        second.records, blobs=second.blobs).validate_root(
-            second.root, build_event=second.event)
-    assert second_report == first_report
+    assert second.event == complete_fixture.event
+    assert second.candidate_tree == complete_fixture.candidate_tree
+    assert second.validate() == complete_fixture.validate()
+
+
+# --- audit 001569 finding 1: boundary fields must reconstruct ---------------
+
+@pytest.mark.parametrize("mutator", [
+    lambda p: p.update(changed_section_ids=[]),
+    lambda p: p.update(changed_interfaces=[]),
+    lambda p: p.update(affected_contract_refs=[]),
+    lambda p: p.update(required_system_audit_scope_ids=["other-scope"]),
+    lambda p: p.update(activated_check_results=[{
+        "check_id": "unrelated-check", "status": "pass",
+        "evidence_ref": p["activated_check_results"][0]["evidence_ref"]}]),
+], ids=["sections", "interfaces", "contracts", "scopes", "checks"])
+def test_boundary_semantic_fields_must_reconstruct(mutator):
+    fixture = RootFixture().build(tweaks={"boundary": mutator})
+    with pytest.raises(HSCValidationError, match="does not reconstruct"):
+        fixture.validate()
+
+
+def test_boundary_dependency_closure_bytes_must_reconstruct():
+    wrong_bytes = canonical_json({
+        "schema_version": "section-dependency-closure.v1",
+        "closure": {},
+    }).encode("utf-8")
+    fixture = RootFixture().build(tweaks={
+        "closure_data": lambda data: wrong_bytes})
+    with pytest.raises(HSCValidationError,
+                       match="closure bytes do not reconstruct"):
+        fixture.validate()
+
+
+# --- finding 2: assembled tree and candidate content must reconstruct -------
+
+def test_assembled_tree_digest_must_reconstruct_from_candidate_tree():
+    fixture = RootFixture().build(tweaks={
+        "final_scope": lambda p: p.update(assembled_tree_sha256="9" * 64)})
+    with pytest.raises(HSCValidationError,
+                       match="assembled_tree_sha256 does not reconstruct"):
+        fixture.validate()
+
+
+def test_candidate_tree_content_substitution_or_omission_refuses(
+        complete_fixture):
+    fixture = complete_fixture
+    project_path = PROJECT_PREDICTION["path"]
+    mutated = copy.deepcopy(fixture.candidate_tree)
+    for row in mutated:
+        if row["path"] == project_path:
+            row["blob_sha256"] = "f" * 64
+    with pytest.raises(HSCValidationError,
+                       match="base plus actual changes"):
+        fixture.validate(candidate_tree=mutated)
+    omitted = [row for row in fixture.candidate_tree
+               if not row["path"].endswith("/records/000.json")]
+    with pytest.raises(HSCValidationError):
+        fixture.validate(candidate_tree=omitted)
+    record_swap = copy.deepcopy(fixture.candidate_tree)
+    for row in record_swap:
+        if row["path"].endswith("/records/000.json"):
+            row["blob_sha256"] = "e" * 64
+    with pytest.raises(HSCValidationError, match="exact bytes"):
+        fixture.validate(candidate_tree=record_swap)
+    root_swap = copy.deepcopy(fixture.candidate_tree)
+    for row in root_swap:
+        if row["path"].endswith("/root.json"):
+            row["blob_sha256"] = "d" * 64
+    with pytest.raises(HSCValidationError, match="evidence root's exact"):
+        fixture.validate(candidate_tree=root_swap)
+    poisoned_base = [{"path": f"{fixture.prefix}stale.json",
+                      "blob_sha256": "a" * 64, "git_mode": "100644",
+                      "kind": "file"}]
+    with pytest.raises(HSCValidationError, match="base tree already"):
+        fixture.validate(base_tree=poisoned_base)
+
+
+# --- finding 3: semantically unreachable inventory members ------------------
+
+def test_orphan_inventory_member_is_unreachable():
+    def add_orphan(fixture_obj, pref):
+        fixture_obj.content(pref, "operation_log",
+                            canonical_json({"orphan": True}).encode("utf-8"))
+    fixture = RootFixture().build(tweaks={"extra_content": add_orphan})
+    with pytest.raises(HSCValidationError,
+                       match="semantically unreachable"):
+        fixture.validate()
+
+
+# --- finding 4: staleness inputs must equal the reconstructed closure -------
+
+@pytest.mark.parametrize("mutator", [
+    lambda refs: refs[1:],
+    lambda refs: refs[:1],
+    lambda refs: list(reversed(refs)),
+    lambda refs: refs + [{"record_id": "9" * 64, "content_sha256": "9" * 64}],
+], ids=["omit", "truncate", "reorder", "add"])
+def test_bundle_staleness_inputs_must_reconstruct(mutator):
+    # A mutation may already violate the record-level sorted-unique refs
+    # contract (reorder/add) or survive to the closure reconstruction
+    # (omit/truncate); either way the root path must refuse.
+    with pytest.raises(HSCValidationError):
+        RootFixture().build(tweaks={"staleness": mutator}).validate()
+
+
+def test_staleness_closure_covers_every_typed_bundle_input(complete_fixture):
+    bundle = next(record for record in complete_fixture.records
+                  if record["schema_version"] == "section_evidence_bundle.v1")
+    closure_ids = {ref["record_id"]
+                   for ref in bundle["payload"]["staleness_input_refs"]}
+    for schema in ("section_program.v1", "section_contract.v1",
+                   "section_principal_registry.v1", "section_assignment.v1",
+                   "section_launcher_receipt.v1",
+                   "section_scheduler_journal_manifest.v1",
+                   "worker_sandbox_attestation.v1",
+                   "section_assessment_manifest.v1"):
+        members = [record_id(record) for record in complete_fixture.records
+                   if record["schema_version"] == schema]
+        assert members and set(members) <= closure_ids, schema
+
+
+# --- finding 5: a failed required invariant forces refusal ------------------
+
+@pytest.mark.parametrize("status", ["fail", "error"])
+def test_failed_required_invariant_blocks_pass_publication(status):
+    def fail_invariant(payload):
+        payload["invariant_results"] = [
+            dict(payload["invariant_results"][0], status=status)]
+    fixture = RootFixture().build(tweaks={"bundle": fail_invariant})
+    with pytest.raises(HSCValidationError,
+                       match="invariant cannot coexist|evidence identity"):
+        fixture.validate()
+
+
+# --- finding 9: assessor output inventory must be exhaustive ----------------
+
+def test_assessor_output_inventory_must_be_exhaustive():
+    fixture = RootFixture().build(tweaks={
+        "assessor_inventory_data":
+        lambda data: canonical_json({}).encode("utf-8")})
+    with pytest.raises(HSCValidationError, match="output inventory"):
+        fixture.validate()
+
+    def drop_row(data):
+        import json
+        value = json.loads(data)
+        value["outputs"] = value["outputs"][1:]
+        return canonical_json(value).encode("utf-8")
+    fixture = RootFixture().build(tweaks={"assessor_inventory_data": drop_row})
+    with pytest.raises(HSCValidationError,
+                       match="omits or misdescribes"):
+        fixture.validate()
+
+    def wrong_hash(data):
+        import json
+        value = json.loads(data)
+        value["outputs"][0]["blob_sha256"] = "9" * 64
+        return canonical_json(value).encode("utf-8")
+    fixture = RootFixture().build(tweaks={"assessor_inventory_data": wrong_hash})
+    with pytest.raises(HSCValidationError,
+                       match="omits or misdescribes"):
+        fixture.validate()
+
+    def extra_row(data):
+        import json
+        value = json.loads(data)
+        value["outputs"] = sorted(
+            value["outputs"] + [{
+                "leaf_relpath": "zzz-fabricated.json",
+                "artifact_type": "check_evidence",
+                "media_type": "application/json",
+                "byte_length": 2,
+                "blob_sha256": "8" * 64,
+            }], key=lambda row: row["leaf_relpath"])
+        return canonical_json(value).encode("utf-8")
+    fixture = RootFixture().build(tweaks={"assessor_inventory_data": extra_row})
+    with pytest.raises(HSCValidationError,
+                       match="does not own"):
+        fixture.validate()
+
+
+# --- finding 11: required evidence ids must be satisfied exactly once -------
+
+def test_contract_required_evidence_ids_must_be_satisfied():
+    fixture = RootFixture().build(tweaks={
+        "contract": lambda p: p.update(required_evidence_ids=["ghost-1"])})
+    with pytest.raises(HSCValidationError,
+                       match="evidence identity is not satisfied"):
+        fixture.validate()
+
+    def duplicate_coverage(payload):
+        payload["required_invariant_ids"] = ["check-1"]
+        payload["required_evidence_ids"] = ["check-1"]
+
+    def rename_invariant(payload):
+        payload["invariant_results"] = [
+            dict(payload["invariant_results"][0], check_id="check-1")]
+    fixture = RootFixture().build(tweaks={"contract": duplicate_coverage,
+                                          "bundle": rename_invariant})
+    with pytest.raises(HSCValidationError,
+                       match="evidence identity is not satisfied"):
+        fixture.validate()
+
+
+# --- finding 12: only a chain-verified canonical BUILD_STARTED is authority --
+
+def test_fabricated_build_started_mappings_are_refused(complete_fixture):
+    fixture = complete_fixture
+    legacy_shape = {key: fixture.event[key] for key in (
+        "event_id", "event_type", "request_id", "repository",
+        "target_commit", "payload")}
+    legacy_shape["event_hash"] = "e" * 64
+    with pytest.raises(HSCValidationError, match="canonical Council event"):
+        fixture.validate(event=legacy_shape)
+
+    arbitrary_hash = copy.deepcopy(fixture.event)
+    arbitrary_hash["event_hash"] = "e" * 64
+    with pytest.raises(HSCValidationError, match="canonical Council event"):
+        fixture.validate(event=arbitrary_hash)
+
+    wrong_sender = copy.deepcopy(fixture.event)
+    wrong_sender["sender"] = "codex"
+    wrong_sender["event_hash"] = compute_event_hash(wrong_sender)
+    with pytest.raises(HSCValidationError, match="canonical Council event"):
+        fixture.validate(event=wrong_sender)
+
+    unchained = copy.deepcopy(fixture.event)
+    unchained["timestamp_utc"] = "2026-07-16T00:00:01Z"
+    unchained["event_hash"] = compute_event_hash(unchained)
+    with pytest.raises(HSCValidationError, match="not a member"):
+        fixture.validate(event=unchained)
+
+    broken_link = copy.deepcopy(fixture.event)
+    broken_link["previous_event_hash"] = "a" * 64
+    broken_link["event_hash"] = compute_event_hash(broken_link)
+    with pytest.raises(HSCValidationError, match="link from genesis"):
+        fixture.validate(event=broken_link, chain=[broken_link])
+
+    with pytest.raises(HSCValidationError, match="chain is required"):
+        fixture.validate(chain=[])

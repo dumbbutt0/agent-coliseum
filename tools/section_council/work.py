@@ -11,13 +11,20 @@ from .core import (HSCValidationError, path_collision_key, require_h,
 
 @dataclass(frozen=True)
 class WorkAccess:
+    """Access declaration for one work item.
+
+    ``immutable_read_paths`` is a tuple of ``(path, base_content_sha256)``
+    pairs: an immutable read is authenticated only when it pins the exact
+    writer-independent base bytes, never by naming a path alone.
+    """
+
     work_item_id: str
     section_id: str
     priority: int
     dependency_work_item_ids: tuple[str, ...]
     write_paths: tuple[str, ...]
     read_paths: tuple[str, ...]
-    immutable_read_paths: tuple[str, ...] = ()
+    immutable_read_paths: tuple[tuple[str, str], ...] = ()
     shared_interfaces: tuple[tuple[str, int, str], ...] = ()
     stale: bool = False
     blocked: bool = False
@@ -32,9 +39,22 @@ class WorkAccess:
         if len(self.dependency_work_item_ids) != \
                 len(set(self.dependency_work_item_ids)):
             raise HSCValidationError("duplicate dependency_work_item_id")
-        for path in self.write_paths + self.read_paths + self.immutable_read_paths:
+        for path in self.write_paths + self.read_paths:
             validate_path(path)
-        if not set(self.immutable_read_paths) <= set(self.read_paths):
+        pins: dict[tuple[str, ...], str] = {}
+        for pair in self.immutable_read_paths:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise HSCValidationError(
+                    "immutable read must be a (path, base sha256) pair")
+            path, base = pair
+            validate_path(path)
+            require_h(base, "immutable_read_base_sha256")
+            key = path_collision_key(path)
+            if key in pins and pins[key] != base:
+                raise HSCValidationError(
+                    "one immutable path is pinned to two base identities")
+            pins[key] = base
+        if not set(pins) <= set(_keyed(self.read_paths)):
             raise HSCValidationError("immutable reads must be a subset of reads")
         _keyed(self.write_paths)
         _keyed(self.read_paths)
@@ -50,6 +70,10 @@ class WorkAccess:
                 raise HSCValidationError("duplicate shared interface identity")
             interfaces[name] = (version, digest)
 
+    def immutable_pins(self) -> dict[tuple[str, ...], str]:
+        return {path_collision_key(path): base
+                for path, base in self.immutable_read_paths}
+
 
 @dataclass(frozen=True)
 class ConflictResult:
@@ -59,8 +83,16 @@ class ConflictResult:
 
 
 def classify_conflict(left: WorkAccess, right: WorkAccess, *,
-                      satisfied_dependencies: Iterable[str] = ()) -> ConflictResult:
-    """Apply the frozen HSC v1 conflict relation, failing closed on unknowns."""
+                      satisfied_dependencies: Iterable[str] = (),
+                      base_content: Mapping[str, str] | None = None) \
+        -> ConflictResult:
+    """Apply the frozen HSC v1 conflict relation, failing closed on unknowns.
+
+    ``base_content`` maps a repository path to the sha256 of its frozen
+    writer-independent base bytes. A write/read overlap is exempt only when
+    the reader's immutable pin exactly reconstructs against that frozen base
+    identity; an unpinned, unverifiable, or divergent identity is a conflict.
+    """
     reasons: list[str] = []
     uncertain = left.unknown or right.unknown
     if uncertain:
@@ -73,14 +105,36 @@ def classify_conflict(left: WorkAccess, right: WorkAccess, *,
     rwrite = _keyed(right.write_paths)
     lread = _keyed(left.read_paths)
     rread = _keyed(right.read_paths)
-    limmutable = set(_keyed(left.immutable_read_paths))
-    rimmutable = set(_keyed(right.immutable_read_paths))
+    lpins = left.immutable_pins()
+    rpins = right.immutable_pins()
+    base_pins: dict[tuple[str, ...], str] = {}
+    for path, base in (base_content or {}).items():
+        validate_path(path)
+        require_h(base, "base_content sha256")
+        key = path_collision_key(path)
+        if key in base_pins and base_pins[key] != base:
+            raise HSCValidationError("base content path ambiguity")
+        base_pins[key] = base
+
+    def pinned_to_base(pins: dict[tuple[str, ...], str],
+                       key: tuple[str, ...]) -> bool:
+        return key in pins and key in base_pins and pins[key] == base_pins[key]
+
     if set(lwrite) & set(rwrite):
         reasons.append("write/write overlap")
-    if any(key in rread and key not in rimmutable for key in lwrite):
-        reasons.append("left write/right mutable read overlap")
-    if any(key in lread and key not in limmutable for key in rwrite):
-        reasons.append("right write/left mutable read overlap")
+    if any(key in rread and not pinned_to_base(rpins, key) for key in lwrite):
+        reasons.append("left write/right read overlap without verified "
+                       "immutable base")
+    if any(key in lread and not pinned_to_base(lpins, key) for key in rwrite):
+        reasons.append("right write/left read overlap without verified "
+                       "immutable base")
+    for key in set(lpins) & set(rpins):
+        if lpins[key] != rpins[key]:
+            reasons.append("immutable base identity mismatch")
+    for pins in (lpins, rpins):
+        for key, base in pins.items():
+            if key in base_pins and base_pins[key] != base:
+                reasons.append("immutable pin diverges from frozen base")
     left_interfaces = {name: (version, digest)
                        for name, version, digest in left.shared_interfaces}
     right_interfaces = {name: (version, digest)

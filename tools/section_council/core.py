@@ -9,7 +9,10 @@ import re
 import unicodedata
 from typing import Any, Iterable, Mapping, Sequence
 
-from tools.council.schemas import canonical_json, domain_hash
+from tools.council.schemas import (SchemaViolation, canonical_json,
+                                   domain_hash)
+from tools.council.schemas import validate_request_id as \
+    _canonical_request_id
 
 
 class HSCValidationError(ValueError):
@@ -21,7 +24,6 @@ G_RE = re.compile(r"^[0-9a-f]{40}$")
 EVENT_RE = re.compile(r"^[0-9]{6}-[0-9a-f]{8}$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WINDOWS_RESERVED = {
     "con", "prn", "aux", "nul",
     *(f"com{i}" for i in range(1, 10)),
@@ -104,8 +106,12 @@ def require_slug(value: Any, where: str) -> str:
 
 
 def require_request_id(value: Any, where: str) -> str:
-    if not isinstance(value, str) or REQUEST_RE.fullmatch(value) is None:
-        fail(f"{where} must be a bounded request slug")
+    # One grammar only: the canonical Council request-id validator. An HSC
+    # identity must never exist for a request id the Council refuses.
+    try:
+        _canonical_request_id(value)
+    except SchemaViolation:
+        fail(f"{where} must be a canonical Council request id")
     return value
 
 
@@ -236,12 +242,15 @@ def validate_native_observation(value: Any, where: str = "native_identity") -> N
     require_hex_bytes(value["file_handle_bytes_hex"],
                       f"{where}.file_handle_bytes_hex", maximum_bytes=256)
     require_int(value["inode"], f"{where}.inode", maximum=2**64 - 1)
-    require_literal(value["file_type"], ("regular", "directory"),
-                    f"{where}.file_type")
+    file_type = require_literal(value["file_type"], ("regular", "directory"),
+                                f"{where}.file_type")
     require_int(value["link_count"], f"{where}.link_count",
                 maximum=2**64 - 1)
     if value["link_count"] < 1:
         fail(f"{where}.link_count must be positive")
+    expected_type_bits = 0o100000 if file_type == "regular" else 0o040000
+    if value["native_mode"] & 0o170000 != expected_type_bits:
+        fail(f"{where} native_mode type bits disagree with file_type")
 
 
 def filesystem_id(observation: Mapping[str, Any]) -> str:
@@ -438,7 +447,9 @@ _BINDING_RE = re.compile(
     r"scope_git_blob=([0-9a-f]{40})$")
 
 
-def parse_hsc_request_binding(line: Any) -> HSCRequestBinding:
+def parse_hsc_request_binding(line: Any, *,
+                              expected_request_id: str | None = None) \
+        -> HSCRequestBinding:
     require_string(line, "HSC binding", max_bytes=4096)
     match = _BINDING_RE.fullmatch(line)
     if match is None:
@@ -447,9 +458,15 @@ def parse_hsc_request_binding(line: Any) -> HSCRequestBinding:
     root_path = validate_path(values[1], "root_path")
     scope_path = validate_path(values[5], "scope_path")
     parts = root_path.split("/")
-    if len(parts) < 4 or parts[:2] != ["artifacts", "section-council"] or \
-            parts[-1] != "root.json":
-        fail("root_path is not the fixed HSC root path")
+    # v1 fixes exactly artifacts/section-council/<request-id>/root.json —
+    # exactly four segments, and the directory segment is a canonical
+    # Council request id bound to the wrapper-supplied expectation.
+    if len(parts) != 4 or parts[:2] != ["artifacts", "section-council"] or \
+            parts[3] != "root.json":
+        fail("root_path is not the fixed four-segment HSC root path")
+    require_request_id(parts[2], "root_path request segment")
+    if expected_request_id is not None and parts[2] != expected_request_id:
+        fail("root_path request segment differs from the expected request id")
     if scope_path != "/".join(parts[:-1] + ["final-scope.json"]):
         fail("scope_path is not paired with root_path")
     return HSCRequestBinding(values[0], root_path, values[2], values[3],

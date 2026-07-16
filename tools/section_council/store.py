@@ -7,14 +7,19 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any, Iterable, Mapping
 
-from tools.council.schemas import canonical_json, domain_hash
+from tools.council.schemas import (CouncilError, GENESIS_HASH,
+                                   canonical_json, domain_hash,
+                                   validate_event)
 
 from .core import (
     HSCValidationError,
+    canonical_sort_key,
     change_sort_key,
+    exact_keys,
     fail,
     predicted_matches_actual,
     require_bool,
+    require_event,
     require_h,
     require_int,
     require_literal,
@@ -28,13 +33,16 @@ from .core import (
     validate_ref,
 )
 from .records import (
+    CONTENT_ARTIFACTS,
     RECORD_TYPES,
     RefRequirement,
+    _file_refs,
     id_field_for,
     record_id,
     record_ref,
     validate_record,
 )
+from .work import dependency_closure
 
 
 @dataclass(frozen=True)
@@ -113,8 +121,17 @@ class RecordStore:
         self._validate_blobs()
 
     def validate_root(self, root: Mapping[str, Any], *,
-                      build_event: Mapping[str, Any]) \
+                      build_event: Mapping[str, Any],
+                      chain: Iterable[Mapping[str, Any]],
+                      candidate_tree: Iterable[Mapping[str, Any]],
+                      base_tree: Iterable[Mapping[str, Any]]) \
             -> ValidationReport:
+        """Validate one complete HSC evidence root against authenticated
+        inputs only: the canonical BUILD_STARTED authority obtained from a
+        verified Council chain, plus the complete base and candidate Git
+        tree inventories (arrays of FILE_REF), from which every asserted
+        boundary, tree, staleness, invariant, and evidence claim is
+        independently reconstructed."""
         validate_record(root)
         if root["schema_version"] != "section_evidence_root.v1":
             fail("root must be section_evidence_root.v1")
@@ -129,14 +146,60 @@ class RecordStore:
                      external=requirement.external)
         payload = root["payload"]
         self._validate_inventory(payload)
+        self._validate_reachability(root_requirements)
         program = self.get(payload["program_ref"], versions=("section_program.v1",))
         program_id = record_id(program)
+        self._validate_authority(build_event, chain)
         self._validate_program_bindings(program, root, build_event)
         self._validate_program_membership(program)
         self._validate_relations(program, root)
+        self._validate_candidate_tree(program, root, candidate_tree, base_tree)
         order, ordinals = self._topological_order(root, root_requirements)
         return ValidationReport(program_id, root_id, len(self.records),
                                 tuple(order), ordinals)
+
+    def _validate_authority(self, event: Mapping[str, Any],
+                            chain: Iterable[Mapping[str, Any]]) -> None:
+        """The parent authority must be a canonical, hash-valid BUILD_STARTED
+        event that is a member of a supplied genesis-linked verified chain.
+        A caller-fabricated mapping is never authority."""
+        if not isinstance(event, dict):
+            fail("canonical BUILD_STARTED event is required")
+        try:
+            validate_event(dict(event))
+        except (CouncilError, ValueError, TypeError, KeyError) as exc:
+            raise HSCValidationError(
+                f"BUILD_STARTED authority is not a canonical Council event: "
+                f"{exc}") from exc
+        if event.get("event_type") != "BUILD_STARTED":
+            fail("HSC parent authority must be a BUILD_STARTED event")
+        events = list(chain) if not isinstance(chain, (list, tuple)) else chain
+        if not events:
+            fail("a verified Council chain is required for HSC authority")
+        previous = GENESIS_HASH
+        seen_ids: set[str] = set()
+        member = False
+        event_bytes = canonical_json(dict(event))
+        for index, item in enumerate(events):
+            if not isinstance(item, dict):
+                fail("supplied chain contains a non-event entry")
+            try:
+                validate_event(dict(item))
+            except (CouncilError, ValueError, TypeError, KeyError) as exc:
+                raise HSCValidationError(
+                    f"supplied chain event #{index} is not canonical: "
+                    f"{exc}") from exc
+            if item.get("previous_event_hash") != previous:
+                fail("supplied chain does not link from genesis")
+            eid = require_event(item.get("event_id"), "chain event_id")
+            if int(eid[:6]) != index + 1 or eid in seen_ids:
+                fail("supplied chain event ids are not sequential and unique")
+            seen_ids.add(eid)
+            previous = item["event_hash"]
+            if canonical_json(dict(item)) == event_bytes:
+                member = True
+        if not member:
+            fail("BUILD_STARTED event is not a member of the verified chain")
 
     def _validate_inventory(self, p: Mapping[str, Any]) -> None:
         rows = p["record_inventory"]
@@ -159,6 +222,68 @@ class RecordStore:
             seen_ids.add(rid)
         if seen_ids != expected_ids:
             fail("evidence-root inventory does not enumerate every record")
+
+    def _validate_reachability(self, root_requirements: list[RefRequirement]) \
+            -> None:
+        """Reject inventory members outside the semantic reference closure.
+
+        Reachability is computed from the root's explicit typed references,
+        plus the sanctioned terminal analysis/observation records that
+        nothing references by design but whose exact bindings are enforced
+        elsewhere: the boundary/comparison reports (bound to the root's
+        graph and scope) and the assembly-scope native observation evidence
+        (each row must match its plan requirement exactly, so an invented
+        observation is refused). The closure runs BEFORE any terminal
+        inventory-order edge exists; mere enumeration in the inventory is
+        not reachability."""
+        seeds = [requirement.ref["record_id"]
+                 for requirement in root_requirements
+                 if not requirement.external]
+        for record in self.records:
+            if record["schema_version"] in ("boundary_impact_report.v1",
+                                            "section_comparison_report.v1"):
+                seeds.append(record_id(record))
+            elif record["schema_version"] == "section_native_inventory.v1" \
+                    and record["payload"]["phase"] in ("pre-assembly",
+                                                       "post-assembly"):
+                seeds.append(record_id(record))
+        reachable: set[str] = set()
+        frontier = [rid for rid in seeds if rid in self.by_id]
+        while frontier:
+            rid = frontier.pop()
+            if rid in reachable:
+                continue
+            reachable.add(rid)
+            for requirement in self.refs.get(rid, []) + \
+                    self._closed_blob_refs.get(rid, []):
+                if requirement.external:
+                    continue
+                target = requirement.ref["record_id"]
+                if target in self.by_id and target not in reachable:
+                    frontier.append(target)
+        orphans = set(self.by_id) - reachable
+        if orphans:
+            fail("evidence-root inventory admits a semantically unreachable "
+                 "record")
+
+    def _reference_closure(self, seed_refs: Iterable[Mapping[str, str]]) \
+            -> set[str]:
+        """Transitive internal reference closure over records and closed
+        declaration blobs, starting from explicit seed references."""
+        reached: set[str] = set()
+        frontier = [ref["record_id"] for ref in seed_refs]
+        while frontier:
+            rid = frontier.pop()
+            if rid in reached:
+                continue
+            if rid not in self.by_id:
+                fail("reference closure reaches an unresolved record")
+            reached.add(rid)
+            for requirement in self.refs.get(rid, []) + \
+                    self._closed_blob_refs.get(rid, []):
+                if not requirement.external:
+                    frontier.append(requirement.ref["record_id"])
+        return reached
 
     def _validate_blobs(self) -> None:
         declared_paths: set[str] = set()
@@ -297,7 +422,7 @@ class RecordStore:
         self._validate_assessments(root)
         self._validate_bundles()
         self._validate_final_scope(program, root)
-        self._validate_boundary_reports(root)
+        self._validate_boundary_reports(program, root)
         self._validate_rooted_paths(program, root)
 
     def _topological_order(self, root: Mapping[str, Any],
@@ -863,6 +988,52 @@ class RecordStore:
                      for ref in ap["native_inventory_after_refs"]}
             if before != expected_before or after != expected_after:
                 fail("attestation native inventory membership is incomplete")
+            output_inventory = self.get(
+                ap["output_inventory_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("read_inventory",))
+            self._require_exhaustive_output_inventory(
+                output_inventory, ap["assignment_ref"])
+
+    def _require_exhaustive_output_inventory(
+            self, inventory_record: Mapping[str, Any],
+            assignment_ref: Mapping[str, str]) -> dict[str, dict]:
+        """An output inventory is never opaque: it is dispatch-owned, closed
+        canonical JSON, and an exact no-extra/no-omission map of every other
+        content record owned by the same assignment (leaf name, artifact
+        type, media type, byte length, and blob hash)."""
+        ip = inventory_record["payload"]
+        if ip["producer_assignment_ref"] != assignment_ref:
+            fail("output inventory is not owned by its dispatch assignment")
+        value = self.closed_values.get(record_id(inventory_record))
+        if value is None:
+            fail("output inventory bytes were not closed JSON")
+        rows = _closed_output_inventory(value)
+        rows_by_leaf = {row["leaf_relpath"].rsplit("/", 1)[-1]: row
+                       for row in rows}
+        if len(rows_by_leaf) != len(rows):
+            fail("output inventory leaf names collide")
+        owned = [record for record in _records(self, "section_content_record.v1")
+                 if record["payload"]["producer_assignment_ref"] ==
+                 assignment_ref and
+                 record_id(record) != record_id(inventory_record)]
+        matched: set[str] = set()
+        for record in owned:
+            payload = record["payload"]
+            leaf = payload["storage_relpath"].rsplit("/", 1)[-1]
+            row = rows_by_leaf.get(leaf)
+            if row is None or \
+                    (row["artifact_type"], row["media_type"],
+                     row["byte_length"], row["blob_sha256"]) != \
+                    (payload["artifact_type"], payload["media_type"],
+                     payload["byte_length"], payload["blob_sha256"]):
+                fail("output inventory omits or misdescribes an owned output")
+            if leaf in matched:
+                fail("two owned outputs collapse onto one inventory row")
+            matched.add(leaf)
+        if matched != set(rows_by_leaf):
+            fail("output inventory lists an output its dispatch does not own")
+        return rows_by_leaf
 
     def _validate_assessments(self, root: Mapping[str, Any]) -> None:
         inventory_paths = {row["record_id"]: row["repository_relpath"]
@@ -1015,6 +1186,42 @@ class RecordStore:
             required_checks = set(contract["payload"]["required_check_ids"])
             if set(result_by_id) != required_checks:
                 fail("assessment is missing or adds contract-required checks")
+            inventory_record = self.get(
+                ap["assessor_output_inventory_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("read_inventory",))
+            rows_by_leaf = self._require_exhaustive_output_inventory(
+                inventory_record, ap["assessor_assignment_ref"])
+            declared_output_paths = [
+                (path, "check_declaration")
+                for path in declaration["check_declaration_output_relpaths"]
+            ] + [
+                (path, "finding_declaration")
+                for path in declaration["finding_declaration_output_relpaths"]
+            ] + [
+                (row["evidence_output_relpath"], "check_evidence")
+                for row in check_declarations
+            ]
+            for finding in finding_records:
+                closed = self.closed_values.get(record_id(self.get(
+                    finding["payload"]["finding_declaration_ref"],
+                    versions=("section_content_record.v1",),
+                    artifacts=("finding_declaration",))))
+                if closed is None:
+                    fail("finding declaration bytes were not closed JSON")
+                declared_output_paths.append(
+                    (closed["evidence_output_relpath"], "finding_evidence"))
+                declared_output_paths.append(
+                    (closed["reproduction_output_relpath"], "reproduction"))
+                if closed["resolution_output_relpath"] is not None:
+                    declared_output_paths.append(
+                        (closed["resolution_output_relpath"], "resolution"))
+            for path, artifact in declared_output_paths:
+                row = rows_by_leaf.get(path.rsplit("/", 1)[-1])
+                if row is None or row["artifact_type"] != artifact:
+                    fail("declared assessor output path is absent from the "
+                         "exhaustive output inventory or misnames its "
+                         "artifact type")
             statuses = {row["status"] for row in ap["check_results"]}
             if "error" in statuses and ap["error_reason"] is None:
                 fail("an errored check requires a sealed error reason")
@@ -1141,6 +1348,31 @@ class RecordStore:
             if {row["check_id"] for row in bp["invariant_results"]} != \
                     set(contract["payload"]["required_invariant_ids"]):
                 fail("bundle invariant results do not equal contract requirements")
+            invariant_statuses = {row["status"]
+                                  for row in bp["invariant_results"]}
+            if bp["local_assessment"] == "pass" and \
+                    invariant_statuses != {"pass"}:
+                fail("failed required invariant cannot coexist with a pass "
+                     "bundle")
+            if bp["local_assessment"] == "pass":
+                evidence_rows = list(assessment["payload"]["check_results"]) \
+                    + list(bp["invariant_results"])
+                for evidence_id in contract["payload"]["required_evidence_ids"]:
+                    matches = [row for row in evidence_rows
+                               if row["check_id"] == evidence_id]
+                    if len(matches) != 1:
+                        fail("contract-required evidence identity is not "
+                             "satisfied exactly once by authenticated "
+                             "assessment/bundle evidence")
+            expected_staleness = self._reference_closure(
+                _bundle_seed_refs(bp))
+            expected_refs = sorted(
+                ({"content_sha256": compute_content_sha(self.by_id[rid]),
+                  "record_id": rid} for rid in expected_staleness),
+                key=canonical_sort_key)
+            if bp["staleness_input_refs"] != expected_refs:
+                fail("bundle staleness inputs do not equal the reconstructed "
+                     "typed input closure")
         if set(bundle_by_item) != set(graph_items):
             fail("complete evidence lacks exactly one bundle per work item")
 
@@ -1190,7 +1422,33 @@ class RecordStore:
         if set(_ref_ids(fp["section_bundle_refs"])) != bundles:
             fail("final scope omits or adds a section evidence bundle")
 
-    def _validate_boundary_reports(self, root: Mapping[str, Any]) -> None:
+    def _validate_boundary_reports(self, program: Mapping[str, Any],
+                                   root: Mapping[str, Any]) -> None:
+        """Reconstruct every boundary semantic field deterministically.
+
+        Frozen v1 derivations (each recomputed from the authenticated
+        program, contracts, work graph, bundles, and final scope, then
+        required to be exactly equal):
+
+        - ``changed_section_ids``: sections owning at least one actual
+          change (or rename source) in the final scope, via the program's
+          exclusive path->section prediction ownership.
+        - ``affected_contract_refs``: contracts of changed sections plus
+          every section whose declared dependency closure contains a
+          changed section (downstream dependents).
+        - ``changed_interfaces``: the exported interfaces of every changed
+          section's contract, merged by interface id with conflict refusal.
+        - ``activated_check_results``: for every affected contract, the
+          exact sealed check results of its section assessment restricted
+          to that contract's required check ids, merged with conflict
+          refusal and sorted by check id.
+        - ``dependency_closure_ref``: closed canonical JSON equal to the
+          recomputed work-graph transitive dependency closure.
+        - ``required_system_audit_scope_ids``: changed sections plus every
+          section owning a work item that requires the system audit level;
+          if that union is empty, every section (the system audit always
+          has a scope).
+        """
         reports = _records(self, "boundary_impact_report.v1")
         if len(reports) != 1:
             fail("complete HSC evidence requires exactly one boundary report")
@@ -1206,9 +1464,132 @@ class RecordStore:
         if bp["unknown_classification_count"] != 0 or \
                 bp["conflict_evidence_refs"]:
             fail("unknown or conflicting boundary classification blocks publication")
+
+        pp = program["payload"]
+        path_to_section: dict[str, str] = {}
+        section_dependencies: dict[str, list[str]] = {}
+        for declaration in pp["section_declarations"]:
+            sid = declaration["section_id"]
+            section_dependencies[sid] = list(
+                declaration["dependency_section_ids"])
+            for change in declaration["predicted_changes"]:
+                path_to_section[change["path"]] = sid
+                if change["rename_source"] is not None:
+                    path_to_section[change["rename_source"]] = sid
+        final_scope = self.get(root["payload"]["final_scope_ref"],
+                               versions=("final_scope_manifest.v1",))
+        changed: set[str] = set()
+        for change in final_scope["payload"]["actual_changes"]:
+            changed.add(path_to_section[change["path"]])
+            if change["rename_source"] is not None:
+                changed.add(path_to_section[change["rename_source"]])
+        if bp["changed_section_ids"] != sorted(changed):
+            fail("boundary changed_section_ids does not reconstruct from the "
+                 "final scope")
+
+        def prerequisites(sid: str, seen: set[str]) -> set[str]:
+            result: set[str] = set()
+            for dependency in section_dependencies[sid]:
+                if dependency in seen:
+                    continue
+                seen.add(dependency)
+                result.add(dependency)
+                result |= prerequisites(dependency, seen)
+            return result
+
+        affected = set(changed)
+        for sid in section_dependencies:
+            if prerequisites(sid, set()) & changed:
+                affected.add(sid)
+        contracts_by_section = {
+            record["payload"]["section_id"]: record
+            for record in _records(self, "section_contract.v1")}
+        expected_affected = sorted(
+            (record_ref(contracts_by_section[sid]) for sid in affected),
+            key=canonical_sort_key)
+        if bp["affected_contract_refs"] != expected_affected:
+            fail("boundary affected_contract_refs does not reconstruct from "
+                 "the dependency graph")
+
+        merged_interfaces: dict[str, dict] = {}
+        for sid in sorted(changed):
+            for interface in contracts_by_section[sid]["payload"][
+                    "exported_interfaces"]:
+                prior = merged_interfaces.get(interface["interface_id"])
+                if prior is not None and prior != interface:
+                    fail("changed sections export one interface id with two "
+                         "identities")
+                merged_interfaces[interface["interface_id"]] = interface
+        expected_interfaces = sorted(
+            merged_interfaces.values(),
+            key=lambda row: row["interface_id"])
+        if bp["changed_interfaces"] != expected_interfaces:
+            fail("boundary changed_interfaces does not reconstruct from "
+                 "changed section contracts")
+
+        assessments_by_contract: dict[str, dict] = {}
+        for bundle in bundles:
+            assessment = self.get(
+                bundle["payload"]["assessment_manifest_ref"],
+                versions=("section_assessment_manifest.v1",))
+            assessments_by_contract[
+                bundle["payload"]["contract_ref"]["record_id"]] = assessment
+        expected_rows: dict[str, dict] = {}
+        for sid in sorted(affected):
+            contract = contracts_by_section[sid]
+            required = set(contract["payload"]["required_check_ids"])
+            assessment = assessments_by_contract.get(record_id(contract))
+            if assessment is None:
+                fail("affected contract lacks a section assessment")
+            for row in assessment["payload"]["check_results"]:
+                if row["check_id"] not in required:
+                    continue
+                prior = expected_rows.get(row["check_id"])
+                if prior is not None and prior != row:
+                    fail("activated boundary check identity conflicts "
+                         "across sections")
+                expected_rows[row["check_id"]] = row
+        expected_activated = sorted(expected_rows.values(),
+                                    key=lambda row: row["check_id"])
+        if bp["activated_check_results"] != expected_activated:
+            fail("boundary activated_check_results does not reconstruct from "
+                 "affected contract assessments")
         if any(result["status"] != "pass"
                for result in bp["activated_check_results"]):
             fail("boundary check did not pass")
+
+        graphs = _records(self, "section_work_graph.v1")
+        items = graphs[0]["payload"]["work_items"]
+        closure = dependency_closure({
+            item["work_item_id"]: tuple(item["dependency_work_item_ids"])
+            for item in items})
+        expected_closure = {
+            "schema_version": "section-dependency-closure.v1",
+            "closure": {item_id: sorted(members)
+                        for item_id, members in closure.items()},
+        }
+        closure_record = self.get(bp["dependency_closure_ref"],
+                                  versions=("section_content_record.v1",),
+                                  artifacts=("read_inventory",))
+        closure_value = self.closed_values.get(record_id(closure_record))
+        if closure_value != expected_closure:
+            fail("boundary dependency closure bytes do not reconstruct from "
+                 "the frozen work graph")
+
+        section_for_item = {
+            item["work_item_id"]: self.get(
+                item["section_contract_ref"],
+                versions=("section_contract.v1",))["payload"]["section_id"]
+            for item in items}
+        system_sections = {
+            section_for_item[item["work_item_id"]] for item in items
+            if "system" in item["required_audit_levels"]}
+        expected_scopes = sorted(changed | system_sections) or \
+            sorted(section_dependencies)
+        if bp["required_system_audit_scope_ids"] != expected_scopes:
+            fail("boundary required_system_audit_scope_ids does not "
+                 "reconstruct")
+
         for bundle in bundles:
             if bundle["payload"]["local_assessment"] != "pass":
                 fail("non-passing section bundle blocks publication")
@@ -1244,9 +1625,184 @@ class RecordStore:
         if paths != set(final_scope["payload"]["realized_system_artifact_paths"]):
             fail("rooted system paths do not equal final-scope realization")
 
+    def _validate_candidate_tree(self, program: Mapping[str, Any],
+                                 root: Mapping[str, Any],
+                                 candidate_tree: Iterable[Mapping[str, Any]],
+                                 base_tree: Iterable[Mapping[str, Any]]) \
+            -> None:
+        """Authenticate the complete candidate tree content.
+
+        The supplied base and candidate inventories are complete FILE_REF
+        arrays for the base commit tree and the final candidate commit tree.
+        The validator independently recomputes, under the frozen exclusion
+        rule (``artifacts/section-council/<planned_request_id>/`` excluded):
+
+        1. the project view must equal the base tree with exactly the final
+           scope's actual changes applied (per-kind before-state verified);
+        2. ``assembled_tree_sha256`` must equal the domain-separated digest
+           of that reconstructed project view;
+        3. the request-namespace view must contain exactly the realized
+           system-artifact paths plus the two fixed envelopes, every entry a
+           ``100644`` file whose content hash equals the byte identity bound
+           by the root (record bytes, raw blob bytes, and both envelopes).
+        """
+        candidate = list(candidate_tree) if not isinstance(
+            candidate_tree, list) else candidate_tree
+        base = list(base_tree) if not isinstance(base_tree, list) else base_tree
+        _file_refs(candidate, "candidate_tree")
+        _file_refs(base, "base_tree")
+        pp = program["payload"]
+        rp = root["payload"]
+        prefix = f"artifacts/section-council/{pp['planned_request_id']}/"
+        base_map = {row["path"]: (row["blob_sha256"], row["git_mode"])
+                    for row in base}
+        if any(path.startswith(prefix) for path in base_map):
+            fail("base tree already contains the fixed request namespace")
+        project = {row["path"]: (row["blob_sha256"], row["git_mode"])
+                   for row in candidate if not row["path"].startswith(prefix)}
+        namespace = {row["path"]: row for row in candidate
+                     if row["path"].startswith(prefix)}
+
+        final_scope = self.get(rp["final_scope_ref"],
+                               versions=("final_scope_manifest.v1",))
+        fp = final_scope["payload"]
+        applied = dict(base_map)
+        for change in fp["actual_changes"]:
+            kind = change["kind"]
+            path = change["path"]
+            before = (change["blob_before"], change["mode_before"])
+            after = (change["blob_after"], change["mode_after"])
+            if kind == "add":
+                if path in applied:
+                    fail("actual add collides with an existing base path")
+                applied[path] = after
+            elif kind == "delete":
+                if applied.get(path) != before:
+                    fail("actual delete does not match the base tree")
+                del applied[path]
+            elif kind in ("modify", "mode"):
+                if applied.get(path) != before:
+                    fail("actual change does not match the base tree")
+                applied[path] = after
+            else:
+                source = change["rename_source"]
+                if applied.get(source) != before or path in applied:
+                    fail("actual rename does not match the base tree")
+                del applied[source]
+                applied[path] = after
+        if applied != project:
+            fail("candidate project tree does not equal base plus actual "
+                 "changes")
+        expected_digest = domain_hash(
+            "council:section-project-tree:v1",
+            [{"path": path, "blob_sha256": blob, "git_mode": mode,
+              "kind": "file"}
+             for path, (blob, mode) in sorted(project.items())])
+        if fp["assembled_tree_sha256"] != expected_digest:
+            fail("assembled_tree_sha256 does not reconstruct from the "
+                 "candidate project tree")
+
+        envelopes = {prefix + "root.json", prefix + "final-scope.json"}
+        realized = set(fp["realized_system_artifact_paths"])
+        if set(namespace) != realized | envelopes:
+            fail("candidate namespace files do not equal realized system "
+                 "artifacts plus the two fixed envelopes")
+        for row in namespace.values():
+            if row["git_mode"] != "100644":
+                fail("candidate namespace entry is not a plain 100644 file")
+        for row in rp["record_inventory"]:
+            entry = namespace.get(row["repository_relpath"])
+            if entry is None or entry["blob_sha256"] != row["content_sha256"]:
+                fail("candidate tree does not bind an inventoried record's "
+                     "exact bytes")
+        for record in self.records:
+            if record["schema_version"] in ("section_bootstrap_content.v1",
+                                            "section_content_record.v1"):
+                payload = record["payload"]
+                entry = namespace.get(payload["storage_relpath"])
+                if entry is None or \
+                        entry["blob_sha256"] != payload["blob_sha256"]:
+                    fail("candidate tree does not bind a raw evidence blob's "
+                         "exact bytes")
+        root_entry = namespace.get(prefix + "root.json")
+        if root_entry is None or \
+                root_entry["blob_sha256"] != compute_content_sha(root):
+            fail("candidate tree does not bind the evidence root's exact "
+                 "bytes")
+
 
 def compute_content_sha(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
+
+
+_BUNDLE_SEED_REF_FIELDS = (
+    "program_ref", "contract_ref", "builder_assignment_ref",
+    "assessor_assignment_ref", "builder_launcher_receipt_ref",
+    "assessor_launcher_receipt_ref", "builder_journal_manifest_ref",
+    "assessor_journal_manifest_ref", "builder_context_ref",
+    "assessor_context_ref", "builder_sandbox_attestation_ref",
+    "assessor_sandbox_attestation_ref", "proposal_ref", "diff_preview_ref",
+    "assessment_manifest_ref", "test_manifest_ref", "dependency_snapshot_ref",
+)
+
+
+def _bundle_seed_refs(bundle_payload: Mapping[str, Any]) -> list[dict]:
+    """The typed staleness seed set of one bundle: every reference the
+    bundle itself carries except ``staleness_input_refs``."""
+    refs = [bundle_payload[field] for field in _BUNDLE_SEED_REF_FIELDS]
+    refs.extend(bundle_payload["test_result_refs"])
+    refs.extend(row["evidence_ref"]
+                for row in bundle_payload["invariant_results"])
+    refs.extend(row["evidence_ref"]
+                for row in bundle_payload["resource_metrics"]
+                if row["evidence_ref"] is not None)
+    return refs
+
+
+def compute_bundle_staleness_inputs(records: Iterable[Mapping[str, Any]],
+                                    blobs: Mapping[str, bytes],
+                                    bundle_payload: Mapping[str, Any]) \
+        -> list[dict]:
+    """Producer-side helper: the exact ``staleness_input_refs`` value the
+    complete-root validator will independently reconstruct for a bundle
+    (the transitive typed reference closure of every other bundle field)."""
+    store = RecordStore(records, blobs=blobs)
+    store._validate_blobs()
+    reached = store._reference_closure(_bundle_seed_refs(bundle_payload))
+    return sorted(
+        ({"content_sha256": compute_content_sha(store.by_id[rid]),
+          "record_id": rid} for rid in reached),
+        key=canonical_sort_key)
+
+
+_OUTPUT_INVENTORY_MEDIA = ("application/json", "text/plain", "text/x-diff",
+                           "application/octet-stream")
+
+
+def _closed_output_inventory(value: Any) -> list[dict]:
+    """The frozen exhaustive output-inventory byte schema (v1)."""
+    if not isinstance(value, dict) or set(value) != {"schema_version",
+                                                     "outputs"}:
+        fail("output inventory exact keys mismatch")
+    require_literal(value["schema_version"], ("section-output-inventory.v1",),
+                    "output_inventory.schema_version")
+    rows = value["outputs"]
+    require_sorted_unique(
+        rows, "output_inventory.outputs",
+        key=lambda row: row.get("leaf_relpath", "")
+        if isinstance(row, dict) else "")
+    for index, row in enumerate(rows):
+        where = f"output_inventory.outputs[{index}]"
+        exact_keys(row, {"leaf_relpath", "artifact_type", "media_type",
+                         "byte_length", "blob_sha256"}, where)
+        validate_path(row["leaf_relpath"], f"{where}.leaf_relpath")
+        require_literal(row["artifact_type"], CONTENT_ARTIFACTS,
+                        f"{where}.artifact_type")
+        require_literal(row["media_type"], _OUTPUT_INVENTORY_MEDIA,
+                        f"{where}.media_type")
+        require_int(row["byte_length"], f"{where}.byte_length")
+        require_h(row["blob_sha256"], f"{where}.blob_sha256")
+    return rows
 
 
 def _records(store: RecordStore, schema_version: str) -> list[dict]:

@@ -7,7 +7,8 @@ import hashlib
 
 import pytest
 
-from tools.council.schemas import canonical_json, domain_hash
+from tools.council.schemas import (SchemaViolation, canonical_json,
+                                   domain_hash, validate_request_id)
 from tools.section_council import (
     HSCValidationError, RecordStore,
     RECORD_TYPES,
@@ -24,7 +25,9 @@ from tools.section_council import (
     validate_record,
 )
 from tools.section_council.core import (file_id, filesystem_id,
-                                        locator_sha256, strict_json_bytes)
+                                        locator_sha256, require_request_id,
+                                        strict_json_bytes,
+                                        validate_native_observation)
 from tools.section_council.records import make_record, record_ref
 
 
@@ -557,11 +560,76 @@ def test_request_binding_is_exact_and_fixed_path_paired():
             "scope_path=artifacts/section-council/pilot-001/final-scope.json "
             f"scope_id={H1} scope_sha256={H2} scope_git_blob={G0}")
     assert parse_hsc_request_binding(line).root_id == H0
+    assert parse_hsc_request_binding(
+        line, expected_request_id="pilot-001").root_id == H0
     for bad in (line + " ", line.replace("HSC_V1", "HSC_V2"),
                 line.replace("root.json", "other.json"),
                 line.replace(" target_commit", "  target_commit")):
         with pytest.raises(HSCValidationError):
             parse_hsc_request_binding(bad)
+
+
+def test_request_binding_fixes_exactly_one_canonical_request_segment():
+    def binding(directory):
+        return (f"HSC_V1 target_commit={G0} "
+                f"root_path=artifacts/section-council/{directory}/root.json "
+                f"root_id={H0} root_sha256={H1} root_git_blob={G0} "
+                f"scope_path=artifacts/section-council/{directory}/"
+                "final-scope.json "
+                f"scope_id={H1} scope_sha256={H2} scope_git_blob={G0}")
+    # Extra nested segment, prefix escape, and non-canonical request segments
+    # are refused; the exact four-segment canonical pair is retained.
+    with pytest.raises(HSCValidationError, match="four-segment"):
+        parse_hsc_request_binding(binding("extra/pilot"))
+    with pytest.raises(HSCValidationError, match="canonical"):
+        parse_hsc_request_binding(binding("Pilot-001"))
+    with pytest.raises(HSCValidationError, match="canonical"):
+        parse_hsc_request_binding(binding("pilot_001"))
+    with pytest.raises(HSCValidationError, match="differs from the expected"):
+        parse_hsc_request_binding(binding("pilot-001"),
+                                  expected_request_id="pilot-002")
+    assert parse_hsc_request_binding(binding("pilot-001")).root_path == \
+        "artifacts/section-council/pilot-001/root.json"
+
+
+def test_request_id_grammar_equals_canonical_council_grammar():
+    candidates = ["pilot-001", "abc", "ab", "a", "A_b", "a.b", "a/b",
+                  "-abc", "a" * 64, "a" * 65, "hsc-a-root-001", "UPPER",
+                  "trailing-", "0k9"]
+    for value in candidates:
+        canonical_ok = True
+        try:
+            validate_request_id(value)
+        except SchemaViolation:
+            canonical_ok = False
+        hsc_ok = True
+        try:
+            require_request_id(value, "probe")
+        except HSCValidationError:
+            hsc_ok = False
+        assert hsc_ok == canonical_ok, value
+
+
+@pytest.mark.parametrize("file_type,mode,valid", [
+    ("regular", 0o100644, True),
+    ("directory", 0o40755, True),
+    ("regular", 0o40755, False),
+    ("directory", 0o100644, False),
+    ("regular", 0o120777, False),
+    ("directory", 0o120755, False),
+    ("regular", 0o10644, False),
+])
+def test_native_mode_type_bits_must_agree_with_file_type(file_type, mode,
+                                                         valid):
+    value = observation(1, directory=file_type == "directory", mode=mode)
+    if valid:
+        validate_native_observation(value)
+    else:
+        with pytest.raises(HSCValidationError, match="type bits disagree"):
+            validate_native_observation(value)
+
+
+SHARED_BASE = "5" * 64
 
 
 def access(name, section, *, writes=(), reads=(), immutable=(), deps=(),
@@ -572,26 +640,58 @@ def access(name, section, *, writes=(), reads=(), immutable=(), deps=(),
 
 
 def test_conflict_classifier_allows_only_pinned_disjoint_work():
+    base = {"fixtures/shared.json": SHARED_BASE}
     a = access("a", "section-a", writes=("out/a.json",),
                reads=("fixtures/shared.json",),
-               immutable=("fixtures/shared.json",))
+               immutable=(("fixtures/shared.json", SHARED_BASE),))
     b = access("b", "section-b", writes=("out/b.json",),
                reads=("fixtures/shared.json",),
-               immutable=("fixtures/shared.json",))
-    assert classify_conflict(a, b).conflict is False
+               immutable=(("fixtures/shared.json", SHARED_BASE),))
+    assert classify_conflict(a, b, base_content=base).conflict is False
     overlap = access("c", "section-c", writes=("out/a.json",))
-    assert "write/write overlap" in classify_conflict(a, overlap).reasons
+    assert "write/write overlap" in \
+        classify_conflict(a, overlap, base_content=base).reasons
     mutable = access("d", "section-d", reads=("out/a.json",))
-    assert classify_conflict(a, mutable).conflict
+    assert classify_conflict(a, mutable, base_content=base).conflict
     uncertain = access("e", "section-e", unknown=True)
-    result = classify_conflict(a, uncertain)
+    result = classify_conflict(a, uncertain, base_content=base)
     assert result.conflict and result.uncertain
     left = access("f", "section-f",
                   interfaces=(("shared-v1", 1, H0),))
     right = access("9", "section-g",
                    interfaces=(("shared-v1", 2, H0),))
     assert "shared interface version/digest mismatch" in \
-        classify_conflict(left, right).reasons
+        classify_conflict(left, right, base_content=base).reasons
+
+
+def test_immutable_read_exemption_requires_exact_base_identity():
+    base = {"fixtures/shared.json": SHARED_BASE}
+    writer = access("a", "section-a", writes=("fixtures/shared.json",),
+                    reads=("fixtures/shared.json",))
+    pinned = access("b", "section-b", reads=("fixtures/shared.json",),
+                    immutable=(("fixtures/shared.json", SHARED_BASE),))
+    divergent = access("c", "section-c", reads=("fixtures/shared.json",),
+                       immutable=(("fixtures/shared.json", "a" * 64),))
+    unpinned = access("d", "section-d", reads=("fixtures/shared.json",))
+    # Only the pin that reconstructs against the frozen base is exempt.
+    assert classify_conflict(writer, pinned, base_content=base).conflict \
+        is False
+    # A divergent pinned identity is never exempt (64 a's vs 64 5's bytes).
+    divergent_result = classify_conflict(writer, divergent, base_content=base)
+    assert divergent_result.conflict
+    assert "immutable pin diverges from frozen base" in \
+        divergent_result.reasons
+    # A path-only (unpinned) read of a written path is a conflict.
+    assert classify_conflict(writer, unpinned, base_content=base).conflict
+    # Without a verifiable frozen base the exemption fails closed.
+    assert classify_conflict(writer, pinned).conflict
+    assert classify_conflict(writer, pinned,
+                             base_content={}).conflict
+    # Two readers pinning one path to two identities cannot both be right.
+    other = access("e", "section-e", reads=("fixtures/shared.json",),
+                   immutable=(("fixtures/shared.json", "a" * 64),))
+    mismatch = classify_conflict(pinned, other, base_content=base)
+    assert "immutable base identity mismatch" in mismatch.reasons
 
 
 def test_dependency_dispatch_and_targeted_staleness_are_deterministic():

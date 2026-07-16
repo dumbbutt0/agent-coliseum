@@ -17,7 +17,8 @@ from .core import (
     validate_predicted_change,
 )
 from .records import RECORD_TYPES, validate_record
-from .store import RecordStore, ValidationReport
+from .store import (RecordStore, ValidationReport,
+                    compute_bundle_staleness_inputs)
 from .work import (
     ConflictResult,
     WorkAccess,
@@ -35,6 +36,7 @@ __all__ = [
     "ValidationReport",
     "WorkAccess",
     "classify_conflict",
+    "compute_bundle_staleness_inputs",
     "compute_record_content_sha256",
     "compute_record_id",
     "dependency_closure",
