@@ -55,7 +55,8 @@ def test_events_lock_serializes_appends(env):
 
 def test_clear_lock_via_cli_logs_first(env, monkeypatch):
     root, repo, _head, _cfg = env
-    locking.acquire(root, "stale-request-01", "codex", "stale-request-01")
+    locking.acquire(root, "stale-request-01", "codex", "stale-request-01",
+                    lease_seconds=-1)
     monkeypatch.setenv("COUNCIL_ROOT", root)
     monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
     from tools.council import cli

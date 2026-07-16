@@ -36,6 +36,32 @@ def _lease_expiry(seconds: float) -> str:
                 "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def lease_is_expired(holder: dict, now: datetime.datetime | None = None) \
+        -> bool | None:
+    """Return whether a parsed lock lease is expired, or ``None`` when the
+    holder cannot prove a valid lease.
+
+    Recovery callers must treat ``None`` as fail-closed.  Keeping the parser
+    here gives claim recovery, the launcher, and the sanctioned clear-lock
+    path one lease interpretation instead of three subtly different ones.
+    """
+    if not isinstance(holder, dict):
+        return None
+    lease = holder.get("lease_expires_utc")
+    if not isinstance(lease, str) or not lease.endswith("Z"):
+        return None
+    try:
+        expires = datetime.datetime.strptime(
+            lease[:-1], "%Y-%m-%dT%H:%M:%S.%f").replace(
+                tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=datetime.timezone.utc)
+    return current > expires
+
+
 def _write_all(fd: int, data: bytes) -> None:
     """Write EVERY byte of a lock body. os.write may perform a SHORT write
     (fewer bytes than requested, without raising), which would leave a

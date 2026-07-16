@@ -116,6 +116,47 @@ def test_cancel_records_reason(env):
     assert chain[-1]["payload"]["reason"] == "superseded"
 
 
+def test_clear_lock_refuses_unexpired_lease(env):
+    root, _repo, _head, _cfg = env
+    held = locking.acquire(root, "lease-live", "codex", RID)
+    try:
+        assert cli.main(["--role", "claude", "clear-lock", "lease-live",
+                         "--reason", "must not clear live owner"]) == 1
+        assert locking.read_lock(root, "lease-live")["owner_token"] == \
+            held.owner_token
+    finally:
+        locking.release(held)
+
+
+def test_clear_lock_removes_only_the_expired_observed_owner(env):
+    root, _repo, _head, _cfg = env
+    locking.acquire(root, "lease-expired", "codex", "lease-expired",
+                    lease_seconds=-1)
+    assert cli.main(["--role", "claude", "clear-lock", "lease-expired",
+                     "--reason", "expired test lease"]) == 0
+    assert locking.read_lock(root, "lease-expired") is None
+    last = events.read_chain(root)[-1]
+    assert last["event_type"] == "WATCHER_ERROR"
+    assert last["payload"]["operation"] == "clear_stale_lock"
+
+
+def test_active_control_refuses_expired_launcher_clear(env):
+    """001490 regression: an expired timestamp plus a PID hidden by an
+    audit namespace cannot authorize deletion of the live singleton while
+    Codex control remains active."""
+    root, _repo, _head, _cfg = env
+    held = locking.acquire(root, "_codex_launcher", "codex",
+                           "codex-launcher", lease_seconds=-1)
+    try:
+        assert cli.main(["--role", "claude", "clear-lock",
+                         "_codex_launcher", "--reason",
+                         "pid not visible in nested namespace"]) == 1
+        assert locking.read_lock(root, "_codex_launcher")["owner_token"] == \
+            held.owner_token
+    finally:
+        locking.release(held)
+
+
 def test_milestone_status_output(env, capsys):
     _root, _repo, _head, _cfg = env
     assert cli.main(["--role", "human", "init-policy"]) == 0

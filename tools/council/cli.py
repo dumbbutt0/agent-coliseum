@@ -541,6 +541,20 @@ def cmd_clear_lock(args) -> int:
     if holder is None:
         print(f"no lock named {args.name!r}")
         return 0
+    expired = locking.lease_is_expired(holder)
+    if expired is not True:
+        state = "unreadable" if expired is None else "unexpired"
+        raise SchemaViolation(
+            f"clear-lock refused: {args.name!r} lease is {state}")
+    # A long-running launcher is intentionally singleton.  Its PID may be
+    # invisible from a nested audit namespace, so an expired timestamp plus
+    # a failed pgrep is not proof that it died (event 001490 demonstrated
+    # this).  Only an owner-paused Codex control state makes manual launcher
+    # recovery eligible; ordinary request locks remain expiry-gated above.
+    if args.name == "_codex_launcher" and storage.status_allows(root, "codex"):
+        raise SchemaViolation(
+            "clear-lock refused: pause the codex role through owner control "
+            "before recovering the singleton launcher lock")
     request_id = holder.get("request_id", args.name) \
         if isinstance(holder, dict) else args.name
     events.append_event(root, cfg, "WATCHER_ERROR", args.role, request_id,
@@ -549,7 +563,16 @@ def cmd_clear_lock(args) -> int:
                          "lock_name": args.name,
                          "previous_holder": holder,
                          "reason": args.reason})
-    locking.clear_lock(root, args.name)
+    owner_token = holder.get("owner_token") if isinstance(holder, dict) \
+        else None
+    if not owner_token:
+        raise SchemaViolation("clear-lock refused: lock has no owner token")
+    locking.release(locking.Lock(
+        path=storage.lock_path(root, args.name), name=args.name,
+        role=args.role, root=root, owner_token=owner_token))
+    if locking.read_lock(root, args.name) is not None:
+        raise SchemaViolation(
+            "clear-lock lost the ownership race; replacement lock preserved")
     print(f"cleared lock {args.name!r} (previous holder logged)")
     return 0
 

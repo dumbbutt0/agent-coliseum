@@ -2,6 +2,7 @@
 crash-safe transactions (STOP-during-claim compensation, idempotent
 recovery)."""
 import os
+import threading
 
 import pytest
 
@@ -121,7 +122,8 @@ def test_recover_rolls_back_orphaned_claim_txn(env):
     root, repo, head, cfg = env
     _publish(root, cfg, repo, head)
     # simulate the crash: lock + move + journal at 'moved', no event
-    lock = locking.acquire(root, RID, "codex", RID, kind="claim")
+    lock = locking.acquire(root, RID, "codex", RID, kind="claim",
+                           lease_seconds=-1)
     os.rename(storage.safe_request_path(root, "ready", RID),
               storage.safe_request_path(root, "claimed", RID))
     t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
@@ -176,7 +178,8 @@ def test_recover_is_cycle_aware(env):
               storage.safe_request_path(root, "ready", RID))
     # cycle 2: an INTERRUPTED claim — lock + move + journal, but no event.
     # prior_claimed_count records the one existing AUDIT_CLAIMED.
-    lock2 = locking.acquire(root, RID, "codex", RID, kind="claim")
+    lock2 = locking.acquire(root, RID, "codex", RID, kind="claim",
+                            lease_seconds=-1)
     os.rename(storage.safe_request_path(root, "ready", RID),
               storage.safe_request_path(root, "claimed", RID))
     t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
@@ -256,13 +259,105 @@ def test_compensate_is_phase_and_ownership_aware(env):
     tA = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
                        {"owner_token": "a" * 32, "prior_claimed_count": 0})
     outcome = txn.compensate(root, make_cfg(repo, root, role="codex"), tA)
-    assert outcome == "back"
+    assert outcome == "blocked"  # foreign live owner: fail closed, no mutation
     # B is completely untouched: its file stays claimed, its lock survives
     assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
     assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
     holder = locking.read_lock(root, RID)
     assert holder is not None and holder["owner_token"] == lockB.owner_token
     locking.release(lockB)
+
+
+def test_recover_never_rolls_back_a_live_claim_transaction(env, monkeypatch):
+    """Events 001513-001516 regression: a concurrent watcher may invoke
+    global recovery while the first claimant has moved the request but has
+    not appended AUDIT_CLAIMED yet.  The matching live lease makes that
+    journal untouchable; the duplicate claim is refused and the first claim
+    commits with one file, one lock, one event, and no journal residue."""
+    root, repo, head, cfg = env
+    _publish(root, cfg, repo, head)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    entered = threading.Event()
+    proceed = threading.Event()
+    real_append = codex_watch.events.append_event
+
+    def pause_before_claim_event(root_, cfg_, event_type, *args, **kwargs):
+        if event_type == "AUDIT_CLAIMED" and \
+                threading.current_thread().name == "first-claimant":
+            entered.set()
+            assert proceed.wait(5), "test did not release first claimant"
+        return real_append(root_, cfg_, event_type, *args, **kwargs)
+
+    monkeypatch.setattr(codex_watch.events, "append_event",
+                        pause_before_claim_event)
+    result = {}
+
+    def first_claim():
+        try:
+            result["value"] = codex_watch.claim(root, codex_cfg, RID)
+        except BaseException as exc:  # surfaced in the main test thread
+            result["error"] = exc
+
+    worker = threading.Thread(target=first_claim, name="first-claimant")
+    worker.start()
+    assert entered.wait(5)
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    holder = locking.read_lock(root, RID)
+    assert holder is not None
+
+    # Recovery observes the in-flight owner and makes no mutation.  A second
+    # claim invocation also refuses instead of restoring ready/.
+    assert txn.recover(root, codex_cfg) == []
+    assert os.listdir(os.path.join(root, "txn"))
+    with pytest.raises(CouncilError):
+        codex_watch.claim(root, codex_cfg, RID)
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert locking.read_lock(root, RID)["owner_token"] == \
+        holder["owner_token"]
+
+    proceed.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert "error" not in result
+    assert sum(e["event_type"] == "AUDIT_CLAIMED" and
+               e["request_id"] == RID for e in events.read_chain(root)) == 1
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert locking.read_lock(root, RID) is not None
+    assert os.listdir(os.path.join(root, "txn")) == []
+
+
+def test_recover_rolls_forward_event_committed_claim_artifacts(env):
+    """If AUDIT_CLAIMED lands before a crash, the journal repairs artifacts
+    toward claimed; it never silently restores the request to ready."""
+    root, repo, head, cfg = env
+    _publish(root, cfg, repo, head)
+    codex_cfg = make_cfg(repo, root, role="codex")
+    token = "a" * 32
+    lock = locking.acquire(root, RID, "codex", RID, kind="claim",
+                           owner_token=token)
+    t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],
+                      {"owner_token": token, "prior_claimed_count": 0})
+    t.mark("locked")
+    t.mark("moved")
+    os.rename(storage.safe_request_path(root, "ready", RID),
+              storage.safe_request_path(root, "claimed", RID))
+    request = make_request(repo, head, RID)
+    events.append_event(
+        root, codex_cfg, "AUDIT_CLAIMED", "codex", RID, repo, head,
+        {"claimed_by": "codex", "lock_file": f"locks/{RID}.lock",
+         "lock_holder": locking.read_lock(root, RID)})
+    # Reproduce the bad artifact tail while retaining the transaction journal.
+    os.rename(storage.safe_request_path(root, "claimed", RID),
+              storage.safe_request_path(root, "ready", RID))
+    locking.release(lock)
+
+    assert (t.txn_id, "forward") in txn.recover(root, codex_cfg)
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID))
+    assert not os.path.exists(storage.safe_request_path(root, "ready", RID))
+    assert locking.read_lock(root, RID)["owner_token"] == token
+    assert txn.recover(root, codex_cfg) == []
 
 
 def test_launcher_recovers_orphan_claim_before_work(env, monkeypatch):
@@ -275,7 +370,8 @@ def test_launcher_recovers_orphan_claim_before_work(env, monkeypatch):
     monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
     _publish(root, cfg, repo, head)
     # stage an orphan interrupted claim: lock + move + journal, no event
-    lock = locking.acquire(root, RID, "codex", RID, kind="claim")
+    lock = locking.acquire(root, RID, "codex", RID, kind="claim",
+                           lease_seconds=-1)
     os.rename(storage.safe_request_path(root, "ready", RID),
               storage.safe_request_path(root, "claimed", RID))
     t = txn.Txn.begin(root, "claim", RID, ["locked", "moved", "event"],

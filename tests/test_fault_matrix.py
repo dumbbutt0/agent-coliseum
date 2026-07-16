@@ -62,6 +62,12 @@ def _claim_scenario(tmp_path):
 
 
 def _check_claim(root, cfg, crashed):
+    # Fault injection raises in-process, so make any surviving simulated
+    # claimant lease explicitly stale before invoking crash recovery.
+    holder = locking.read_lock(root, RID)
+    if crashed and isinstance(holder, dict):
+        holder["lease_expires_utc"] = "2000-01-01T00:00:00.000Z"
+        storage.atomic_write_json(storage.lock_path(root, RID), holder)
     txn.recover(root, cfg)
     again = txn.recover(root, cfg)          # idempotent
     chain = events.read_chain(root)

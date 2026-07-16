@@ -284,22 +284,39 @@ def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
 
 
 def _clear_stale_claim_lock(cfg, root: str, rid: str, repo: str,
-                            commit: str, why: str) -> None:
+                            commit: str, why: str,
+                            expected_owner_token: str | None = None) -> bool:
     """The ONLY lock clearance the launcher performs, and only for a claim
     lock known to be stale (the launcher's own bounded session is dead, or
     the lock outlived the audit timeout). Logged FIRST — the same
     contract as cli clear-lock; never counted as a session failure."""
     holder = locking.read_lock(root, rid)
     if holder is None:
-        return
+        return False
+    if expected_owner_token is not None and (
+            not isinstance(holder, dict) or
+            holder.get("owner_token") != expected_owner_token):
+        # A duplicate launcher/session may fail while another audit owns the
+        # request.  Never turn that local failure into clearance of the
+        # other session's claim.
+        return False
+    owner_token = holder.get("owner_token") if isinstance(holder, dict) \
+        else None
+    if not owner_token:
+        return False
     events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo,
                         commit, {"phase": "codex_launcher",
                                  "operation": "clear_stale_lock",
                                  "lock_name": rid,
                                  "previous_holder": holder,
                                  "reason": why})
-    locking.clear_lock(root, rid)
+    locking.release(locking.Lock(
+        path=storage.lock_path(root, rid), name=rid, role=SENDER,
+        root=root, owner_token=owner_token))
+    if locking.read_lock(root, rid) is not None:
+        return False  # ownership changed after the log; replacement survives
     print(f"codex_launcher: cleared stale claim lock for {rid} ({why})")
+    return True
 
 
 def _stale_lock_gate(cfg, root: str, rid: str, repo: str, commit: str,
@@ -312,26 +329,20 @@ def _stale_lock_gate(cfg, root: str, rid: str, repo: str, commit: str,
     holder = locking.read_lock(root, rid)
     if holder is None:
         return True
-    # H5 lease locks: prefer the recorded lease_expires_utc; fall back to
-    # mtime age for legacy locks written before leases
-    expired = None
-    lease = holder.get("lease_expires_utc") if isinstance(holder, dict) \
-        else None
-    if lease:
-        import datetime
-        try:
-            exp = datetime.datetime.strptime(
-                lease[:-1], "%Y-%m-%dT%H:%M:%S.%f").replace(
-                    tzinfo=datetime.timezone.utc)
-            expired = datetime.datetime.now(datetime.timezone.utc) > exp
-        except ValueError:
-            expired = None
-    if expired is None:
+    # H5 lease locks: use the one canonical parser; fall back to mtime only
+    # for legacy locks that predate lease_expires_utc.
+    expired = locking.lease_is_expired(holder)
+    if expired is None and isinstance(holder, dict) and \
+            "lease_expires_utc" not in holder:
         try:
             age = time.time() - os.path.getmtime(storage.lock_path(root, rid))
             expired = age >= audit_timeout
         except OSError:
             expired = False
+    elif expired is None:
+        print(f"codex_launcher: {rid} claim lock has an invalid lease — "
+              "failing closed; owner recovery required")
+        return False
     if not expired:
         print(f"codex_launcher: {rid} is claimed and its lease has not "
               "expired — a session may still be running; waiting")
@@ -358,10 +369,24 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
               "AUTONOMY_PAUSED, no session launched", file=sys.stderr)
         return "paused"
 
-    if kind == "source_audit_resume" and \
+    if kind in ("source_audit_resume", "result_audit") and \
             not _stale_lock_gate(cfg, root, rid, repo, commit,
                                  audit_timeout):
         return "waiting"
+
+    # A resumed source audit (and a result audit over an already-claimed
+    # request) receives a fresh bounded claim lease before launch.  The child
+    # submit transaction releases it by name.  This prevents two recovery
+    # sessions from auditing/submitting the same claimed artifact at once.
+    resume_lock = None
+    if kind in ("source_audit_resume", "result_audit"):
+        try:
+            resume_lock = locking.acquire(
+                root, rid, SENDER, rid, kind="claim-resume",
+                lease_seconds=max(locking.DEFAULT_LEASE_SECONDS,
+                                  audit_timeout + 300.0))
+        except LockHeld:
+            return "waiting"
 
     pre_length = len(chain)
     print(f"codex_launcher: launching {kind} session for {rid} at "
@@ -398,12 +423,28 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
         f"(state now {state_now!r})")
     outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
                               logs)
-    if state_now == "claimed" and kind == "source_audit":
-        # our own bounded session claimed and died — its lock is provably
-        # stale NOW; clear it (logged) so the resume trigger can act
-        _clear_stale_claim_lock(cfg, root, rid, repo, commit,
-                                "launcher's own session ended after "
-                                "claiming, before any verdict")
+    if state_now == "claimed" and kind in (
+            "source_audit", "source_audit_resume", "result_audit"):
+        # Clear only the lock this exact bounded session can prove it owns.
+        # A source audit learns the token from the AUDIT_CLAIMED event in its
+        # own post-launch segment; resume/result sessions hold the token
+        # directly.  A duplicate that never claimed has no clearance power.
+        owner_token = resume_lock.owner_token if resume_lock else None
+        if owner_token is None:
+            own_claim = next((e for e in segment
+                              if e["request_id"] == rid and
+                              e["event_type"] == "AUDIT_CLAIMED" and
+                              e["sender"] == SENDER and
+                              e["target_commit"] == commit), None)
+            if own_claim is not None:
+                lock_holder = own_claim["payload"].get("lock_holder")
+                if isinstance(lock_holder, dict):
+                    owner_token = lock_holder.get("owner_token")
+        if owner_token:
+            _clear_stale_claim_lock(
+                cfg, root, rid, repo, commit,
+                "launcher's own session ended after claiming, before any "
+                "verdict", expected_owner_token=owner_token)
     return outcome
 
 
@@ -453,7 +494,14 @@ def main(argv=None) -> int:
     root = cfg.council_root
     storage.ensure_layout(root)
     try:
-        lock = locking.acquire(root, LAUNCHER_LOCK, SENDER, "codex-launcher")
+        lock = locking.acquire(
+            root, LAUNCHER_LOCK, SENDER, "codex-launcher",
+            # O_EXCL remains the admission authority.  The lease covers the
+            # longest bounded child plus recovery margin; active-control
+            # clear-lock cannot remove this singleton merely because a PID
+            # is hidden by a nested namespace.
+            lease_seconds=max(locking.DEFAULT_LEASE_SECONDS,
+                              args.audit_timeout_seconds + 300.0))
     except LockHeld as exc:
         print(f"codex_launcher: refusing to start — {exc}", file=sys.stderr)
         return 1

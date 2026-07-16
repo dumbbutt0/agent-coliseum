@@ -304,6 +304,38 @@ def test_second_instance_refused_by_lock(env, tmp_path, monkeypatch):
         locking.release(held)
 
 
+def test_expired_singleton_file_still_refuses_second_instance(
+        env, tmp_path, monkeypatch):
+    """Lease expiry is recovery eligibility, never duplicate-launch
+    authority.  The O_EXCL singleton remains held until sanctioned cleanup."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_NOOP)
+    held = locking.acquire(root, codex_launcher.LAUNCHER_LOCK, "codex",
+                           "codex-launcher", lease_seconds=-1)
+    try:
+        assert codex_launcher.main(["--once"]) == 1
+    finally:
+        locking.release(held)
+
+
+def test_failed_duplicate_session_cannot_clear_foreign_claim(env):
+    """A launcher that did not emit the claim event has no authority to
+    clear the request lock held by the session that did."""
+    root, repo, head, _cfg = env
+    held = locking.acquire(root, RID, "codex", RID, kind="claim")
+    before = len(events.read_chain(root))
+    try:
+        cleared = codex_launcher._clear_stale_claim_lock(
+            make_cfg(repo, root, role="codex"), root, RID, repo, head,
+            "duplicate session ended", expected_owner_token="f" * 32)
+        assert cleared is False
+        assert locking.read_lock(root, RID)["owner_token"] == \
+            held.owner_token
+        assert len(events.read_chain(root)) == before
+    finally:
+        locking.release(held)
+
+
 # --------------------------------------------------------- failure handling
 
 def test_failed_session_records_watcher_error(env, tmp_path, monkeypatch):

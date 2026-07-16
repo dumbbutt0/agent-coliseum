@@ -138,6 +138,12 @@ WATCHER_ERROR and three consecutive failures per published cycle pause
 autonomy. STATUS/STOP, the paused flag, and the milestone stop it cleanly.
 Service unit (shipped disabled): `tools/systemd/coliseum-codex-launcher.
 service` — install only after this capability's own audit returns GO.
+The `_codex_launcher` O_EXCL lock remains the one admission authority even
+after its lease timestamp expires. Agent-role `clear-lock` cannot remove that
+singleton while Codex control is active: PID visibility inside a nested audit
+namespace is not liveness evidence. Owner recovery pauses the Codex role,
+stops the service, and only then uses the logged stale-clear path. The initial
+lease covers the configured bounded audit plus a recovery margin.
 DEPLOYMENT MODEL (owner-ratified 2026-07-11, H7 condition 2): USER
 service — the unit installs at `~/.config/systemd/user/` and is managed
 exclusively with `systemctl --user` (+ `loginctl enable-linger` so it
@@ -304,6 +310,18 @@ compensates only its OWN transaction (never a concurrent claimant's),
 moving the request back to `ready/` and releasing exactly its own lock —
 no stranded lock, no half-moved request.
 
+Recovery is lease-aware at the transaction boundary. A journal whose owner
+token matches an unexpired claim lock is `active`: another watcher may observe
+it but cannot move its request, clear its lock, or delete its journal. A
+foreign or unreadable lock is `blocked` and likewise causes no mutation. Only
+an expired matching lease may roll back. If this cycle's `AUDIT_CLAIMED` event
+already landed, recovery converges forward to exactly one `claimed/` artifact
+and recreates the journal-bound lock when necessary; it never silently
+restores that request to `ready/`. Resume and result audits acquire a fresh
+bounded claim lease before launch, and a failed launcher may clear only the
+owner token proved by its own post-launch claim event or its resume lock. These
+rules close the concurrent-watcher failure recorded at events 001513-001516.
+
 Locks are now leases (item 7). A `lock.v1` body carries an `owner_token`
 (`secrets.token_hex`), a `lease_expires_utc`, and a `kind`. `release()` is
 COMPARE-AND-DELETE on the token: the holder is read, the token verified,
@@ -317,7 +335,9 @@ overwrites another holder's lock. A wrong or absent token is a no-op, so a
 reused PID cannot steal a live lock — authority is the random token, not the
 pid. Expiry only makes a lock ELIGIBLE for the existing logged clearance
 paths (`cli clear-lock`, the launcher stale-gate, which now reads
-`lease_expires_utc` instead of file mtime) — never a silent steal.
+`lease_expires_utc` instead of file mtime) — never a silent steal. The logged
+clear path rejects an unexpired or malformed lease and uses token-bound
+compare-and-delete, so a replacement acquired after observation survives.
 
 ## Fault matrix (hardening H6)
 

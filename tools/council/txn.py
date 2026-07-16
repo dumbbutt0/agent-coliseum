@@ -91,7 +91,7 @@ def _load(root: str, txn_id: str):
         return None
 
 
-def _recover_claim(root: str, cfg, j: dict) -> str:
+def _recover_claim(root: str, cfg, j: dict, force_owner: bool = False) -> str:
     """Roll forward iff THIS cycle's AUDIT_CLAIMED landed; else roll back the
     move + release exactly our lock (idempotent). Returns 'forward' | 'back'.
 
@@ -108,8 +108,45 @@ def _recover_claim(root: str, cfg, j: dict) -> str:
     current = sum(1 for e in events.read_chain(root)
                   if e["event_type"] == "AUDIT_CLAIMED"
                   and e["request_id"] == rid)
+    token = data.get("owner_token")
+    holder = locking.read_lock(root, rid)
     if current > prior:
-        return "forward"   # our event is authoritative; nothing to undo
+        # The event is authoritative.  Recovery must converge the artifacts
+        # FORWARD even if a concurrent recovery briefly moved the request
+        # back before the append landed (the exact 001513 failure).
+        ready = storage.safe_request_path(root, "ready", rid)
+        claimed_path = storage.safe_request_path(root, "claimed", rid)
+        if os.path.exists(ready) == os.path.exists(claimed_path):
+            return "blocked"  # both present or both absent: owner repair
+        if holder is not None:
+            if not isinstance(holder, dict) or not token or \
+                    holder.get("owner_token") != token:
+                return "blocked"
+        elif token:
+            try:
+                locking.acquire(root, rid, "codex", rid, kind="claim",
+                                owner_token=token)
+            except CouncilError:
+                return "blocked"
+        else:
+            return "blocked"
+        if os.path.exists(ready):
+            os.rename(ready, claimed_path)
+        return "forward"
+
+    # Never compensate a different process's LIVE claim transaction.  Before
+    # this guard, a second watcher could see the first journal at "moved",
+    # restore ready/, and remove its lock while the first was about to append
+    # AUDIT_CLAIMED.  A matching unexpired lease means the owner is still
+    # entitled to finish.  A foreign/unreadable lock is also fail-closed.
+    if holder is not None:
+        if not isinstance(holder, dict) or not token or \
+                holder.get("owner_token") != token:
+            return "blocked"
+        if not force_owner:
+            expired = locking.lease_is_expired(holder)
+            if expired is not True:
+                return "active" if expired is False else "blocked"
     # Roll back PHASE- and OWNERSHIP-aware (H5 cycle-2 round 2): a claim that
     # never acquired the lock or moved the file must not disturb a concurrent
     # claimant's state. Only undo the move if OUR journal recorded reaching
@@ -121,7 +158,6 @@ def _recover_claim(root: str, cfg, j: dict) -> str:
             os.rename(claimed_path, ready)
     # Release is compare-and-delete on OUR token, so a concurrent claimant's
     # lock (a different token) is never removed even if our journal names one.
-    token = data.get("owner_token")
     if token:
         locking.release(locking.Lock(
             path=storage.lock_path(root, rid), name=rid, role="codex",
@@ -144,10 +180,14 @@ def compensate(root: str, cfg, txn: "Txn") -> str | None:
          "request_id": txn.request_id, "data": txn.data,
          "completed": txn.completed}
     try:
-        outcome = handler(root, cfg, j)
+        outcome = handler(root, cfg, j, force_owner=True)
     except CouncilError:
         outcome = None
-    txn.complete()
+    # A loser that never moved anything has no recovery work.  If ownership
+    # became ambiguous after a recorded move, retain the journal for an
+    # owner-led/idempotent recovery instead of erasing the only evidence.
+    if outcome != "blocked" or "moved" not in txn.completed:
+        txn.complete()
     return outcome
 
 
@@ -166,6 +206,11 @@ def recover(root: str, cfg) -> list:
             continue
         try:
             outcome = _HANDLERS[j["kind"]](root, cfg, j)
+            if outcome in ("active", "blocked"):
+                # The transaction is still owned by a live lease, or its
+                # ownership is ambiguous.  Retain the journal and mutate
+                # nothing; a later idempotent pass may recover it.
+                continue
             healed.append((j["txn_id"], outcome))
         except CouncilError:
             continue
