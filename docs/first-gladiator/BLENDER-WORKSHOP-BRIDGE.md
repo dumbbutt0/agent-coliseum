@@ -1,22 +1,26 @@
 # Blender Workshop bridge — design source
 
-Status: **DESIGN ONLY — REVISION 004**. This source authorizes no Blender execution, repository
+Status: **DESIGN ONLY — REVISION 005**. This source authorizes no Blender execution, repository
 implementation, projection of a canonical run, visual claim, asset admission,
 or Council integration. Implementation and the first render proof require a
 separately routed source after this design receives the applicable plain Council
-verdict. Revision 004 preserves the blocked revision-001, revision-002, and
-revision-003 lineage at Council events `001433-d1bfc40f`, `001438-4a9b7d49`,
-and `001443-8cc845bb`. Revision 002 closed
+verdict. This revision preserves the blocked revision-001 through revision-004
+lineage at Council events `001433-d1bfc40f`, `001438-4a9b7d49`,
+`001443-8cc845bb`, and `001448-1affc34a`. Revision 002 closed
 job identity/path recursion, fail-open Windows alias handling, and the inspector's
 open prohibited-class set. Revision 003 closes the remaining independently
 reproduced profile-value incompleteness, reviewed-script check/use race, and
 worker-result validation gap. Revision 004 closes the independently reproduced
 inventory-construction, mesh/collection/view-layer value-surface, and launch-
 attestation normalization gaps without changing the execution boundary.
+Revision 005 closes the independently reproduced open render-manifest schema and
+auxiliary held-ancestor checksum-preimage gaps without changing the execution
+boundary.
 
 Council request: `first-gladiator-blender-workshop-design-002`, document revision
-`004`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
-request so events `001438-4a9b7d49` and `001443-8cc845bb` remain its direct audit lineage; no request or
+`005`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
+request so events `001438-4a9b7d49`, `001443-8cc845bb`, and
+`001448-1affc34a` remain its direct audit lineage; no request or
 commit history is rewritten.
 
 ## 1. Purpose
@@ -369,7 +373,12 @@ mismatch refuses. `argument_array_sha256` is exactly
 `sha256(UTF-8(schema.canonical_json(argument_array)))`: the argument array is a
 JSON list of exact strings in process order, encoded as UTF-8 with no BOM or
 trailing newline. No path, Unicode, slash, case, or environment normalization is
-performed after the native paths are validated. `held_ancestors` is sorted by the
+performed after the native paths are validated. `held_ancestors_sha256` is exactly
+`sha256(UTF-8(schema.canonical_json(held_ancestors)))` after validation and sorting,
+using the same strict UTF-8, no-BOM, no-trailing-newline encoding and no
+post-validation normalization. Pretty-printed JSON, a BOM, a trailing newline,
+NUL-delimited rows, or any other byte representation cannot satisfy this checksum.
+`held_ancestors` is sorted by the
 total key `(UTF-8 bytes of role, volume_serial_number as an unsigned integer,
 UTF-8 bytes of lowercase file_id_hex)` ascending; identical full keys and duplicate
 roles refuse. The worker record uses ContentRecord domain
@@ -3230,27 +3239,121 @@ its negative provenance. Cleanup is explicit and never follows symlinks.
 
 Only the host writes `render_manifest.v1`, after successful worker exit, strict
 `blender.worker_result.v1` validation, independent output hashing/PNG validation,
-and strict passing `blender.inspector_result.v1` validation. It binds:
+and strict passing `blender.inspector_result.v1` validation. A manifest is a success
+record only: its `status` is the literal `completed`. A failed, interrupted, refused,
+or partially validated job has no render manifest; its worker/host progress and
+failure records remain the evidence. This prevents a permissive failed-state
+relation from becoming another output-admission path.
 
-- job id and schema/bridge versions;
-- worker/inspector launch-attestation ids, guarded input identities, exact argument-array
-  digests, and the inspector-bound `scene.blend` identity;
-- canonical run id and source evidence digest, or `not_applicable` for smoke;
-- authorized presentation-projection id and digest, or `not_applicable`;
-- Blender version/build hash;
-- reviewed worker and inspector script paths/digests and repository commit;
-- template and asset-pack versions/digests;
-- frame range, resolution, renderer, camera and deterministic setting summary;
-- object inventory digest;
-- each output relative path, size, media type, and SHA-256;
-- worker-result schema version and digest plus inspector-result schema version and
-  digest;
-- derived status and explicit `simulation_impact: none`;
-- source completion, claimability, governance, replay, and admission states only
-  when copied from a strictly validated projection, never inferred.
+The file is strict UTF-8 integrated `schema.canonical_json` with no BOM or trailing
+byte and a maximum of 131072 bytes. The host parses with duplicate-key rejection,
+requires byte-for-byte equality with the integrated canonical serialization, and
+refuses floats, noncanonical numbers, an unknown or missing key at any depth, a
+wrong type/enum/relation, or an array in the wrong order. Its top-level key set is
+exactly:
 
-Render success cannot promote any source status. Interpolated frames are always
-declared presentation-only.
+```text
+{schema_version, job_id, bridge_version, smoke_profile_version, status,
+ source, launches, renderer, inputs, results, outputs,
+ derived_visualization_status, simulation_impact, interpolation_semantics}
+```
+
+Scalar constraints are exact:
+
+- `schema_version == "render_manifest.v1"`,
+  `bridge_version == "blender-workshop-bridge.v1"`,
+  `smoke_profile_version == "coliseum-smoke.v1"`, `status == "completed"`,
+  `derived_visualization_status == "validated"`, and
+  `simulation_impact == "none"`;
+- `job_id`, every non-null digest, and every attestation id is 64 lowercase hex;
+  `renderer.repository_commit` is 40 lowercase hex; byte counts are positive JSON
+  integers (never booleans); and file identities use the exact section-5
+  `{volume_serial_number, file_id_hex}` schema;
+- `interpolation_semantics` is `none` for this one-frame smoke profile. A later
+  audited multi-frame profile may use `presentation_only`; no other value is legal.
+
+`source` has exactly
+`{kind, canonical_run_id, source_evidence_sha256,
+presentation_projection_id, presentation_projection_sha256, provenance}`.
+For `kind == "smoke"`, the four identity/digest values are JSON null and every
+provenance field is `not_applicable`. For `kind == "validated_projection"`,
+`canonical_run_id` and `presentation_projection_id` are ASCII
+`[A-Za-z0-9._:-]{1,240}` strings, both SHA-256 values are 64 lowercase hex, none of
+the seven provenance fields may be
+`not_applicable`, and all seven are copied byte-for-byte from the strictly validated
+projection. `provenance` has exactly these required keys and enums:
+
+```text
+completion               complete | incomplete | unknown | not_applicable
+behavioral_claimability  claimable | nonclaimable | unknown | not_applicable
+replay_verification      verified | unverified | failed | not_exposed | unknown | not_applicable
+training_admission       admitted | rejected | unknown | not_applicable
+governance_approval      approved | blocked | not_bound | unknown | not_applicable
+quarantine               quarantined | not_quarantined | unknown | not_applicable
+correction_lineage       valid | invalid | not_present | unknown | not_applicable
+```
+
+No field is optional. Absence never selects `complete`, `claimable`, `verified`,
+`admitted`, `approved`, `not_quarantined`, or `valid`. The host does not derive one
+state from another, inspect the dirty Council tree, or promote an `unknown`/
+`not_bound` value. Correction lineage and quarantine remain separate from render
+success and from one another.
+
+`launches` has exactly `{worker, inspector}`. `worker` has exactly
+`{attestation_id, argument_array_sha256, script_relative_path, script_sha256,
+file_identity}`; `inspector` has those keys plus `scene_blend_file_identity`.
+The relative paths are the literals `input/smoke_scene.py` and
+`input/inspect_scene.py`; all other values equal the independently rederived guarded
+launch records. No absolute/native path enters the manifest.
+
+`renderer` has exactly
+`{blender_identity, repository_commit, render_engine, frame, resolution,
+camera_name, render_profile_sha256, inventory_sha256}`. `blender_identity` is exact
+`{version, build_hash, platform}` and equals the job. `render_engine` is
+`BLENDER_EEVEE_NEXT`; `frame` is exactly `{start:1,end:1}`; `resolution` is exactly
+`{width:640,height:480,percentage:100}`; `camera_name` is `SMOKE_CAMERA`; and both
+profile/inventory digests equal the job, worker, and passing inspector bindings.
+
+`inputs` has exactly `{job_spec, factory_profile, template, asset_pack}`. The first
+two records have exactly `{relative_path, byte_count, sha256}`, fixed relative paths
+`job.json` and `input/factory-profile.json`, and host-observed positive sizes/digests.
+`template` and `asset_pack` each have exactly `{status, version, sha256}`. For this
+geometric smoke source each is exactly
+`{"status":"not_applicable","version":null,"sha256":null}`. A future bound profile
+requires `status == "bound"`, a nonempty ASCII version of at most 128 characters,
+and a 64-lowercase-hex digest under a separately audited profile; mixed null/bound
+relations refuse.
+
+`results` has exactly `{worker, inspector}`. Each nested record has exactly
+`{schema_version, relative_path, byte_count, sha256}`. The schema/path pairs are
+`blender.worker_result.v1` / `worker-result.json` and
+`blender.inspector_result.v1` / `inspector-result.json`. Their bytes are reopened and
+hashed by the host after strict parsing; the inspector status must be `passed` and
+the worker status `completed`.
+
+`outputs` is exactly the worker's independently host-validated three-entry list in
+the fixed section-6.4 order and with the exact key set
+`{kind, relative_path, media_type, byte_count, sha256}` per entry: preview PNG,
+render PNG, then `scene.blend`. Its scene digest and independently opened native
+file identity equal the inspector launch binding. Missing, extra, reordered,
+zero-byte, wrongly typed, or digest-divergent output refuses the manifest.
+
+This normative fixed manifest vector exercises every key and terminal relation.
+The repeated values are fixture data, not environment assertions:
+
+```json
+{"bridge_version":"blender-workshop-bridge.v1","derived_visualization_status":"validated","inputs":{"asset_pack":{"sha256":null,"status":"not_applicable","version":null},"factory_profile":{"byte_count":103,"relative_path":"input/factory-profile.json","sha256":"4040404040404040404040404040404040404040404040404040404040404040"},"job_spec":{"byte_count":104,"relative_path":"job.json","sha256":"5050505050505050505050505050505050505050505050505050505050505050"},"template":{"sha256":null,"status":"not_applicable","version":null}},"interpolation_semantics":"none","job_id":"7070707070707070707070707070707070707070707070707070707070707070","launches":{"inspector":{"argument_array_sha256":"6e0032f60911008b070f799157733fb055ca68f2464e6f2d2f335011a50ba0ca","attestation_id":"2aca6cd643b811aa2d9abc544663f6c939382e94ef80ac26e0861ec129f4424e","file_identity":{"file_id_hex":"03030303030303030303030303030303","volume_serial_number":1},"scene_blend_file_identity":{"file_id_hex":"06060606060606060606060606060606","volume_serial_number":1},"script_relative_path":"input/inspect_scene.py","script_sha256":"3030303030303030303030303030303030303030303030303030303030303030"},"worker":{"argument_array_sha256":"299acb851ead7a64505ffb48b95d3cd30901392b71f14ed57b062739c9e64860","attestation_id":"e68207158627944ef9e584adf5d6089454d8da778a1d554aec0f943c6b6ed418","file_identity":{"file_id_hex":"02020202020202020202020202020202","volume_serial_number":1},"script_relative_path":"input/smoke_scene.py","script_sha256":"2020202020202020202020202020202020202020202020202020202020202020"}},"outputs":[{"byte_count":800,"kind":"preview","media_type":"image/png","relative_path":"preview.png","sha256":"8080808080808080808080808080808080808080808080808080808080808080"},{"byte_count":900,"kind":"render","media_type":"image/png","relative_path":"render.png","sha256":"8181818181818181818181818181818181818181818181818181818181818181"},{"byte_count":1000,"kind":"scene","media_type":"application/x-blender","relative_path":"scene.blend","sha256":"6060606060606060606060606060606060606060606060606060606060606060"}],"renderer":{"blender_identity":{"build_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","platform":"Windows","version":"5.2.0"},"camera_name":"SMOKE_CAMERA","frame":{"end":1,"start":1},"inventory_sha256":"1ec5e1c2c6a063d85e0e328925296b21e7e4bc435bf4acaf2869741826bd5f60","render_engine":"BLENDER_EEVEE_NEXT","render_profile_sha256":"58ef3569c2bb2bd3e593876a38be6898abde20d488a238b9878a7e7ce77d83bb","repository_commit":"9999999999999999999999999999999999999999","resolution":{"height":480,"percentage":100,"width":640}},"results":{"inspector":{"byte_count":1200,"relative_path":"inspector-result.json","schema_version":"blender.inspector_result.v1","sha256":"7272727272727272727272727272727272727272727272727272727272727272"},"worker":{"byte_count":1100,"relative_path":"worker-result.json","schema_version":"blender.worker_result.v1","sha256":"7171717171717171717171717171717171717171717171717171717171717171"}},"schema_version":"render_manifest.v1","simulation_impact":"none","smoke_profile_version":"coliseum-smoke.v1","source":{"canonical_run_id":null,"kind":"smoke","presentation_projection_id":null,"presentation_projection_sha256":null,"provenance":{"behavioral_claimability":"not_applicable","completion":"not_applicable","correction_lineage":"not_applicable","governance_approval":"not_applicable","quarantine":"not_applicable","replay_verification":"not_applicable","training_admission":"not_applicable"},"source_evidence_sha256":null},"status":"completed"}
+```
+
+Under integrated canonical JSON the vector is exactly 3588 UTF-8 bytes and has
+SHA-256 `dfc2f0aa9fbdd8e2c4342e9593f191a36bddc8a3ea6d217a2faff40af8eee457`.
+Independent construction and reload must reproduce both
+literals. Every omitted/unknown key, wrong type/enum/relation, duplicate key, BOM,
+trailing byte, alternate formatting, source-provenance drift, wrong result/
+attestation/output binding, or pre-validation manifest attempt refuses.
+
+Render success cannot promote any source status. Interpolated frames in later
+audited profiles are always declared presentation-only.
 
 ## 11. Later Coliseum projection
 
@@ -3265,7 +3368,8 @@ That projection may contain only the authorized subset needed to render:
 - room/portal/base geometry already supported by canonical records;
 - authorized agent/object visual ids and public faction display;
 - recorded position sequence, movement/event kinds, and tick binding;
-- recorded terminal, completion, claimability, replay, and governance states.
+- recorded terminal, completion, claimability, replay, governance, admission,
+  quarantine, and correction-lineage states.
 
 Theme and asset choices cannot define topology, movement, legality, visibility,
 institutional meaning, or agent knowledge. Interpolation samples between two
@@ -3300,8 +3404,10 @@ normal suite:
    `hide_render`, layer-collection exclusion, view-layer use/material/world override,
    color-management, Cycles, or factory-profile value at a time and every mutation
    refuses under `coliseum-smoke.v1`; the fixed worker/inspector vector independently
-   reconstructs both argument digests, ordered ancestor digest, and both ContentRecord
-   ids, while one argument/ancestor order/value mutation changes identity or refuses;
+   reconstructs both argument digests, the ordered ancestor digest from the exact
+   canonical-JSON UTF-8 equation, and both ContentRecord ids; alternate pretty,
+   NUL-delimited, BOM, and newline ancestor bytes do not validate, while one
+   argument/ancestor order/value mutation changes identity or refuses;
 4. host-only path-verifier cases for unavailable reparse detection, junction/
    reparse escape, UNC/drive/case/device/alternate-stream and protected-root
    aliases, Linux symlinks, component swaps, safe fresh-leaf creation, Windows
@@ -3327,7 +3433,12 @@ normal suite:
    truncated/oversized JSON, unknown/missing keys, wrong types/enums, wrong
    job/profile/script/factory/Blender ids, failed/nonterminal status, invalid
    status-output relations, and output size/digest/count drift before any manifest;
-9. manifest hashes, relative paths, Blender/script/template/asset binding,
+9. independently construct/reload the literal manifest vector and reproduce its
+   3588-byte length and SHA-256; reject every omitted/unknown nested or top-level
+   key, wrong type/enum/relation, duplicate key, BOM/trailing/noncanonical byte,
+   favorable provenance inferred from absence, quarantine/correction drift, wrong
+   result/attestation/output binding, pre-validation manifest attempt, and failed
+   job manifest; retain exact relative paths, Blender/script/template/asset binding,
    presentation-only declaration, and no status promotion;
 10. canonical run bundle hashes and Council tree state remain byte-identical;
 11. accessibility and reduced-motion behavior;
