@@ -1,12 +1,12 @@
 # Blender Workshop bridge — design source
 
-Status: **DESIGN ONLY — REVISION 005**. This source authorizes no Blender execution, repository
+Status: **DESIGN ONLY — REVISION 006**. This source authorizes no Blender execution, repository
 implementation, projection of a canonical run, visual claim, asset admission,
 or Council integration. Implementation and the first render proof require a
 separately routed source after this design receives the applicable plain Council
-verdict. This revision preserves the blocked revision-001 through revision-004
+verdict. This revision preserves the blocked revision-001 through revision-005
 lineage at Council events `001433-d1bfc40f`, `001438-4a9b7d49`,
-`001443-8cc845bb`, and `001448-1affc34a`. Revision 002 closed
+`001443-8cc845bb`, `001448-1affc34a`, and `001453-615204c9`. Revision 002 closed
 job identity/path recursion, fail-open Windows alias handling, and the inspector's
 open prohibited-class set. Revision 003 closes the remaining independently
 reproduced profile-value incompleteness, reviewed-script check/use race, and
@@ -16,11 +16,14 @@ attestation normalization gaps without changing the execution boundary.
 Revision 005 closes the independently reproduced open render-manifest schema and
 auxiliary held-ancestor checksum-preimage gaps without changing the execution
 boundary.
+Revision 006 closes the independently reproduced inspector-result filename and
+manifest job/source-commit cross-binding gaps without changing the execution
+boundary.
 
 Council request: `first-gladiator-blender-workshop-design-002`, document revision
-`005`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
+`006`. Re-audit follows `FIX_STARTED -> READY_FOR_REAUDIT` on that existing blocked
 request so events `001438-4a9b7d49`, `001443-8cc845bb`, and
-`001448-1affc34a` remain its direct audit lineage; no request or
+`001448-1affc34a` and `001453-615204c9` remain its direct audit lineage; no request or
 commit history is rewritten.
 
 ## 1. Purpose
@@ -163,7 +166,7 @@ derived/textlab/visualization/blender/jobs/<job_id>/
   render.png
   scene.blend
   worker-result.json
-  inspector-report.json
+  inspector-result.json
   render-manifest.json
 ```
 
@@ -3004,7 +3007,7 @@ blender.exe --background --factory-startup --disable-autoexec --offline-mode
   --job-spec <guarded-job-spec-windows-path>
   --launch-attestation <guarded-inspector-launch-attestation-windows-path>
   --scene <guarded-scene-blend-windows-path>
-  --result <fixed-inspector-report-windows-path>
+  --result <fixed-inspector-result-windows-path>
 ```
 
 The inspector schema has exact keys and counts. It compares every Blender
@@ -3096,7 +3099,7 @@ the bytes, requires exact size/digest equality, validates both PNG structures an
 dimensions, and validates the `.blend` through the separate inspector. Worker claims
 never substitute for host observations.
 
-`inspector-report.json` likewise has exactly
+`inspector-result.json` likewise has exactly
 `{schema_version, job_id, inspector_launch_attestation_id, smoke_profile_version,
 reviewed_inspector_script_sha256, staged_inspector_file_identity,
 factory_profile_sha256, blend_sha256, status, error_codes, observed_inventory_digest,
@@ -3272,6 +3275,13 @@ Scalar constraints are exact:
 - `interpolation_semantics` is `none` for this one-frame smoke profile. A later
   audited multi-frame profile may use `presentation_only`; no other value is legal.
 
+`job_id` is not merely well formed: it equals the independently recomputed
+`blender_job.v1` id and the `job_id` inside both resolved worker/inspector launch
+attestation preimages and both strictly parsed worker/inspector result records.
+`renderer.repository_commit` equals the exact `repository_commit` in that validated
+job preimage. Every resolved record must agree; a different but well-formed 64-hex
+job id or 40-hex commit refuses before manifest creation.
+
 `source` has exactly
 `{kind, canonical_run_id, source_evidence_sha256,
 presentation_projection_id, presentation_projection_sha256, provenance}`.
@@ -3339,7 +3349,11 @@ file identity equal the inspector launch binding. Missing, extra, reordered,
 zero-byte, wrongly typed, or digest-divergent output refuses the manifest.
 
 This normative fixed manifest vector exercises every key and terminal relation.
-The repeated values are fixture data, not environment assertions:
+Its already validated fixture job has recomputed id
+`7070707070707070707070707070707070707070707070707070707070707070`, both
+launch/result records carry that same id, and its job-preimage
+`repository_commit` is `9999999999999999999999999999999999999999`. The repeated
+values are fixture data, not environment assertions:
 
 ```json
 {"bridge_version":"blender-workshop-bridge.v1","derived_visualization_status":"validated","inputs":{"asset_pack":{"sha256":null,"status":"not_applicable","version":null},"factory_profile":{"byte_count":103,"relative_path":"input/factory-profile.json","sha256":"4040404040404040404040404040404040404040404040404040404040404040"},"job_spec":{"byte_count":104,"relative_path":"job.json","sha256":"5050505050505050505050505050505050505050505050505050505050505050"},"template":{"sha256":null,"status":"not_applicable","version":null}},"interpolation_semantics":"none","job_id":"7070707070707070707070707070707070707070707070707070707070707070","launches":{"inspector":{"argument_array_sha256":"6e0032f60911008b070f799157733fb055ca68f2464e6f2d2f335011a50ba0ca","attestation_id":"2aca6cd643b811aa2d9abc544663f6c939382e94ef80ac26e0861ec129f4424e","file_identity":{"file_id_hex":"03030303030303030303030303030303","volume_serial_number":1},"scene_blend_file_identity":{"file_id_hex":"06060606060606060606060606060606","volume_serial_number":1},"script_relative_path":"input/inspect_scene.py","script_sha256":"3030303030303030303030303030303030303030303030303030303030303030"},"worker":{"argument_array_sha256":"299acb851ead7a64505ffb48b95d3cd30901392b71f14ed57b062739c9e64860","attestation_id":"e68207158627944ef9e584adf5d6089454d8da778a1d554aec0f943c6b6ed418","file_identity":{"file_id_hex":"02020202020202020202020202020202","volume_serial_number":1},"script_relative_path":"input/smoke_scene.py","script_sha256":"2020202020202020202020202020202020202020202020202020202020202020"}},"outputs":[{"byte_count":800,"kind":"preview","media_type":"image/png","relative_path":"preview.png","sha256":"8080808080808080808080808080808080808080808080808080808080808080"},{"byte_count":900,"kind":"render","media_type":"image/png","relative_path":"render.png","sha256":"8181818181818181818181818181818181818181818181818181818181818181"},{"byte_count":1000,"kind":"scene","media_type":"application/x-blender","relative_path":"scene.blend","sha256":"6060606060606060606060606060606060606060606060606060606060606060"}],"renderer":{"blender_identity":{"build_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","platform":"Windows","version":"5.2.0"},"camera_name":"SMOKE_CAMERA","frame":{"end":1,"start":1},"inventory_sha256":"1ec5e1c2c6a063d85e0e328925296b21e7e4bc435bf4acaf2869741826bd5f60","render_engine":"BLENDER_EEVEE_NEXT","render_profile_sha256":"58ef3569c2bb2bd3e593876a38be6898abde20d488a238b9878a7e7ce77d83bb","repository_commit":"9999999999999999999999999999999999999999","resolution":{"height":480,"percentage":100,"width":640}},"results":{"inspector":{"byte_count":1200,"relative_path":"inspector-result.json","schema_version":"blender.inspector_result.v1","sha256":"7272727272727272727272727272727272727272727272727272727272727272"},"worker":{"byte_count":1100,"relative_path":"worker-result.json","schema_version":"blender.worker_result.v1","sha256":"7171717171717171717171717171717171717171717171717171717171717171"}},"schema_version":"render_manifest.v1","simulation_impact":"none","smoke_profile_version":"coliseum-smoke.v1","source":{"canonical_run_id":null,"kind":"smoke","presentation_projection_id":null,"presentation_projection_sha256":null,"provenance":{"behavioral_claimability":"not_applicable","completion":"not_applicable","correction_lineage":"not_applicable","governance_approval":"not_applicable","quarantine":"not_applicable","replay_verification":"not_applicable","training_admission":"not_applicable"},"source_evidence_sha256":null},"status":"completed"}
@@ -3438,13 +3452,18 @@ normal suite:
    key, wrong type/enum/relation, duplicate key, BOM/trailing/noncanonical byte,
    favorable provenance inferred from absence, quarantine/correction drift, wrong
    result/attestation/output binding, pre-validation manifest attempt, and failed
-   job manifest; retain exact relative paths, Blender/script/template/asset binding,
-   presentation-only declaration, and no status promotion;
+   job manifest; replace the manifest `job_id` or `renderer.repository_commit` with
+   a different well-formed value while all resolved records remain authentic and
+   require refusal; assert `inspector-result.json` is the identical fixed path in
+   the job layout, normative argv, inspector writer/host reader, result schema,
+   unexpected-file inventory, and render manifest, and mutate it at each boundary
+   to require refusal; retain exact relative paths and Blender/script/template/asset
+   binding, presentation-only declaration, and no status promotion;
 10. canonical run bundle hashes and Council tree state remain byte-identical;
 11. accessibility and reduced-motion behavior;
 12. normal visualization, replay, and repository tests pass with Blender absent.
 
-Ordinary CI also uses strict inspector-report fixtures to reject unknown keys or
+Ordinary CI also uses strict inspector-result fixtures to reject unknown keys or
 classes, wrong counts/types/relations, profile drift, and one case each for
 Text/script content, drivers, handlers, all packed content, external libraries
 and files, compositor/file output, images/fonts/audio/cache data, node groups,
