@@ -1,6 +1,7 @@
 # Blender Workshop Bridge — WSL fixed-staging and manifest-coherence amendment 1
 
-Status: design amendment; no Blender execution or implementation authorization.
+Status: design amendment revision 2; no Blender execution or implementation
+authorization. Revision 2 addresses `AUDIT_BLOCKED` event `001465-fe8ff615`.
 
 Amends: `BLENDER-WORKSHOP-BRIDGE.md` at commit
 `e945f99b432f78baea3023f6572e23dd18e5112e`.
@@ -76,10 +77,11 @@ job leaf:    jobs/<job_id>
 ```
 
 The selected deployment profile is operational provenance. It is stored in the
-host execution report and render manifest under the amendment-defined field in
-section 8. It is not added to the existing `blender_job.v1` preimage: the same
-reviewed job has the same scientific presentation identity whether a local drive
-copy is necessary. Its exact source bytes, Blender identity, render profile,
+closed `sandbox-execution-report.json` and render manifest under the
+amendment-defined relations in section 8. It is not added to the existing
+`blender_job.v1` preimage: the same reviewed job has the same scientific
+presentation identity whether a local drive copy is necessary. Its exact source
+bytes, Blender identity, render profile,
 inventory, repository commit, and source name already determine that job.
 
 No environment variable, CLI option, job field, browser input, symlink, registry
@@ -105,10 +107,21 @@ must:
 5. create missing `ColiseumRenderWorker`, `v1`, and `jobs` components one at a
    time without traversing a reparse point and apply a protected ACL granting the
    current interactive user, `SYSTEM`, and local `Administrators` only;
-6. reopen and revalidate each created component before use; and
+6. reopen and revalidate each created component before use;
 7. retain a non-delete-shared handle to `v1`, `jobs`, the fresh job directory,
    and its `input` directory for the complete copy-in, worker, inspector, and
-   copy-out sequence.
+   copy-out sequence; and
+8. grant the job-specific lowbox SID described in section 9 traverse-only access
+   to the fixed ancestors, read access to the closed inputs, and read/write/create
+   access only to the current fresh job leaf. No sibling leaf, fixed-root control
+   file, or parent receives that SID's write ACE; apply a low mandatory-integrity
+   label to the current job leaf so the lowbox can write there, while input DACLs
+   remain read-only; and
+9. immediately before the denial probe, seal the current leaf's protected DACL by
+   removing the interactive user's write/create/delete rights for the rest of the
+   child sequence. The guard must already hold the exact broker rights it needs;
+   the host telemetry adapter receives read-only access. No later ACL broadening is
+   permitted before terminal validation.
 
 The host independently requires that `/mnt/c` is the DrvFs view of the same `C:`
 volume. The Windows handle identity is authoritative for staging. Linux descriptor
@@ -117,9 +130,11 @@ copies. An unavailable cross-view proof refuses before Blender starts.
 
 The repository's internal WSL UNC translation is never passed to Blender or the
 native guard. Linux proves that the opened repository and canonical protected roots
-are on WSL ext4, outside `/mnt/c`; the native worker receives capabilities only for
-the fixed staging job. This establishes disjointness without granting Windows
-access to the canonical repository.
+are on WSL ext4, outside `/mnt/c`. The guard itself remains a trusted broker under
+the interactive host identity, but both Blender children use the zero-network,
+job-specific AppContainer/lowbox principal in section 9. Fixed pathnames, retained
+handles, and Job Objects are not treated as filesystem capabilities. Disjointness
+is established only after the effective lowbox token and its denial matrix pass.
 
 ## 5. Authenticated copy-in
 
@@ -167,18 +182,28 @@ presentation files from the guarded staging leaf:
 ```text
 progress.json
 events.jsonl
-preview.png
+watch-preview.png
 ```
 
 For each poll it reopens the staging file by the held job-directory capability,
 enforces the integrated cap, parses/validates telemetry before publication, and
 copies a canonical sanitized projection into the repository mirror atomically.
-`preview.png` is copied only after PNG structure, dimensions, declared SHA-256,
-and staging identity validate. The browser never receives a staging path.
+The staging worker still writes its declared `preview.png`; the host publishes
+those validated bytes in the repository mirror only as the distinct operational
+`watch-preview.png`. The latter is not a worker output, launch input, manifest
+output, or canonical evidence file. It is copied only after PNG structure,
+640-by-360 dimensions, declared SHA-256, and staging identity validate. Repeated
+polls with the same staging identity and digest are no-ops. A second publication
+with a changed staging identity or digest, any mirror replacement, or any bytes
+that do not rehash to the bound value terminally fails the job. The browser never
+receives a staging path.
 
 Mirroring is observation only. It cannot start, cancel, retry, reprioritize, or
 otherwise signal Blender. Closing the page has no process effect. A missed mirror
-update has no effect on the worker or result validity.
+update has no effect on the worker or result validity. On terminal success the
+Workshop switches its preview endpoint to the validated final `preview.png`; on
+failure it may continue displaying the explicitly nonterminal watch copy with a
+failed banner.
 
 ## 7. Authenticated copy-out and terminal handling
 
@@ -195,13 +220,18 @@ against staging. A passing staging result is then copied out:
 4. bounded bytes are copied, flushed, reopened, and independently hashed;
 5. the destination size/digest must equal staging before it can enter the
    repository render manifest; and
-6. undeclared files in either the staging leaf or repository mirror refuse the
-   terminal success relation.
+6. undeclared files in the staging leaf refuse the terminal success relation; the
+   repository mirror permits only its closed input/attestation/result/output/
+   telemetry set plus the operational `watch-preview.png`, and every other file
+   refuses success.
 
 The host writes `render-manifest.json` only in the repository mirror after all
-copy-out checks. It may copy validated worker/inspector results, launch
-attestations, operational telemetry, preview, render, and scene using their fixed
-names; logs remain capped and nonpublic. No path follows a link.
+copy-out checks and after the passing sandbox execution report in section 8. It may
+copy validated worker/inspector results, launch attestations, operational telemetry,
+terminal preview, render, scene, and the sandbox report using their fixed names;
+logs remain capped and nonpublic. Terminal `preview.png` is therefore absent until
+its create-exclusive copy-out. `watch-preview.png` is never renamed, overwritten,
+or admitted as that output. No path follows a link.
 
 Automatic staging deletion is not part of this amendment. A successful or failed
 staging leaf remains forensic derived data until a separately reviewed cleanup
@@ -216,7 +246,7 @@ Any failed copy-in, launch, validation, mirror, copy-out, cap, or identity check
 - cannot mutate canonical run or Council content; and
 - records only a closed host failure code and bounded operational detail.
 
-## 8. Truthful renderer manifest
+## 8. Truthful renderer and sandbox execution manifest
 
 For `coliseum-smoke.v1`, section 10 is corrected as follows:
 
@@ -230,15 +260,71 @@ width, height, and percentage. The host must additionally prove that the preview
 PNG is 640 x 360 and the final PNG is 1280 x 720. A manifest cannot claim a
 renderer or resolution different from the bound job and host-validated output.
 
-The render manifest top-level schema gains exactly one required field:
+The render manifest top-level schema gains exactly two required fields:
 
 ```text
 execution_profile   # direct-repo-derived.v1 | fixed-windows-staging.v1
+sandbox_execution   # closed binding below
 ```
 
 This additive field makes the operational copy boundary visible without changing
 the canonical source or job identity. Under the current environment it is the
 literal `fixed-windows-staging.v1`.
+
+`sandbox_execution` has exactly
+`{schema_version, relative_path, byte_count, sha256, sandbox_profile}`. Its
+values are:
+
+```text
+schema_version  == blender.sandbox_execution_report.v1
+relative_path   == sandbox-execution-report.json
+sandbox_profile == windows-appcontainer-job-lowbox.v1
+byte_count      == independently observed positive JSON integer
+sha256          == independently observed 64-lowercase-hex digest
+```
+
+The host authors canonical UTF-8 `sandbox-execution-report.json` only after the
+guard returns both closed launch results. Its maximum is 65536 bytes, it has no BOM
+or trailing byte, and its top-level key set is exactly:
+
+```text
+schema_version
+job_id
+execution_profile
+sandbox_profile
+guard
+staging
+token_policy
+worker
+inspector
+protected_access_matrix_sha256
+status
+```
+
+`schema_version`, `execution_profile`, and `sandbox_profile` equal the literals
+above; `job_id` equals the recomputed job and every launch/result record; and
+`status` is `passed` only after both children exit under the required token and all
+access probes pass. `guard` has exactly
+`{version,source_sha256,binary_sha256,compiler_identity_sha256}`. `staging` has
+exactly `{root_volume_serial_number,root_file_id_hex,job_file_id_hex}`.
+`token_policy` has exactly
+`{appcontainer_name,appcontainer_sid,capability_sids,network_capabilities,
+integrity_level,write_restricted,privileges,handle_inheritance_policy,
+environment_policy}`. Both arrays for capabilities and privileges are empty;
+integrity is `low`; `write_restricted` is true; and the two policy enums are the
+section-9 literals. `worker` and `inspector` each have exactly
+`{launch_attestation_id,argument_array_sha256,process_id,appcontainer_sid,
+token_information_sha256,access_probe_sha256,job_object_profile,status}`;
+process id is nonidentity operational telemetry, all SHA fields and attestation ids
+are 64 lowercase hex, both SIDs equal the token policy, job-object profile is
+`blender-bounded-child.v1`, and status is `passed`.
+
+The native guard's fixed protocol returns the token-information and access-probe
+records over a bounded inherited pipe. The host independently revalidates the
+guard source/binary/compiler allowlist, launch attestations, SIDs, array emptiness,
+token flags, access matrix, and child exit before constructing the report. A
+missing, malformed, mixed-profile, mixed-job, stale, or failed report prevents the
+manifest. Neither report nor manifest may be interpreted without the other.
 
 Starting from section 10's normative fixed vector, replacing only the two
 renderer values produces 3577 canonical UTF-8 bytes and SHA-256:
@@ -248,22 +334,117 @@ renderer values produces 3577 canonical UTF-8 bytes and SHA-256:
 ```
 
 That 3577-byte value is the corrected *renderer-relation fixture before the
-additive `execution_profile` field*. Adding
+additive execution fields*. Adding only
 `"execution_profile":"fixed-windows-staging.v1"` and serializing with integrated
-`schema.canonical_json` produces the complete amended vector: exactly 3624 UTF-8
-bytes with SHA-256
+`schema.canonical_json` produces the revision-1 intermediate vector: exactly 3624
+UTF-8 bytes with SHA-256
 `9392c5d4f2fea469c17d1bfa9bd42d457c9b559ac4adeb259c39977e7124c55e`.
-Independent construction and reload must reproduce those literals. This two-step
-statement prevents confusing a direct correction of the old vector with the new
-complete schema.
+That intermediate value is no longer a complete accepted manifest because it lacks
+`sandbox_execution`. For the normative revision-2 fixture, add exactly:
 
-The old 3588-byte / `dfc2f0...e457` manifest vector remains a historical
-regression proving the inconsistency and must be rejected by the amended validator.
+```json
+{"byte_count":1300,"relative_path":"sandbox-execution-report.json","sandbox_profile":"windows-appcontainer-job-lowbox.v1","schema_version":"blender.sandbox_execution_report.v1","sha256":"7373737373737373737373737373737373737373737373737373737373737373"}
+```
 
-## 9. Native process containment
+as the top-level `sandbox_execution` value. The repeated size/digest are fixture
+data, not an environment assertion. Starting from the original section-10 vector,
+making the two renderer corrections, adding `execution_profile`, and adding that
+exact object produces exactly 3898 canonical UTF-8 bytes with SHA-256
+`7059f24adc39dd45ffd3112c0109303a306f6d9e3c2d997810dffee9724bcfab`.
+Independent construction and reload must reproduce those literals. This three-step
+lineage prevents confusing the renderer correction, the superseded revision-1
+staging schema, and the complete sandbox-bound schema.
 
-The Windows-native guard, not WSL `subprocess` alone, launches Blender. It retains
-all section-4 and section-5 handles and uses a Windows Job Object with:
+Both the old 3588-byte / `dfc2f0...e457` renderer vector and the 3624-byte /
+`9392c5...c55e` staging-only vector remain historical rejection fixtures.
+
+## 9. Native AppContainer process containment
+
+The Windows-native guard, not WSL `subprocess` alone, launches Blender. Running a
+child with the interactive user's token is forbidden even when its arguments,
+handles, and Job Object are correct. Each job deterministically derives an
+unregistered AppContainer SID from the fixed name
+`AgentColiseum.BlenderWorker.v1.<job_id>`. The guard must not register an
+AppContainer profile or create package-private storage. It creates a primary
+lowbox token by this closed native sequence:
+
+1. open the guard process token for query/duplicate only;
+2. call `CreateRestrictedToken` with exactly
+   `DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED`, the derived job SID as the sole
+   restricting SID, all enabled nonmandatory group SIDs disabled, and no retained
+   privileges;
+3. duplicate it as a primary token, set low mandatory integrity, and query back
+   the restriction, privilege, group, and integrity information;
+4. call `CreateProcessAsUserW` with `EXTENDED_STARTUPINFO_PRESENT` and one
+   `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` entry containing the exact
+   AppContainer SID and zero capability SIDs; and
+5. create suspended, assign the process to the Job Object, re-query its effective
+   token, verify the inherited-handle list, and resume exactly once only after all
+   relations succeed.
+
+The resulting effective token must have:
+
+- that exact AppContainer SID;
+- zero capability SIDs;
+- zero network capabilities;
+- low mandatory integrity;
+- all privileges removed;
+- a write-restricted token policy;
+- no interactive logon, desktop, clipboard, device, registry-write, or shell
+  capability; and
+- only the fixed staging-job ACL described in section 4.
+
+The sandbox profile is `windows-appcontainer-job-lowbox.v1`. If the OS cannot
+derive the SID, construct and query the effective lowbox token, keep the profile
+unregistered, prove zero capabilities/privileges, or prove denial of package/user
+storage and network access, the guard refuses before launch. It does not fall back
+to a restricted same-user process.
+
+The child environment is a closed allowlist. `TEMP`, `TMP`, `HOME`, `APPDATA`,
+`LOCALAPPDATA`, `USERPROFILE`, and every Blender user-script/config/cache variable
+resolve to a fixed `scratch` directory inside the current job leaf; proxy, Python,
+add-on, startup, credential, network, and inherited search-path variables are
+absent. The working directory is the current job leaf. Input files and their
+directory are protected read-only from the lowbox SID; retained no-write/delete-
+shared handles remain defense in depth. Only the current job leaf grants that SID
+write/create access. Undeclared current-leaf files may be physically created by a
+compromised child but are detected by the closed terminal inventory and can never
+enter a manifest; no write outside the leaf may succeed.
+
+Before Blender is eligible, the same guard launches a repository-owned harmless
+native denial probe under the exact effective token, environment, handle list,
+working directory, ACLs, and Job Object profile. The probe must demonstrate:
+
+- one declared probe file in the current job succeeds;
+- writes to the input directory, job specification, launch attestation, fixed root,
+  `jobs` parent, and a sibling job fail;
+- writes to the repository internal WSL UNC path, canonical-run root, Council root,
+  repository sources, Windows user profile, Desktop, Documents, AppData, `%TEMP%`
+  outside the rebound scratch, public directories, drive root, and another ordinary
+  user-writable test root all fail;
+- reads from repository sources, canonical-run roots, Council state, user-private
+  paths, and the internal WSL UNC namespace also fail; only the attested Blender/
+  Windows runtime dependencies and staged current-job inputs are readable;
+- UNC/network connection, registry write, process escape, shell launch, and a
+  second child all fail; and
+- the only successful write's native parent identity equals the held current job.
+
+Protected paths enter the probe through guard-opened identity roles, never browser
+or job input. The probe output is a closed sorted role/status/error-code table. Its
+canonical digest and queried token-information digest enter the sandbox execution
+report. An unavailable protected role, surprising success, indeterminate denial,
+different SID/token, or inability to delete the guard-created harmless probe file
+through its held identity refuses Blender. Unit tests may use fake roots; the opt-in
+same-host preflight must exercise the real protected identities without modifying
+them.
+
+The denial probe also attempts mutation from a second ordinary process running as
+the interactive user while the sealed child phase is active; the staging job's
+protected DACL and retained handles must deny it. This prevents a different
+same-user process from injecting an output that happens to match a later pathname.
+
+The guard retains all section-4 and section-5 handles and uses a Windows Job Object
+with:
 
 - kill-on-job-close;
 - active-process limit one;
@@ -271,6 +452,14 @@ all section-4 and section-5 handles and uses a Windows Job Object with:
 - 180-second per-process user-time limit;
 - one worker or inspector child at a time; and
 - host-enforced 180-second wall timeout.
+
+The Job Object also applies the closed UI restriction class denying desktop switch,
+global atoms, clipboard, system parameters, handles outside the explicit inherited
+handle list, and display-setting changes. `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` is
+used with exactly the bounded stdout/stderr pipes; no staging, broker, token,
+repository, Council, or source handle is inheritable. The handle policy literal is
+`stdio-pipes-only.v1`; the environment policy literal is
+`closed-blender-lowbox-env.v1`.
 
 It launches only the attested absolute Blender file identity with the exact
 argument-array digest. Child-process assignment must succeed before execution can
@@ -282,6 +471,13 @@ The guard is a reviewed compiled helper with a version-bound source digest. It i
 not a general command runner. Its interface has closed operation names, fixed file
 roles, fixed roots, fixed Blender flags, bounded Base64 or length-prefixed values,
 and no shell or arbitrary executable parameter.
+
+The guard source, compiled binary, compiler identity, denial-probe source/binary,
+fixed sandbox profile, and expected SID derivation algorithm are allowlisted by the
+host implementation and bound into `sandbox-execution-report.json`. Runtime
+compilation is not accepted unless the implementation source defines and audits a
+deterministic compiler-input/output binding; an arbitrary binary with the right
+version string refuses.
 
 ## 10. Additional implementation tests
 
@@ -303,17 +499,32 @@ The integrated section-12 matrix remains required. Add ordinary tests proving:
    blocked or detected while native handles remain held;
 8. telemetry mirroring publishes only validated sanitized data and cannot control
    Blender;
-9. repository-mirror output bytes equal their validated staging sources;
-10. the historical Eevee/640x480 manifest is rejected;
-11. a Cycles/1280x720 manifest with the wrong execution profile is rejected;
-12. amended fixed-vector construction and reload reproduce the committed exact
-    byte count and digest; and
-13. canonical run bundles and non-protocol Council content remain byte-identical
+9. live observation uses only `watch-preview.png`, terminal `preview.png` remains
+   create-exclusive, repeated identical polls are no-ops, and every mirror/staging
+   identity or byte drift leaves no manifest;
+10. repository-mirror output bytes equal their validated staging sources;
+11. the historical Eevee/640x480 and staging-only manifest vectors are rejected;
+12. a Cycles/1280x720 manifest with a wrong execution or sandbox profile is
+    rejected;
+13. the sandbox report rejects wrong SID, capabilities, privileges, token flags,
+    access matrix, guard/compiler/binary identity, job, launch, and mixed profile;
+14. a harmless fake child under the actual lowbox token may write its declared
+    current-job probe but every sibling, parent, repository UNC, canonical, Council,
+    repository-source, user-profile, public, temp, registry, network, shell, and
+    process-escape probe is denied, and protected/private read probes are denied;
+15. after child-phase ACL sealing, a second interactive-user process cannot create,
+    replace, or delete a staging input, output, telemetry file, or undeclared file;
+16. an interactive-user, low-integrity-only, Job-Object-only, or unavailable-token
+    fallback is refused before Blender;
+17. complete revision-2 manifest construction and reload reproduce the 3898-byte
+    / `7059f24a...bcfab` fixture; and
+18. canonical run bundles and non-protocol Council content remain byte-identical
     across the opt-in smoke execution.
 
 The opt-in smoke report must bind the fixed staging root's native volume/file
-identity, guard source and binary digests, deployment profile, copy-in/out digests,
-Blender version/help captures, output digests, and repository-mirror manifest.
+identity, guard source/binary/compiler digests, lowbox SID/token/access-probe
+digests, deployment and sandbox profiles, copy-in/out digests, Blender version/help
+captures, output digests, sandbox execution report, and repository-mirror manifest.
 
 ## 11. Implementation and authorization sequence
 
