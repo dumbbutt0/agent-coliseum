@@ -86,14 +86,17 @@ def _syscall(number: int, *args) -> int:
 
 # --------------------------------------------------------------- primitives
 
-def openat2_beneath(anchor_fd: int, name: bytes, *,
-                    directory: bool = False) -> int:
+def open_beneath(anchor_fd: int, name: bytes, *, directory: bool = False,
+                 readable: bool = False) -> int:
     """Open ``name`` relative to ``anchor_fd`` with the frozen no-follow
-    resolution, returning an ``O_PATH`` descriptor. Never follows a symlink,
-    magic link, or an escape above the anchor."""
+    resolution. Never follows a symlink, magic link, or an escape above the
+    anchor. Returns an ``O_PATH`` descriptor for identity-only use, or an
+    ``O_RDONLY`` descriptor (``readable=True``) for content/listing. The
+    native-identity fields are the same under either mode."""
     if not isinstance(name, bytes):
         fail_closed("openat2 name must be bytes")
-    flags = O_PATH | O_NOFOLLOW | (O_DIRECTORY if directory else 0)
+    access = O_RDONLY if readable else O_PATH
+    flags = access | O_NOFOLLOW | (O_DIRECTORY if directory else 0)
     how = _open_how(flags, 0, _RESOLVE)
     fd = _syscall(_SYS_openat2, anchor_fd, name, ctypes.byref(how),
                   ctypes.sizeof(how))
@@ -102,6 +105,12 @@ def openat2_beneath(anchor_fd: int, name: bytes, *,
         raise NativeIdentityUnavailable(
             f"openat2 refused {name!r} (errno {errno})")
     return fd
+
+
+def openat2_beneath(anchor_fd: int, name: bytes, *,
+                    directory: bool = False) -> int:
+    """Back-compat: identity-only ``O_PATH`` open beneath the anchor."""
+    return open_beneath(anchor_fd, name, directory=directory)
 
 
 def statx_mnt_id(fd: int) -> int:
@@ -181,6 +190,22 @@ def _observe_once(fd: int) -> dict[str, Any]:
     }
 
 
+def observe_fd(fd: int) -> dict[str, Any]:
+    """Return the validated ``NATIVE_ID_OBSERVATION`` for an already-open
+    no-follow descriptor, observing twice and requiring equality."""
+    first = _observe_once(fd)
+    second = _observe_once(fd)
+    if first != second:
+        fail_closed("native identity changed under stable re-observation")
+    try:
+        validate_native_observation(first)
+    except HSCValidationError as exc:
+        raise NativeIdentityUnavailable(
+            f"observed identity is not a valid linux-native-id-v1 record: "
+            f"{exc}") from exc
+    return first
+
+
 def observe(anchor_fd: int, name: bytes, *,
             directory: bool = False) -> dict[str, Any]:
     """Return the ``NATIVE_ID_OBSERVATION`` for ``name`` under ``anchor_fd``.
@@ -191,19 +216,9 @@ def observe(anchor_fd: int, name: bytes, *,
     derived ids reconstruct."""
     fd = openat2_beneath(anchor_fd, name, directory=directory)
     try:
-        first = _observe_once(fd)
-        second = _observe_once(fd)
+        return observe_fd(fd)
     finally:
         os.close(fd)
-    if first != second:
-        fail_closed("native identity changed under stable re-observation")
-    try:
-        validate_native_observation(first)
-    except HSCValidationError as exc:
-        raise NativeIdentityUnavailable(
-            f"observed identity is not a valid linux-native-id-v1 record: "
-            f"{exc}") from exc
-    return first
 
 
 def observe_ids(anchor_fd: int, name: bytes, *,
