@@ -1059,7 +1059,8 @@ def test_assessor_output_inventory_uses_frozen_tuple_and_is_exhaustive(
         return canonical_json(json.loads(data)[1:]).encode("utf-8")
     fixture = RootFixture().build(tmp_path, tweaks={
         "assessor_inventory_data": drop_row})
-    with pytest.raises(HSCValidationError, match="omits or misdescribes"):
+    with pytest.raises(HSCValidationError,
+                       match="omits, misdescribes, or lists"):
         fixture.validate()
 
     def wrong_hash(data):
@@ -1068,7 +1069,25 @@ def test_assessor_output_inventory_uses_frozen_tuple_and_is_exhaustive(
         return canonical_json(rows).encode("utf-8")
     fixture = RootFixture().build(tmp_path, tweaks={
         "assessor_inventory_data": wrong_hash})
-    with pytest.raises(HSCValidationError, match="omits or misdescribes"):
+    with pytest.raises(HSCValidationError,
+                       match="row bytes differ|omits, misdescribes"):
+        fixture.validate()
+
+
+def test_output_paths_are_bound_by_full_path_not_basename(tmp_path):
+    # audit 001596 finding 1: relocating every inventory path from <name> to
+    # moved/<name> (leaving declarations and sealed content unchanged) must be
+    # refused; the full content-relative path, not the basename, is the id.
+    def relocate(data):
+        rows = json.loads(data)
+        for row in rows:
+            row["output_relpath"] = "moved/" + row["output_relpath"]
+        return canonical_json(sorted(
+            rows, key=lambda r: r["output_relpath"])).encode("utf-8")
+    fixture = RootFixture().build(tmp_path, tweaks={
+        "assessor_inventory_data": relocate})
+    with pytest.raises(HSCValidationError,
+                       match="omits, misdescribes, or lists"):
         fixture.validate()
 
     def extra_row(data):
@@ -1079,7 +1098,8 @@ def test_assessor_output_inventory_uses_frozen_tuple_and_is_exhaustive(
             rows, key=lambda row: row["output_relpath"])).encode("utf-8")
     fixture = RootFixture().build(tmp_path, tweaks={
         "assessor_inventory_data": extra_row})
-    with pytest.raises(HSCValidationError, match="does not own"):
+    with pytest.raises(HSCValidationError,
+                       match="omits, misdescribes, or lists"):
         fixture.validate()
 
 

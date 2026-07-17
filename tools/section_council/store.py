@@ -1002,15 +1002,20 @@ class RecordStore:
                 versions=("section_content_record.v1",),
                 artifacts=("read_inventory",))
             self._require_exhaustive_output_inventory(
-                output_inventory, ap["assignment_ref"])
+                output_inventory, ap["assignment_ref"])  # bijection only
 
     def _require_exhaustive_output_inventory(
             self, inventory_record: Mapping[str, Any],
-            assignment_ref: Mapping[str, str]) -> dict[str, dict]:
+            assignment_ref: Mapping[str, str]) \
+            -> tuple[set[str], dict[str, dict]]:
         """An output inventory is never opaque: it is dispatch-owned, closed
-        canonical JSON, and an exact no-extra/no-omission map of every other
-        content record owned by the same assignment (leaf name, artifact
-        type, media type, byte length, and blob hash)."""
+        canonical JSON, and an exact no-extra/no-omission bijection with every
+        other content record owned by the same assignment.
+
+        The binding uses the FULL content-namespace-relative path (the part
+        after ``/content/``), never a basename, so a row relocated to
+        ``moved/<name>`` cannot alias ``<name>``. Each row's byte length and
+        blob hash must equal exactly one owned sealed content record's."""
         ip = inventory_record["payload"]
         if ip["producer_assignment_ref"] != assignment_ref:
             fail("output inventory is not owned by its dispatch assignment")
@@ -1018,29 +1023,32 @@ class RecordStore:
         if value is None:
             fail("output inventory bytes were not closed JSON")
         rows = _closed_output_inventory(value)
-        rows_by_leaf = {row["output_relpath"].rsplit("/", 1)[-1]: row
-                       for row in rows}
-        if len(rows_by_leaf) != len(rows):
-            fail("output inventory leaf names collide")
+        by_path: dict[str, dict] = {}
+        for row in rows:
+            if row["output_relpath"] in by_path:
+                fail("output inventory repeats an output path")
+            by_path[row["output_relpath"]] = row
         owned = [record for record in _records(self, "section_content_record.v1")
                  if record["payload"]["producer_assignment_ref"] ==
                  assignment_ref and
                  record_id(record) != record_id(inventory_record)]
-        matched: set[str] = set()
+        record_by_path: dict[str, dict] = {}
         for record in owned:
+            tail = _content_tail(record["payload"]["storage_relpath"])
+            if tail in record_by_path:
+                fail("two owned outputs share a content path")
+            record_by_path[tail] = record
+        if set(by_path) != set(record_by_path):
+            fail("output inventory omits, misdescribes, or lists a non-owned "
+                 "output")
+        for tail, record in record_by_path.items():
+            row = by_path[tail]
             payload = record["payload"]
-            leaf = payload["storage_relpath"].rsplit("/", 1)[-1]
-            row = rows_by_leaf.get(leaf)
-            if row is None or \
-                    (row["byte_length"], row["blob_sha256"]) != \
+            if (row["byte_length"], row["blob_sha256"]) != \
                     (payload["byte_length"], payload["blob_sha256"]):
-                fail("output inventory omits or misdescribes an owned output")
-            if leaf in matched:
-                fail("two owned outputs collapse onto one inventory row")
-            matched.add(leaf)
-        if matched != set(rows_by_leaf):
-            fail("output inventory lists an output its dispatch does not own")
-        return rows_by_leaf
+                fail("output inventory row bytes differ from the sealed "
+                     "content record at that path")
+        return set(by_path), record_by_path
 
     def _validate_assessments(self, root: Mapping[str, Any]) -> None:
         inventory_paths = {row["record_id"]: row["repository_relpath"]
@@ -1115,6 +1123,13 @@ class RecordStore:
             for field, value in exact_fields.items():
                 if declaration[field] != value:
                     fail("assessment manifest changes its sealed declaration")
+            inventory_record = self.get(
+                ap["assessor_output_inventory_ref"],
+                versions=("section_content_record.v1",),
+                artifacts=("read_inventory",))
+            output_paths, record_by_output_path = \
+                self._require_exhaustive_output_inventory(
+                    inventory_record, ap["assessor_assignment_ref"])
             check_declarations = []
             for ref in ap["check_declaration_refs"]:
                 record = self.get(ref, versions=("section_content_record.v1",),
@@ -1124,11 +1139,18 @@ class RecordStore:
                     fail("check declaration is not assessor-owned")
                 check_declarations.append(self.closed_values[record_id(record)])
             declared_check_paths = declaration["check_declaration_output_relpaths"]
-            actual_check_paths = [self.get(ref)["payload"]["storage_relpath"]
-                                  for ref in ap["check_declaration_refs"]]
-            if [path.rsplit("/", 1)[-1] for path in actual_check_paths] != \
-                    [path.rsplit("/", 1)[-1] for path in declared_check_paths]:
+            # Each declared path (full leaf-relative) must resolve, through the
+            # exhaustive inventory, to exactly the referenced sealed record.
+            if {_content_tail(self.get(ref)["payload"]["storage_relpath"])
+                for ref in ap["check_declaration_refs"]} != \
+                    set(declared_check_paths) or \
+                    not set(declared_check_paths) <= output_paths:
                 fail("assessment check declarations differ from sealed membership")
+            for path in declared_check_paths:
+                if record_id(record_by_output_path[path]) not in {
+                        record_id(self.get(ref))
+                        for ref in ap["check_declaration_refs"]}:
+                    fail("declared check path does not map to its sealed record")
             declared_by_id = {row["check_id"]: row for row in check_declarations}
             result_by_id = {row["check_id"]: row for row in ap["check_results"]}
             if set(declared_by_id) != set(result_by_id):
@@ -1143,21 +1165,20 @@ class RecordStore:
                     "evidence_output_relpath"]
                 if evidence["payload"]["producer_assignment_ref"] != \
                         ap["assessor_assignment_ref"] or \
-                        evidence["payload"]["storage_relpath"].rsplit(
-                            "/", 1)[-1] != declared_path.rsplit("/", 1)[-1]:
+                        _content_tail(evidence["payload"]["storage_relpath"]) \
+                        != declared_path:
                     fail("check evidence does not map to assessor declaration")
             finding_records = [self.get(ref, versions=("section_finding.v1",))
                                for ref in ap["finding_refs"]]
             declared_finding_paths = declaration[
                 "finding_declaration_output_relpaths"]
-            actual_finding_paths = [self.get(
+            actual_finding_paths = [_content_tail(self.get(
                 finding["payload"]["finding_declaration_ref"],
                 versions=("section_content_record.v1",),
                 artifacts=("finding_declaration",))["payload"][
-                    "storage_relpath"] for finding in finding_records]
-            if [path.rsplit("/", 1)[-1] for path in actual_finding_paths] != \
-                    [path.rsplit("/", 1)[-1]
-                     for path in declared_finding_paths]:
+                    "storage_relpath"]) for finding in finding_records]
+            if set(actual_finding_paths) != set(declared_finding_paths) or \
+                    not set(declared_finding_paths) <= output_paths:
                 fail("assessment finding declarations differ from sealed membership")
             for finding in finding_records:
                 fp = finding["payload"]
@@ -1193,22 +1214,10 @@ class RecordStore:
             required_checks = set(contract["payload"]["required_check_ids"])
             if set(result_by_id) != required_checks:
                 fail("assessment is missing or adds contract-required checks")
-            inventory_record = self.get(
-                ap["assessor_output_inventory_ref"],
-                versions=("section_content_record.v1",),
-                artifacts=("read_inventory",))
-            rows_by_leaf = self._require_exhaustive_output_inventory(
-                inventory_record, ap["assessor_assignment_ref"])
-            declared_output_paths = [
-                (path, "check_declaration")
-                for path in declaration["check_declaration_output_relpaths"]
-            ] + [
-                (path, "finding_declaration")
-                for path in declaration["finding_declaration_output_relpaths"]
-            ] + [
-                (row["evidence_output_relpath"], "check_evidence")
-                for row in check_declarations
-            ]
+            declared_output_paths = list(
+                declaration["check_declaration_output_relpaths"]) + list(
+                declaration["finding_declaration_output_relpaths"]) + [
+                row["evidence_output_relpath"] for row in check_declarations]
             for finding in finding_records:
                 closed = self.closed_values.get(record_id(self.get(
                     finding["payload"]["finding_declaration_ref"],
@@ -1216,15 +1225,16 @@ class RecordStore:
                     artifacts=("finding_declaration",))))
                 if closed is None:
                     fail("finding declaration bytes were not closed JSON")
+                declared_output_paths.append(closed["evidence_output_relpath"])
                 declared_output_paths.append(
-                    (closed["evidence_output_relpath"], "finding_evidence"))
-                declared_output_paths.append(
-                    (closed["reproduction_output_relpath"], "reproduction"))
+                    closed["reproduction_output_relpath"])
                 if closed["resolution_output_relpath"] is not None:
                     declared_output_paths.append(
-                        (closed["resolution_output_relpath"], "resolution"))
-            for path, _artifact in declared_output_paths:
-                if rows_by_leaf.get(path.rsplit("/", 1)[-1]) is None:
+                        closed["resolution_output_relpath"])
+            # Every declared assessor output path (full leaf-relative) must be
+            # present in the exhaustive inventory — no basename aliasing.
+            for path in declared_output_paths:
+                if path not in output_paths:
                     fail("declared assessor output path is absent from the "
                          "exhaustive output inventory")
             statuses = {row["status"] for row in ap["check_results"]}
@@ -1361,15 +1371,26 @@ class RecordStore:
                      "bundle")
         if set(bundle_by_item) != set(graph_items):
             fail("complete evidence lacks exactly one bundle per work item")
-        # §9 staleness has two parts. The bundle's stored
-        # ``staleness_input_refs`` is the acyclic PRE-scope typed input
-        # closure (contract/program/dependencies/work-graph/dispatch/
-        # assessment). The POST-scope triggers (boundary closure, final scope
-        # and evidence-root membership, final-commit drift) cannot be stored
-        # in the bundle without a cycle, so they are enforced at ROOT time:
-        # boundary and final scope must each reference exactly this bundle set
-        # (checked in their own validators), and every section file is
-        # reconstructed from the authenticated final candidate tree.
+        # §9 staleness inputs, as far as the HSC-A complete-root validator is
+        # responsible: the bundle's stored ``staleness_input_refs`` must equal
+        # the acyclic PRE-scope typed input closure (contract/program/
+        # dependencies/work-graph/dispatch/assessment). The structural
+        # POST-scope memberships are also checked here — boundary and final
+        # scope must each reference exactly this bundle set (in their own
+        # validators), and the candidate tree must equal base plus the final
+        # scope's declared changes (_validate_candidate_tree).
+        #
+        # SCOPE BOUNDARY (design §15): binding each bundle to the exact final
+        # IMPLEMENTATION bytes it assessed — invariant 8's post-assembly
+        # recheck that "any byte change after an assessment makes that
+        # assessment stale", i.e. reconstructing the assessed proposal and
+        # rechecking each section's files against the final commit — is the
+        # alias-safe atomic assembler + real-diff enforcement assigned to
+        # Slice HSC-B, not HSC-A. HSC-A verifies the root is structurally
+        # complete and that the committed tree matches the declared final
+        # scope; it does not re-run the assembler. HSC-A therefore makes no
+        # claim to detect a bundle reused over two different final section
+        # byte-sets; that is caught by HSC-B's real-diff assembler.
         contract_ref_to_bundle = {
             bundle["payload"]["contract_ref"]["record_id"]: bundle
             for bundle in bundles}
@@ -1764,6 +1785,21 @@ class RecordStore:
 
 def compute_content_sha(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
+
+
+def _content_tail(storage_relpath: str) -> str:
+    """The full content-namespace-relative path of a sealed content record —
+    everything after the fixed ``/content/`` segment. Used as the exact,
+    non-basename identity that binds an output-inventory row and a declared
+    assessor output path to their sealed content record."""
+    marker = "/content/"
+    index = storage_relpath.find(marker)
+    if index < 0:
+        fail("content record path lacks the fixed /content/ segment")
+    tail = storage_relpath[index + len(marker):]
+    if not tail:
+        fail("content record path has an empty content tail")
+    return tail
 
 
 def _git(repo: str, args: list, repo_roots) -> subprocess.CompletedProcess:
