@@ -192,6 +192,10 @@ def _entry_hash(domain, payload):
     return domain_hash(domain, preimage)
 
 
+def _content_tail_local(content_record):
+    return content_record["payload"]["storage_relpath"].split("/content/", 1)[1]
+
+
 def _output_inventory_bytes(owned_records):
     rows = sorted(({
         "output_relpath": record["payload"]["storage_relpath"].rsplit(
@@ -633,6 +637,51 @@ class RootFixture:
                 "storage_relpath"].rsplit("/", 1)[-1]}).encode("utf-8")
         check_declaration = self.content(pref, "check_declaration", check_data,
                                          producer=assessor_assignment)
+
+        # Optional non-blocking finding: exercises the finding-declaration
+        # path->ref binding (audit 001603). status "open"/blocks False keeps
+        # the assessment disposition "pass".
+        finding_content = []
+        finding_declaration_paths = []
+        finding_spec = None
+        if tweaks.get("with_finding"):
+            finding_evidence = self.content(pref, "finding_evidence",
+                                            producer=assessor_assignment)
+            reproduction = self.content(pref, "reproduction",
+                                        producer=assessor_assignment)
+            decl = {
+                "audit_level": "section", "severity": "LOW",
+                "invariant_id": "invariant-1", "claim": "A bounded note.",
+                "evidence_output_relpath": _content_tail_local(
+                    finding_evidence),
+                "reproduction_output_relpath": _content_tail_local(
+                    reproduction),
+                "affected_path": None, "blocks_local_pass": False,
+                "status": "open", "predecessor_finding_ref": None,
+                "resolution_output_relpath": None}
+            if "finding_decl" in tweaks:
+                tweaks["finding_decl"](decl)
+            finding_declaration = self.content(
+                pref, "finding_declaration",
+                canonical_json(decl).encode("utf-8"),
+                producer=assessor_assignment)
+            finding_content = [finding_evidence, reproduction,
+                               finding_declaration]
+            finding_declaration_paths = [_content_tail_local(
+                finding_declaration)]
+            finding_spec = {
+                "program_ref": pref, "contract_ref": record_ref(contract),
+                "assessor_assignment_ref": record_ref(assessor_assignment),
+                "affected_proposal_ref": record_ref(proposal),
+                "finding_declaration_ref": record_ref(finding_declaration),
+                "audit_level": "section", "severity": "LOW",
+                "invariant_id": "invariant-1", "claim": "A bounded note.",
+                "evidence_ref": record_ref(finding_evidence),
+                "reproduction_ref": record_ref(reproduction),
+                "affected_path": None, "blocks_local_pass": False,
+                "status": "open", "predecessor_finding_ref": None,
+                "resolution_evidence_ref": None}
+
         assessment_data = canonical_json({
             "schema_version": "section-assessment-declaration.v1",
             "program_ref": pref, "contract_ref": record_ref(contract),
@@ -643,15 +692,15 @@ class RootFixture:
             "check_declaration_output_relpaths": [
                 check_declaration["payload"]["storage_relpath"].rsplit(
                     "/", 1)[-1]],
-            "finding_declaration_output_relpaths": [],
+            "finding_declaration_output_relpaths": finding_declaration_paths,
             "predecessor_assessment_ref": None, "declared_disposition": "pass",
             "error_reason": None}).encode("utf-8")
         assessment_declaration = self.content(
             pref, "assessment_declaration", assessment_data,
             producer=assessor_assignment)
         assessor_inventory_data = _output_inventory_bytes(
-            assessor_observed + [check_evidence, check_declaration,
-                                 assessment_declaration])
+            assessor_observed + [check_evidence, check_declaration] +
+            finding_content + [assessment_declaration])
         if "assessor_inventory_data" in tweaks:
             assessor_inventory_data = tweaks["assessor_inventory_data"](
                 assessor_inventory_data)
@@ -734,6 +783,15 @@ class RootFixture:
                         "evidence_ref": record_ref(check_evidence)}
         invariant_result = {"check_id": "invariant-1", "status": "pass",
                             "evidence_ref": record_ref(check_evidence)}
+        finding_refs = []
+        finding_tuples = []
+        if finding_spec is not None:
+            finding = self.add(make_record("section_finding.v1", finding_spec))
+            finding_refs = [record_ref(finding)]
+            finding_tuples = [{
+                "record_relpath": self.paths[record_id(finding)],
+                "record_id": record_id(finding),
+                "content_sha256": compute_content_sha(finding)}]
         assessment = self.add(make_record("section_assessment_manifest.v1", {
             "program_ref": pref, "contract_ref": record_ref(contract),
             "work_item_id": work_item_id,
@@ -744,10 +802,11 @@ class RootFixture:
             "assessor_output_inventory_ref": record_ref(
                 assessor_output_inventory),
             "check_declaration_refs": [record_ref(check_declaration)],
-            "check_results": [check_result], "finding_refs": [],
+            "check_results": [check_result], "finding_refs": finding_refs,
             "finding_inventory_sha256": domain_hash(
-                "council:section-finding-inventory:v1", []),
-            "finding_count": 0, "open_blocking_count": 0,
+                "council:section-finding-inventory:v1",
+                sorted(finding_tuples, key=lambda r: r["record_relpath"])),
+            "finding_count": len(finding_refs), "open_blocking_count": 0,
             "local_assessment": "pass", "error_reason": None,
             "predecessor_assessment_ref": None}))
         bundle_payload = {
@@ -1071,6 +1130,26 @@ def test_assessor_output_inventory_uses_frozen_tuple_and_is_exhaustive(
         "assessor_inventory_data": wrong_hash})
     with pytest.raises(HSCValidationError,
                        match="row bytes differ|omits, misdescribes"):
+        fixture.validate()
+
+
+def test_finding_bearing_root_validates(tmp_path):
+    fixture = RootFixture().build(tmp_path, tweaks={"with_finding": True})
+    fixture.validate()
+
+
+def test_finding_declaration_paths_bind_to_exact_refs(tmp_path):
+    # audit 001603: swapping a finding declaration's evidence/reproduction
+    # output paths (leaving the packaged typed refs and sealed inventory
+    # unchanged) must be refused — the declared path must equal the content
+    # tail of the exact evidence_ref/reproduction_ref record.
+    def swap(decl):
+        decl["evidence_output_relpath"], decl["reproduction_output_relpath"] = \
+            decl["reproduction_output_relpath"], decl["evidence_output_relpath"]
+    fixture = RootFixture().build(tmp_path, tweaks={
+        "with_finding": True, "finding_decl": swap})
+    with pytest.raises(HSCValidationError,
+                       match="does not bind its exact sealed evidence"):
         fixture.validate()
 
 

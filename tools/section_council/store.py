@@ -1194,6 +1194,41 @@ class RecordStore:
                             "producer_assignment_ref"] != \
                         ap["assessor_assignment_ref"]:
                     fail("finding is not owned by the exact assessment dispatch")
+                # The declared evidence/reproduction/resolution output paths in
+                # the closed finding declaration must equal the full content
+                # tails of the packaged finding's exact typed refs, and each
+                # referenced record must be the same assessor-owned sealed
+                # record the exhaustive inventory maps that path to. Path and
+                # ref cannot disagree.
+                closed = self.closed_values.get(record_id(declaration_content))
+                if closed is None:
+                    fail("finding declaration bytes were not closed JSON")
+                declared_to_ref = [
+                    (closed["evidence_output_relpath"], fp["evidence_ref"],
+                     ("finding_evidence",)),
+                    (closed["reproduction_output_relpath"],
+                     fp["reproduction_ref"], ("reproduction",)),
+                ]
+                if closed["resolution_output_relpath"] is not None:
+                    declared_to_ref.append(
+                        (closed["resolution_output_relpath"],
+                         fp["resolution_evidence_ref"], ("resolution",)))
+                elif fp["resolution_evidence_ref"] is not None:
+                    fail("finding resolution ref present without a declared "
+                         "resolution path")
+                for declared_path, ref, artifacts in declared_to_ref:
+                    referenced = self.get(
+                        ref, versions=("section_content_record.v1",),
+                        artifacts=artifacts)
+                    if referenced["payload"]["producer_assignment_ref"] != \
+                            ap["assessor_assignment_ref"] or \
+                            _content_tail(referenced["payload"][
+                                "storage_relpath"]) != declared_path or \
+                            declared_path not in output_paths or \
+                            record_id(record_by_output_path[declared_path]) != \
+                            record_id(referenced):
+                        fail("finding declaration path does not bind its exact "
+                             "sealed evidence record")
             tuples = sorted(({
                 "record_relpath": inventory_paths[record_id(finding)],
                 "record_id": record_id(finding),
