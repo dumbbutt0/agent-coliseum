@@ -106,6 +106,37 @@ def test_source_snapshot_record_is_content_addressed(tmp_path):
     assert sandbox.source_snapshot_bytes(commit, manifest) == data
 
 
+def test_finding3_write_does_not_follow_symlinked_dir_component(tmp_path):
+    # Regression (audit 001635 finding 3): materialization must not follow a
+    # symlinked path component. A raced symlink standing in for an intermediate
+    # directory must fail closed, never redirect the write outside the snapshot.
+    dest = tmp_path / "snap"; dest.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    os.symlink(str(outside), str(dest / "src"))  # 'src' is a symlink, not a dir
+    dest_fd = os.open(str(dest), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(OSError):  # ELOOP: O_NOFOLLOW refuses the symlink
+            sandbox._write_no_follow(dest_fd, ["src", "a.py"], b"x", "100644")
+    finally:
+        os.close(dest_fd)
+    assert not os.path.exists(os.path.join(str(outside), "a.py"))
+
+
+def test_finding3_write_refuses_pre_existing_leaf(tmp_path):
+    # A leaf that already exists (e.g. a raced symlink at the target name) must
+    # fail closed via O_CREAT|O_EXCL rather than write through it.
+    dest = tmp_path / "snap"; dest.mkdir()
+    outside = tmp_path / "outside.txt"; outside.write_bytes(b"old")
+    os.symlink(str(outside), str(dest / "a.py"))
+    dest_fd = os.open(str(dest), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        with pytest.raises(OSError):
+            sandbox._write_no_follow(dest_fd, ["a.py"], b"new", "100644")
+    finally:
+        os.close(dest_fd)
+    assert outside.read_bytes() == b"old"  # bytes never redirected outside
+
+
 def test_sandbox_profile_pins_the_frozen_policy():
     record = sandbox.build_sandbox_profile(
         PROGRAM_REF, native_inventory_plan_ref=REF, source_snapshot_ref=REF,

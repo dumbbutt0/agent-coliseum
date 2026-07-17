@@ -115,15 +115,33 @@ def _collect(parent_fd: int, name: bytes, segments: list[bytes],
             os.close(dir_fd)
 
 
-def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False) \
+def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False,
+              expected_dotgit_identity: dict | None = None) \
         -> list[dict[str, Any]]:
     """Every descendant of the root as a sorted, unique ``NATIVE_ENTRY`` list.
 
     ``exclude_dotgit`` implements the ``checkout-excluding-delegated-dotgit-v1``
-    view: the top-level ``.git`` child is omitted (it is inventoried under the
-    delegated common-Git root instead)."""
+    view: the ``.git`` child is excluded only after it is proven to be exactly
+    one direct directory whose live native identity equals the delegated
+    common-Git root (``expected_dotgit_identity``). A missing, regular-file,
+    symlink, or mismatched ``.git`` fails closed."""
+    names = sorted(_readdir(root_dir_fd))
+    if exclude_dotgit:
+        if _DOTGIT not in names:
+            fail_closed("checkout view requires a .git directory")
+        dotgit_fd = open_beneath(root_dir_fd, _DOTGIT, directory=True)
+        try:
+            dotgit = observe_fd(dotgit_fd)
+        finally:
+            os.close(dotgit_fd)
+        if dotgit["file_type"] != "directory":
+            fail_closed("checkout .git is not a directory")
+        if expected_dotgit_identity is not None and \
+                dotgit != expected_dotgit_identity:
+            fail_closed("checkout .git identity differs from the delegated "
+                        "common-Git root")
     entries: list[dict[str, Any]] = []
-    for name in sorted(_readdir(root_dir_fd)):
+    for name in names:
         if exclude_dotgit and name == _DOTGIT:
             continue
         _collect(root_dir_fd, name, [name], entries)
@@ -178,12 +196,20 @@ def build_native_inventory(*, program_ref: dict, base_commit: str,
 
     exclude = root_spec["view_kind"] == "checkout-excluding-delegated-dotgit-v1"
     root_observation = observe_root(root_dir_fd)
+    # The COMPLETE observation must equal the frozen plan, not only the two
+    # derived ids: a mode/link-count drift changes native_mode while leaving
+    # filesystem_id/file_id equal.
+    if root_observation != root_spec["native_identity"]:
+        fail_closed("observed root identity differs from its plan root spec")
     observed_fs = filesystem_id(root_observation)
     observed_file = file_id(root_observation)
     if (observed_fs, observed_file) != \
             (root_spec["filesystem_id"], root_spec["file_id"]):
-        fail_closed("observed root identity differs from its plan root spec")
-    entries = walk_root(root_dir_fd, exclude_dotgit=exclude)
+        fail_closed("root spec ids do not reconstruct from its observation")
+    entries = walk_root(
+        root_dir_fd, exclude_dotgit=exclude,
+        expected_dotgit_identity=root_spec["delegated_control_identity"]
+        if exclude else None)
     phase = observation_requirement["phase"]
     payload = {
         "program_ref": program_ref,

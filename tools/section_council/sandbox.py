@@ -68,20 +68,69 @@ def export_source(repo: str, commit: str, dest: str) -> list[dict[str, Any]]:
         entries.append((path, mode, obj_id))
         wanted.append(obj_id)
     contents = _cat_blobs(repo, wanted)
+    dest_fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for path, mode, obj_id in sorted(entries):
+            _write_no_follow(dest_fd, path.split("/"), contents[obj_id], mode)
+        # Reread the ACTUAL exported tree no-follow and hash the real bytes, so
+        # a raced symlink that redirected a write cannot be laundered into a
+        # manifest that claims the bytes are inside the snapshot.
+        manifest = _reread_no_follow(dest_fd, entries)
+    finally:
+        os.close(dest_fd)
+    return manifest
+
+
+def _write_no_follow(dest_fd: int, segments: list[str], data: bytes,
+                     mode: str) -> None:
+    opened: list[int] = []
+    parent = dest_fd
+    try:
+        for component in segments[:-1]:
+            try:
+                os.mkdir(component, 0o755, dir_fd=parent)
+            except FileExistsError:
+                pass
+            child = os.open(component,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=parent)
+            opened.append(child)
+            parent = child
+        perm = 0o755 if mode == "100755" else 0o644
+        leaf = os.open(segments[-1],
+                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                       perm, dir_fd=parent)
+        try:
+            os.write(leaf, data)
+            os.fsync(leaf)
+        finally:
+            os.close(leaf)
+    finally:
+        for fd in reversed(opened):
+            os.close(fd)
+
+
+def _reread_no_follow(dest_fd: int, entries: list[tuple[str, str, str]]) \
+        -> list[dict[str, Any]]:
+    from .native import open_beneath  # local: avoid an import cycle
+
     manifest: list[dict[str, Any]] = []
-    for path, mode, obj_id in entries:
-        data = contents[obj_id]
-        full = os.path.join(dest, path)
-        os.makedirs(os.path.dirname(full) or dest, exist_ok=True)
-        with open(full, "wb") as handle:
-            handle.write(data)
-        os.chmod(full, 0o755 if mode == "100755" else 0o644)
+    for path, mode, _obj_id in entries:
+        fd = open_beneath(dest_fd, path.encode("utf-8"), readable=True)
+        try:
+            chunks = []
+            while True:
+                block = os.read(fd, 1 << 20)
+                if not block:
+                    break
+                chunks.append(block)
+        finally:
+            os.close(fd)
+        data = b"".join(chunks)
         manifest.append({"path": path, "git_mode": mode,
                          "blob_sha256": hashlib.sha256(data).hexdigest(),
                          "byte_length": len(data)})
     manifest.sort(key=lambda row: row["path"])
-    if os.path.exists(os.path.join(dest, ".git")):
-        raise HSCValidationError("exported source snapshot contains .git")
     return manifest
 
 

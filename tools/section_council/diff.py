@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .core import HSCValidationError, change_sort_key, validate_actual_change
+from .core import (HSCValidationError, change_sort_key, require_h,
+                   validate_actual_change, validate_path)
 
 _MODES = ("100644", "100755")
 
@@ -27,8 +28,9 @@ def _require_entry(value: Any, where: str) -> tuple[str, str]:
     if not isinstance(value, tuple) or len(value) != 2:
         raise HSCValidationError(f"{where} must be a (blob, mode) pair")
     blob, mode = value
-    if not (isinstance(blob, str) and len(blob) == 64) or mode not in _MODES:
-        raise HSCValidationError(f"{where} has an invalid blob or mode")
+    require_h(blob, f"{where}.blob")
+    if mode not in _MODES:
+        raise HSCValidationError(f"{where} has an invalid mode")
     return blob, mode
 
 
@@ -37,6 +39,11 @@ def real_diff(base: Mapping[str, tuple[str, str]],
               predicted_renames: list[Mapping[str, Any]] | None = None) \
         -> list[dict[str, Any]]:
     """Return the sorted ``ACTUAL_CHANGE`` list from base to candidate."""
+    # Validate EVERY path and digest up front — including unchanged entries —
+    # before any classification, so a malformed tree fails closed.
+    for label, tree in (("base", base), ("candidate", candidate)):
+        for path in tree:
+            validate_path(path, f"{label} path")
     base = {p: _require_entry(v, f"base[{p}]") for p, v in base.items()}
     candidate = {p: _require_entry(v, f"candidate[{p}]")
                  for p, v in candidate.items()}

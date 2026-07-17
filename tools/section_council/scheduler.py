@@ -17,6 +17,7 @@ receipt's barrier status is supplied by the caller.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from tools.council.schemas import domain_hash
@@ -37,6 +38,30 @@ def _entry_hash(domain: str, payload: dict[str, Any]) -> str:
     preimage = dict(payload)
     preimage.pop("scheduler_journal_entry_sha256")
     return domain_hash(domain, preimage)
+
+
+def _persist_records(journal_root_fd: int, first_sequence: int,
+                     records: tuple[dict, dict, dict]) -> None:
+    """Write each canonical record create-exclusively (no-follow) into the
+    protected journal directory by its sequence, then fsync. A duplicate
+    sequence file already present fails closed, so a replayed dispatch cannot
+    overwrite a committed journal entry."""
+    from tools.council.schemas import canonical_json  # local: avoid cycle
+
+    for offset, record in enumerate(records):
+        name = f"{first_sequence + offset:012d}.json"
+        try:
+            fd = os.open(name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=journal_root_fd)
+        except FileExistsError as exc:
+            fail_closed(f"journal sequence {name} already persisted")
+            raise exc  # unreachable; fail_closed raises
+        try:
+            os.write(fd, canonical_json(record).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 class DispatchChain:
@@ -65,17 +90,24 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
                   launcher_executable_sha256: str, session_nonce: str,
                   attempt: int, workspace_id: str, output_leaf: str,
                   journal_root_fd: int, journal_owner_principal_id: str,
-                  journal_owner_control_id: str, first_sequence: int,
+                  journal_owner_control_id: str,
                   predecessor_manifest=None, barrier_status: str = "ready") \
         -> DispatchChain:
     """Mint the authorization/assignment/receipt/manifest chain for one
-    dispatch. ``journal_root_fd`` is an open descriptor for the protected
-    journal directory, which must be a real ``0700`` directory (its stable
-    native identity is bound into the manifest id)."""
+    dispatch and PERSIST each record create-exclusively in the protected
+    journal directory. ``journal_root_fd`` is an open descriptor for that
+    directory, which must be a real ``0700`` directory (its stable native
+    identity is bound into the manifest id). The sequence range is DERIVED
+    from the predecessor manifest — an arbitrary gap cannot be supplied."""
     if role not in ("builder", "assessor"):
         fail_closed("dispatch role must be builder or assessor")
     if barrier_status not in ("ready", "refused"):
         fail_closed("barrier status must be ready or refused")
+    # Contiguous continuity is derived, never accepted from the caller.
+    if predecessor_manifest is None:
+        first_sequence = 0
+    else:
+        first_sequence = predecessor_manifest["payload"]["last_sequence"] + 1
 
     common = {
         "program_ref": program_ref,
@@ -119,6 +151,12 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
         _RECEIPT_ENTRY, receipt_payload)
     receipt = make_record("section_launcher_receipt.v1", receipt_payload)
 
+    # Persist each canonical record create-exclusively in the protected
+    # journal directory by its sequence, and fsync, before the manifest is
+    # minted over those persisted bytes.
+    _persist_records(journal_root_fd, first_sequence,
+                     (authorization, assignment, receipt))
+
     manifest = _mint_manifest(
         program_ref=program_ref, registry_ref=registry_ref,
         scheduler_authority_id=scheduler_authority_id,
@@ -148,11 +186,12 @@ def _mint_manifest(*, program_ref, registry_ref, scheduler_authority_id,
         fail_closed("journal root is not a 0700 directory")
     fs_id = filesystem_id(observation)
     file = file_id(observation)
-    # A deterministic locator for the protected journal directory.
+    # The locator anchor id is RECONSTRUCTED from the observed journal
+    # directory's own file identity, never a caller-supplied control id.
     locator = {
         "platform": "linux-bwrap-v1",
         "anchor_name": "scheduler-journal",
-        "anchor_id": journal_owner_control_id,
+        "anchor_id": file,
         "segments_hex": [],
         "resolution": "openat2-beneath-no-magiclinks-no-symlinks-v1",
     }

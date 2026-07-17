@@ -184,3 +184,66 @@ def test_swapped_root_spec_refuses(tmp_path):
     finally:
         os.close(root_fd)
         os.close(other_fd)
+
+
+@requires_native
+def test_finding1_mode_drift_with_equal_ids_refuses(tmp_path):
+    # Regression (audit 001635 finding 1): a root whose complete observation
+    # differs from the plan (e.g. a chmod-drifted native_mode) must refuse even
+    # though filesystem_id / file_id (device+inode) still reconstruct equal.
+    root = tmp_path / "root"; root.mkdir()
+    (root / "f").write_bytes(b"f")
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        spec = _root_spec(inventory.observe_root(root_fd))
+        drifted = dict(spec["native_identity"])
+        drifted["native_mode"] = drifted["native_mode"] ^ 0o077  # perm drift
+        spec["native_identity"] = drifted
+        # ids unchanged: they are derived from device+inode, not the mode
+        assert spec["filesystem_id"] == filesystem_id(
+            inventory.observe_root(root_fd))
+        req = _assembly_requirement(spec["root_id"])
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="differs from its plan"):
+            inventory.build_native_inventory(
+                program_ref=PROGRAM_REF, base_commit="0" * 40,
+                native_inventory_plan_ref=REF, root_spec=spec,
+                observation_requirement=req, observer_assignment_ref=None,
+                observation_workspace_id=None, root_dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+
+
+@requires_native
+def test_finding2_checkout_dotgit_identity_must_match(tmp_path):
+    # Regression (audit 001635 finding 2): the checkout view must PROVE the
+    # excluded .git is exactly the planned delegated directory, not silently
+    # drop any .git it happens to find.
+    root = tmp_path / "root"; root.mkdir()
+    (root / ".git").mkdir()
+    (root / "keep").write_bytes(b"k")
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        wrong_identity = inventory.observe_root(root_fd)  # not the .git's id
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="identity differs from the delegated"):
+            inventory.walk_root(root_fd, exclude_dotgit=True,
+                                expected_dotgit_identity=wrong_identity)
+    finally:
+        os.close(root_fd)
+
+
+@requires_native
+def test_finding2_checkout_requires_a_dotgit(tmp_path):
+    # A checkout view with no .git at all fails closed rather than exposing a
+    # bare tree as if it were a delegated checkout.
+    root = tmp_path / "root"; root.mkdir()
+    (root / "keep").write_bytes(b"k")
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="requires a .git"):
+            inventory.walk_root(root_fd, exclude_dotgit=True,
+                                expected_dotgit_identity={"x": 1})
+    finally:
+        os.close(root_fd)

@@ -27,7 +27,7 @@ CONTEXT_REF = {"record_id": "9" * 64, "content_sha256": "a" * 64}
 PROFILE_REF = {"record_id": "b" * 64, "content_sha256": "c" * 64}
 
 
-def _mint(journal_dir, role="builder", first_sequence=0,
+def _mint(journal_dir, role="builder",
           barrier_status="ready", predecessor=None):
     fd = os.open(str(journal_dir), os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -47,7 +47,7 @@ def _mint(journal_dir, role="builder", first_sequence=0,
             session_nonce=("b" if role == "builder" else "a") * 64,
             attempt=0, workspace_id="1" * 64, output_leaf=f"{role}-leaf",
             journal_root_fd=fd, journal_owner_principal_id="scheduler-writer",
-            journal_owner_control_id="d" * 64, first_sequence=first_sequence,
+            journal_owner_control_id="d" * 64,
             predecessor_manifest=predecessor, barrier_status=barrier_status)
     finally:
         os.close(fd)
@@ -94,9 +94,8 @@ def test_second_manifest_chains_from_predecessor(tmp_path):
     journal = tmp_path / "journal"
     journal.mkdir()
     os.chmod(str(journal), 0o700)
-    first = _mint(journal, role="builder", first_sequence=0)
-    second = _mint(journal, role="assessor", first_sequence=3,
-                   predecessor=first.manifest)
+    first = _mint(journal, role="builder")
+    second = _mint(journal, role="assessor", predecessor=first.manifest)
     assert second.manifest["payload"]["first_sequence"] == 3
     assert second.manifest["payload"]["last_sequence"] == 5
     assert second.manifest["payload"][
@@ -120,3 +119,45 @@ def test_refused_barrier_receipt_is_recorded(tmp_path):
     chain = _mint(journal, barrier_status="refused")
     assert chain.receipt["payload"]["barrier_status"] == "refused"
     assert validate_record(chain.receipt) is not None
+
+
+@requires_native
+def test_finding4_records_persisted_create_exclusively(tmp_path):
+    # Regression (audit 001635 finding 4): mint must PERSIST each dispatch
+    # record create-exclusively in the protected journal by its sequence.
+    from tools.council.schemas import canonical_json
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    os.chmod(str(journal), 0o700)
+    chain = _mint(journal)
+    names = sorted(p.name for p in journal.iterdir())
+    assert names == ["000000000000.json", "000000000001.json",
+                     "000000000002.json"]
+    persisted = (journal / "000000000000.json").read_bytes()
+    assert persisted == canonical_json(chain.authorization).encode("utf-8")
+
+
+@requires_native
+def test_finding4_duplicate_sequence_fails_closed(tmp_path):
+    # A replayed dispatch at an already-committed sequence must fail closed
+    # rather than overwrite the persisted journal entry.
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    os.chmod(str(journal), 0o700)
+    _mint(journal)  # persists sequences 0,1,2
+    with pytest.raises(NativeIdentityUnavailable, match="already persisted"):
+        _mint(journal)  # predecessor=None -> derives 0 again -> collision
+
+
+@requires_native
+def test_finding4_locator_anchor_reconstructed_not_caller_supplied(tmp_path):
+    # The manifest locator anchor id must be the observed journal directory's
+    # own file id, never the caller-supplied journal_owner_control_id.
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    os.chmod(str(journal), 0o700)
+    chain = _mint(journal)
+    payload = chain.manifest["payload"]
+    anchor_id = payload["journal_root_locator"]["anchor_id"]
+    assert anchor_id == payload["journal_root_file_id"]
+    assert anchor_id != "d" * 64  # the caller journal_owner_control_id

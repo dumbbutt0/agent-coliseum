@@ -84,6 +84,19 @@ def test_combined_content_and_mode_change_refuses():
         real_diff(base, candidate)
 
 
+def test_finding5_malformed_unchanged_entry_fails_closed():
+    # Regression (audit 001635 finding 5): a malformed entry that happens to be
+    # identical in base and candidate (so it is "unchanged" and never reaches
+    # per-change classification) must still fail closed up front — an invalid
+    # path or digest cannot ride through by being unchanged.
+    bad_digest = {"f": ("zz", "100644")}  # not a 64-hex blob
+    with pytest.raises(HSCValidationError):
+        real_diff(bad_digest, bad_digest)
+    bad_path = {"../escape": (A, "100644")}
+    with pytest.raises(HSCValidationError, match="path"):
+        real_diff(bad_path, bad_path)
+
+
 def test_identical_trees_yield_no_changes():
     tree = {"a": (A, "100644"), "b": (B, "100755")}
     assert real_diff(tree, dict(tree)) == []
