@@ -138,8 +138,15 @@ def test_dotgit_excluded_only_in_checkout_view(tmp_path):
     (root / "keep").write_bytes(b"k")
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     try:
+        git_fd = native.open_beneath(root_fd, b".git", directory=True)
+        try:
+            git_identity = native.observe_fd(git_fd)
+        finally:
+            os.close(git_fd)
         full = inventory.walk_root(root_fd, exclude_dotgit=False)
-        checkout = inventory.walk_root(root_fd, exclude_dotgit=True)
+        checkout = inventory.walk_root(
+            root_fd, exclude_dotgit=True,
+            expected_dotgit_identity=git_identity)
     finally:
         os.close(root_fd)
     full_paths = {tuple(bytes.fromhex(s) for s in e["path"]["segments_hex"])
@@ -241,10 +248,31 @@ def test_finding2_checkout_requires_a_dotgit(tmp_path):
     (root / "keep").write_bytes(b"k")
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
     try:
+        # A valid directory identity passes the mandatory-identity gate, so the
+        # refusal is specifically the absent .git.
+        stand_in = inventory.observe_root(root_fd)
         with pytest.raises(NativeIdentityUnavailable,
                            match="requires a .git"):
             inventory.walk_root(root_fd, exclude_dotgit=True,
-                                expected_dotgit_identity={"x": 1})
+                                expected_dotgit_identity=stand_in)
+    finally:
+        os.close(root_fd)
+
+
+@requires_native
+def test_finding_s4_checkout_requires_delegated_identity(tmp_path):
+    # Regression (audit 001654 F2): a checkout exclusion with no delegated
+    # common-Git identity must refuse — the identity proof is mandatory, never
+    # an optional bypass.
+    root = tmp_path / "root"; root.mkdir()
+    (root / ".git").mkdir()
+    (root / "keep").write_bytes(b"k")
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="requires the delegated common-Git"):
+            inventory.walk_root(root_fd, exclude_dotgit=True,
+                                expected_dotgit_identity=None)
     finally:
         os.close(root_fd)
 

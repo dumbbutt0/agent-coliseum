@@ -106,6 +106,26 @@ def test_source_snapshot_record_is_content_addressed(tmp_path):
     assert sandbox.source_snapshot_bytes(commit, manifest) == data
 
 
+def test_finding_s4_export_refuses_when_bytes_differ_from_blob(tmp_path,
+                                                               monkeypatch):
+    # Regression (audit 001649 F2): if the exported bytes do not byte-equal the
+    # exact fetched base-commit blob (a short/truncated/redirected write), the
+    # reread comparison must fail closed rather than content-address the wrong
+    # bytes under the base commit.
+    repo, commit = _repo(tmp_path)
+    dest = str(tmp_path / "snap")
+    os.makedirs(dest)
+    original = sandbox._write_no_follow
+
+    def truncating(dest_fd, segments, data, mode):
+        original(dest_fd, segments, data[:-1], mode)  # drop the last byte
+
+    monkeypatch.setattr(sandbox, "_write_no_follow", truncating)
+    with pytest.raises(HSCValidationError,
+                       match="differ from the base-commit blob"):
+        sandbox.export_source(repo, commit, dest)
+
+
 def test_finding3_write_does_not_follow_symlinked_dir_component(tmp_path):
     # Regression (audit 001635 finding 3): materialization must not follow a
     # symlinked path component. A raced symlink standing in for an intermediate

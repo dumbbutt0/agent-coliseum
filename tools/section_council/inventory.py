@@ -150,6 +150,13 @@ def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False,
         fail_closed("a root is either a delegated checkout or a full tree")
     names = sorted(_readdir(root_dir_fd))
     if exclude_dotgit:
+        # The delegated identity is mandatory proof, never optional: the
+        # omitted direct .git must be exactly the program's common-Git root
+        # (design §6.0). A missing identity refuses; equality is unconditional.
+        if not isinstance(expected_dotgit_identity, dict) or \
+                expected_dotgit_identity.get("file_type") != "directory":
+            fail_closed("checkout exclusion requires the delegated common-Git "
+                        "native identity")
         if _DOTGIT not in names:
             fail_closed("checkout view requires a .git directory")
         dotgit_fd = open_beneath(root_dir_fd, _DOTGIT, directory=True)
@@ -159,8 +166,7 @@ def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False,
             os.close(dotgit_fd)
         if dotgit["file_type"] != "directory":
             fail_closed("checkout .git is not a directory")
-        if expected_dotgit_identity is not None and \
-                dotgit != expected_dotgit_identity:
+        if dotgit != expected_dotgit_identity:
             fail_closed("checkout .git identity differs from the delegated "
                         "common-Git root")
     if refuse_dotgit and _DOTGIT in names:
