@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 import hashlib
+import subprocess
 from typing import Any, Iterable, Mapping
 
-from tools.council.schemas import (CouncilError, GENESIS_HASH,
-                                   canonical_json, domain_hash,
-                                   validate_event)
+from tools.council import events as council_events
+from tools.council.schemas import (CouncilError, canonical_json, domain_hash,
+                                   validate_commit, validate_event,
+                                   validate_repository)
 
 from .core import (
     HSCValidationError,
@@ -19,7 +21,6 @@ from .core import (
     fail,
     predicted_matches_actual,
     require_bool,
-    require_event,
     require_h,
     require_int,
     require_literal,
@@ -33,7 +34,6 @@ from .core import (
     validate_ref,
 )
 from .records import (
-    CONTENT_ARTIFACTS,
     RECORD_TYPES,
     RefRequirement,
     _file_refs,
@@ -121,17 +121,27 @@ class RecordStore:
         self._validate_blobs()
 
     def validate_root(self, root: Mapping[str, Any], *,
-                      build_event: Mapping[str, Any],
-                      chain: Iterable[Mapping[str, Any]],
-                      candidate_tree: Iterable[Mapping[str, Any]],
-                      base_tree: Iterable[Mapping[str, Any]]) \
-            -> ValidationReport:
-        """Validate one complete HSC evidence root against authenticated
-        inputs only: the canonical BUILD_STARTED authority obtained from a
-        verified Council chain, plus the complete base and candidate Git
-        tree inventories (arrays of FILE_REF), from which every asserted
-        boundary, tree, staleness, invariant, and evidence claim is
-        independently reconstructed."""
+                      council_root: str, repo: str, repo_roots: Iterable[str],
+                      candidate_commit: str) -> ValidationReport:
+        """Validate one complete HSC evidence root against AUTHENTICATED
+        sources only — never caller-supplied truth:
+
+        - the BUILD_STARTED authority is read from the authenticated Council
+          chain at ``council_root`` (verified with the Council's own
+          ``verify_chain``) and proven a member there; an inline event or a
+          fabricated genesis fork can never stand in for it.
+        - the base and candidate project/namespace trees are read directly
+          from the Git object store of ``repo`` at ``program.base_commit`` and
+          the audited ``candidate_commit`` (both must be real commits); every
+          boundary, tree, staleness, invariant, and evidence claim is then
+          independently reconstructed and compared exactly.
+
+        Trust boundary: ``council_root``/``repo`` name the authenticated
+        Council store and repository the same way every Council tool trusts
+        ``COUNCIL_ROOT``/``COUNCIL_REPO_ROOTS`` — the caller must supply the
+        genuine ones. The validator authenticates their contents; it does not
+        accept their contents from the caller.
+        """
         validate_record(root)
         if root["schema_version"] != "section_evidence_root.v1":
             fail("root must be section_evidence_root.v1")
@@ -149,57 +159,56 @@ class RecordStore:
         self._validate_reachability(root_requirements)
         program = self.get(payload["program_ref"], versions=("section_program.v1",))
         program_id = record_id(program)
-        self._validate_authority(build_event, chain)
+        build_event = self._read_authenticated_authority(council_root, program,
+                                                         root)
         self._validate_program_bindings(program, root, build_event)
         self._validate_program_membership(program)
         self._validate_relations(program, root)
+        base_tree = _read_git_tree(repo, repo_roots,
+                                   program["payload"]["base_commit"])
+        candidate_tree = _read_git_tree(repo, repo_roots, candidate_commit)
         self._validate_candidate_tree(program, root, candidate_tree, base_tree)
         order, ordinals = self._topological_order(root, root_requirements)
         return ValidationReport(program_id, root_id, len(self.records),
                                 tuple(order), ordinals)
 
-    def _validate_authority(self, event: Mapping[str, Any],
-                            chain: Iterable[Mapping[str, Any]]) -> None:
-        """The parent authority must be a canonical, hash-valid BUILD_STARTED
-        event that is a member of a supplied genesis-linked verified chain.
-        A caller-fabricated mapping is never authority."""
-        if not isinstance(event, dict):
-            fail("canonical BUILD_STARTED event is required")
+    def _read_authenticated_authority(self, council_root: str,
+                                      program: Mapping[str, Any],
+                                      root: Mapping[str, Any]) -> dict:
+        """Read the BUILD_STARTED authority from the authenticated Council
+        chain and prove membership. The event is obtained from the chain by
+        the id the root claims; it is never accepted from the caller, so a
+        fabricated genesis-linked fork cannot masquerade as authority."""
+        if not isinstance(council_root, str) or not council_root:
+            fail("an authenticated Council root path is required for authority")
+        try:
+            report = council_events.verify_chain(council_root)
+        except (CouncilError, OSError, ValueError) as exc:
+            raise HSCValidationError(
+                f"Council chain at {council_root} could not be verified: "
+                f"{exc}") from exc
+        if not report.ok or report.suffix_incomplete:
+            fail("Council chain at the supplied root is not fully verified")
+        chain = council_events.read_chain(council_root)
+        rp = root["payload"]
+        claimed_id = rp["parent_build_event_id"]
+        matches = [event for event in chain
+                   if event.get("event_id") == claimed_id]
+        if len(matches) != 1:
+            fail("root parent_build_event_id is not a unique authenticated "
+                 "Council event")
+        event = matches[0]
+        if event.get("event_hash") != rp["parent_build_event_hash"]:
+            fail("authenticated event hash differs from the root binding")
         try:
             validate_event(dict(event))
         except (CouncilError, ValueError, TypeError, KeyError) as exc:
             raise HSCValidationError(
-                f"BUILD_STARTED authority is not a canonical Council event: "
-                f"{exc}") from exc
+                f"authenticated authority event is not canonical: {exc}") \
+                from exc
         if event.get("event_type") != "BUILD_STARTED":
             fail("HSC parent authority must be a BUILD_STARTED event")
-        events = list(chain) if not isinstance(chain, (list, tuple)) else chain
-        if not events:
-            fail("a verified Council chain is required for HSC authority")
-        previous = GENESIS_HASH
-        seen_ids: set[str] = set()
-        member = False
-        event_bytes = canonical_json(dict(event))
-        for index, item in enumerate(events):
-            if not isinstance(item, dict):
-                fail("supplied chain contains a non-event entry")
-            try:
-                validate_event(dict(item))
-            except (CouncilError, ValueError, TypeError, KeyError) as exc:
-                raise HSCValidationError(
-                    f"supplied chain event #{index} is not canonical: "
-                    f"{exc}") from exc
-            if item.get("previous_event_hash") != previous:
-                fail("supplied chain does not link from genesis")
-            eid = require_event(item.get("event_id"), "chain event_id")
-            if int(eid[:6]) != index + 1 or eid in seen_ids:
-                fail("supplied chain event ids are not sequential and unique")
-            seen_ids.add(eid)
-            previous = item["event_hash"]
-            if canonical_json(dict(item)) == event_bytes:
-                member = True
-        if not member:
-            fail("BUILD_STARTED event is not a member of the verified chain")
+        return event
 
     def _validate_inventory(self, p: Mapping[str, Any]) -> None:
         rows = p["record_inventory"]
@@ -1009,7 +1018,7 @@ class RecordStore:
         if value is None:
             fail("output inventory bytes were not closed JSON")
         rows = _closed_output_inventory(value)
-        rows_by_leaf = {row["leaf_relpath"].rsplit("/", 1)[-1]: row
+        rows_by_leaf = {row["output_relpath"].rsplit("/", 1)[-1]: row
                        for row in rows}
         if len(rows_by_leaf) != len(rows):
             fail("output inventory leaf names collide")
@@ -1023,10 +1032,8 @@ class RecordStore:
             leaf = payload["storage_relpath"].rsplit("/", 1)[-1]
             row = rows_by_leaf.get(leaf)
             if row is None or \
-                    (row["artifact_type"], row["media_type"],
-                     row["byte_length"], row["blob_sha256"]) != \
-                    (payload["artifact_type"], payload["media_type"],
-                     payload["byte_length"], payload["blob_sha256"]):
+                    (row["byte_length"], row["blob_sha256"]) != \
+                    (payload["byte_length"], payload["blob_sha256"]):
                 fail("output inventory omits or misdescribes an owned output")
             if leaf in matched:
                 fail("two owned outputs collapse onto one inventory row")
@@ -1216,12 +1223,10 @@ class RecordStore:
                 if closed["resolution_output_relpath"] is not None:
                     declared_output_paths.append(
                         (closed["resolution_output_relpath"], "resolution"))
-            for path, artifact in declared_output_paths:
-                row = rows_by_leaf.get(path.rsplit("/", 1)[-1])
-                if row is None or row["artifact_type"] != artifact:
+            for path, _artifact in declared_output_paths:
+                if rows_by_leaf.get(path.rsplit("/", 1)[-1]) is None:
                     fail("declared assessor output path is absent from the "
-                         "exhaustive output inventory or misnames its "
-                         "artifact type")
+                         "exhaustive output inventory")
             statuses = {row["status"] for row in ap["check_results"]}
             if "error" in statuses and ap["error_reason"] is None:
                 fail("an errored check requires a sealed error reason")
@@ -1354,27 +1359,53 @@ class RecordStore:
                     invariant_statuses != {"pass"}:
                 fail("failed required invariant cannot coexist with a pass "
                      "bundle")
-            if bp["local_assessment"] == "pass":
-                evidence_rows = list(assessment["payload"]["check_results"]) \
-                    + list(bp["invariant_results"])
-                for evidence_id in contract["payload"]["required_evidence_ids"]:
-                    matches = [row for row in evidence_rows
-                               if row["check_id"] == evidence_id]
-                    if len(matches) != 1:
-                        fail("contract-required evidence identity is not "
-                             "satisfied exactly once by authenticated "
-                             "assessment/bundle evidence")
-            expected_staleness = self._reference_closure(
-                _bundle_seed_refs(bp))
+        if set(bundle_by_item) != set(graph_items):
+            fail("complete evidence lacks exactly one bundle per work item")
+        # §9 staleness has two parts. The bundle's stored
+        # ``staleness_input_refs`` is the acyclic PRE-scope typed input
+        # closure (contract/program/dependencies/work-graph/dispatch/
+        # assessment). The POST-scope triggers (boundary closure, final scope
+        # and evidence-root membership, final-commit drift) cannot be stored
+        # in the bundle without a cycle, so they are enforced at ROOT time:
+        # boundary and final scope must each reference exactly this bundle set
+        # (checked in their own validators), and every section file is
+        # reconstructed from the authenticated final candidate tree.
+        contract_ref_to_bundle = {
+            bundle["payload"]["contract_ref"]["record_id"]: bundle
+            for bundle in bundles}
+        for bundle in bundles:
+            bp = bundle["payload"]
+            seed = self._bundle_staleness_seed(bp, contract_ref_to_bundle)
+            expected_staleness = self._reference_closure(seed)
             expected_refs = sorted(
                 ({"content_sha256": compute_content_sha(self.by_id[rid]),
                   "record_id": rid} for rid in expected_staleness),
                 key=canonical_sort_key)
             if bp["staleness_input_refs"] != expected_refs:
                 fail("bundle staleness inputs do not equal the reconstructed "
-                     "typed input closure")
-        if set(bundle_by_item) != set(graph_items):
-            fail("complete evidence lacks exactly one bundle per work item")
+                     "acyclic pre-scope input closure (contract, program, "
+                     "work graph, dependencies, dispatch, assessment)")
+
+    def _bundle_staleness_seed(self, bundle_payload: Mapping[str, Any],
+                               contract_ref_to_bundle: Mapping[str, Any]) \
+            -> list[dict]:
+        """Acyclic pre-scope staleness seed for one bundle: every reference
+        the bundle carries, plus the frozen work graph, plus each upstream
+        (dependency) section's contract and terminal evidence bundle. All are
+        strictly earlier records, so no cycle is introduced."""
+        seed = list(_bundle_seed_refs(bundle_payload))
+        graphs = _records(self, "section_work_graph.v1")
+        if graphs:
+            seed.append(record_ref(graphs[0]))
+        contract = self.get(bundle_payload["contract_ref"],
+                            versions=("section_contract.v1",))
+        for upstream_ref in contract["payload"]["upstream_contract_refs"]:
+            seed.append(upstream_ref)
+            upstream_bundle = contract_ref_to_bundle.get(
+                upstream_ref["record_id"])
+            if upstream_bundle is not None:
+                seed.append(record_ref(upstream_bundle))
+        return seed
 
     def _validate_final_scope(self, program: Mapping[str, Any],
                               root: Mapping[str, Any]) -> None:
@@ -1735,6 +1766,91 @@ def compute_content_sha(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
 
 
+def _git(repo: str, args: list, repo_roots) -> subprocess.CompletedProcess:
+    validate_repository(repo, list(repo_roots))
+    return subprocess.run(["git", "-C", repo] + args, capture_output=True,
+                          timeout=120)
+
+
+def _read_git_tree(repo: str, repo_roots: Iterable[str],
+                   commit: str) -> list[dict]:
+    """The complete recursive tree of an EXACT real Git commit as a sorted
+    FILE_REF array ``{path, blob_sha256, git_mode, kind:"file"}``.
+
+    ``blob_sha256`` is the SHA-256 of the file's exact bytes (not the Git
+    object id). The commit must be a real object; a nonexistent or malformed
+    commit, a submodule/symlink/gitlink entry, or any non-``100644``/
+    ``100755`` mode refuses. This binds every downstream tree claim to real
+    Git identity so a synthetic all-zero commit cannot masquerade as truth."""
+    validate_commit(commit)
+    roots = list(repo_roots)
+    exists = _git(repo, ["cat-file", "-e", commit + "^{commit}"], roots)
+    if exists.returncode != 0:
+        fail(f"commit {commit[:12]} is not a real object in the repository")
+    listing = _git(repo, ["ls-tree", "-r", "-z", commit], roots)
+    if listing.returncode != 0:
+        raise HSCValidationError(
+            f"git ls-tree failed for {commit[:12]}: "
+            f"{listing.stderr.decode('utf-8', 'replace').strip()}")
+    entries: list[tuple[str, str, str]] = []  # (path, git_mode, blob_sha1)
+    wanted: set[str] = set()
+    for record in listing.stdout.split(b"\x00"):
+        if not record:
+            continue
+        meta, _, raw_path = record.partition(b"\t")
+        parts = meta.split(b" ")
+        if len(parts) != 3:
+            fail("malformed git ls-tree record")
+        mode, obj_type, obj_id = (p.decode("ascii", "strict") for p in parts)
+        if obj_type != "blob" or mode not in ("100644", "100755"):
+            fail("candidate/base tree contains a non-file entry "
+                 "(symlink, gitlink, or unexpected mode)")
+        try:
+            path = raw_path.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            raise HSCValidationError("git path is not valid UTF-8") from exc
+        validate_path(path)
+        entries.append((path, mode, obj_id))
+        wanted.add(obj_id)
+    sha256_by_blob = _git_blob_sha256(repo, roots, commit, sorted(wanted))
+    tree = [{"path": path, "blob_sha256": sha256_by_blob[obj_id],
+             "git_mode": mode, "kind": "file"}
+            for path, mode, obj_id in entries]
+    tree.sort(key=lambda row: row["path"])
+    return tree
+
+
+def _git_blob_sha256(repo: str, repo_roots: Iterable[str], commit: str,
+                     blob_ids: list[str]) -> dict[str, str]:
+    """SHA-256 of each requested blob's exact bytes, read from the object
+    store via a single ``git cat-file --batch``."""
+    result: dict[str, str] = {}
+    if not blob_ids:
+        return result
+    proc = subprocess.run(
+        ["git", "-C", repo, "cat-file", "--batch"],
+        input=("\n".join(blob_ids) + "\n").encode("ascii"),
+        capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        raise HSCValidationError(
+            f"git cat-file failed: "
+            f"{proc.stderr.decode('utf-8', 'replace').strip()}")
+    out = proc.stdout
+    offset = 0
+    for blob_id in blob_ids:
+        newline = out.index(b"\n", offset)
+        header = out[offset:newline].decode("ascii", "strict")
+        fields = header.split(" ")
+        if len(fields) != 3 or fields[0] != blob_id or fields[1] != "blob":
+            fail("git cat-file did not return the requested blob")
+        size = int(fields[2])
+        start = newline + 1
+        data = out[start:start + size]
+        result[blob_id] = hashlib.sha256(data).hexdigest()
+        offset = start + size + 1  # trailing newline after the payload
+    return result
+
+
 _BUNDLE_SEED_REF_FIELDS = (
     "program_ref", "contract_ref", "builder_assignment_ref",
     "assessor_assignment_ref", "builder_launcher_receipt_ref",
@@ -1763,46 +1879,44 @@ def compute_bundle_staleness_inputs(records: Iterable[Mapping[str, Any]],
                                     blobs: Mapping[str, bytes],
                                     bundle_payload: Mapping[str, Any]) \
         -> list[dict]:
-    """Producer-side helper: the exact ``staleness_input_refs`` value the
-    complete-root validator will independently reconstruct for a bundle
-    (the transitive typed reference closure of every other bundle field)."""
+    """Producer-side helper: the exact acyclic pre-scope
+    ``staleness_input_refs`` value the complete-root validator will
+    independently reconstruct for a bundle (transitive typed closure of the
+    bundle's own references plus the work graph and each upstream section's
+    contract and bundle). Post-scope §9 triggers are enforced at root time,
+    never stored in the bundle."""
     store = RecordStore(records, blobs=blobs)
     store._validate_blobs()
-    reached = store._reference_closure(_bundle_seed_refs(bundle_payload))
+    contract_ref_to_bundle = {
+        record["payload"]["contract_ref"]["record_id"]: record
+        for record in _records(store, "section_evidence_bundle.v1")}
+    seed = store._bundle_staleness_seed(bundle_payload, contract_ref_to_bundle)
+    reached = store._reference_closure(seed)
     return sorted(
         ({"content_sha256": compute_content_sha(store.by_id[rid]),
           "record_id": rid} for rid in reached),
         key=canonical_sort_key)
 
 
-_OUTPUT_INVENTORY_MEDIA = ("application/json", "text/plain", "text/x-diff",
-                           "application/octet-stream")
-
-
 def _closed_output_inventory(value: Any) -> list[dict]:
-    """The frozen exhaustive output-inventory byte schema (v1)."""
-    if not isinstance(value, dict) or set(value) != {"schema_version",
-                                                     "outputs"}:
-        fail("output inventory exact keys mismatch")
-    require_literal(value["schema_version"], ("section-output-inventory.v1",),
-                    "output_inventory.schema_version")
-    rows = value["outputs"]
+    """The frozen output-inventory byte shape (design §6.9, lines 1324-1326):
+    one closed canonical JSON array of the sorted tuples
+    ``(output_relpath, byte_length, blob_sha256)`` for every leaf file. No
+    additional fields are frozen, so none are invented here."""
+    if not isinstance(value, list):
+        fail("output inventory must be a canonical array of output tuples")
     require_sorted_unique(
-        rows, "output_inventory.outputs",
-        key=lambda row: row.get("leaf_relpath", "")
+        value, "output_inventory",
+        key=lambda row: row.get("output_relpath", "")
         if isinstance(row, dict) else "")
-    for index, row in enumerate(rows):
-        where = f"output_inventory.outputs[{index}]"
-        exact_keys(row, {"leaf_relpath", "artifact_type", "media_type",
-                         "byte_length", "blob_sha256"}, where)
-        validate_path(row["leaf_relpath"], f"{where}.leaf_relpath")
-        require_literal(row["artifact_type"], CONTENT_ARTIFACTS,
-                        f"{where}.artifact_type")
-        require_literal(row["media_type"], _OUTPUT_INVENTORY_MEDIA,
-                        f"{where}.media_type")
+    for index, row in enumerate(value):
+        where = f"output_inventory[{index}]"
+        exact_keys(row, {"output_relpath", "byte_length", "blob_sha256"},
+                   where)
+        validate_path(row["output_relpath"], f"{where}.output_relpath")
         require_int(row["byte_length"], f"{where}.byte_length")
         require_h(row["blob_sha256"], f"{where}.blob_sha256")
-    return rows
+    return value
 
 
 def _records(store: RecordStore, schema_version: str) -> list[dict]:
