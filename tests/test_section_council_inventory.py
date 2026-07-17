@@ -37,10 +37,10 @@ def _locator():
     }
 
 
-def _root_spec(root_observation):
+def _root_spec(root_observation, root_kind="candidate"):
     loc = _locator()
     spec = {
-        "root_id": "0" * 64, "root_kind": "candidate",
+        "root_id": "0" * 64, "root_kind": root_kind,
         "view_kind": "full-native-tree-v1", "namespace_id": "0" * 64,
         "locator": loc, "locator_sha256": locator_sha256(loc),
         "native_identity": root_observation,
@@ -51,7 +51,7 @@ def _root_spec(root_observation):
     }
     spec["namespace_id"] = domain_hash("council:native-namespace:v1", {
         "locator_sha256": spec["locator_sha256"], "program_ref": PROGRAM_REF,
-        "root_kind": "candidate", "view_kind": "full-native-tree-v1",
+        "root_kind": root_kind, "view_kind": "full-native-tree-v1",
         "workspace_id": spec["workspace_id"]})
     without = dict(spec)
     without.pop("root_id")
@@ -245,5 +245,54 @@ def test_finding2_checkout_requires_a_dotgit(tmp_path):
                            match="requires a .git"):
             inventory.walk_root(root_fd, exclude_dotgit=True,
                                 expected_dotgit_identity={"x": 1})
+    finally:
+        os.close(root_fd)
+
+
+@requires_native
+def test_finding_s3_root_name_set_drift_refuses(tmp_path, monkeypatch):
+    # Regression (audit 001649 F3): if the root's raw direct-name set changes
+    # between the pre- and post-enumeration passes, the "exhaustive" inventory
+    # must refuse rather than emit a snapshot of a drifted tree.
+    root = tmp_path / "root"; root.mkdir()
+    (root / "a").write_bytes(b"a")
+    calls = {"n": 0}
+
+    def drifting_readdir(fd):
+        calls["n"] += 1
+        return [b"a"] if calls["n"] == 1 else [b"a", b"b"]
+
+    monkeypatch.setattr(inventory, "_readdir", drifting_readdir)
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="name set changed during enumeration"):
+            inventory.walk_root(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+@requires_native
+@pytest.mark.parametrize("root_kind",
+                         ["candidate", "builder-output", "assessor-output"])
+def test_finding_s4_direct_dotgit_refused_in_full_tree_roots(tmp_path,
+                                                             root_kind):
+    # Regression (audit 001649 F4): a candidate/builder-output/assessor-output
+    # full-tree root with a direct .git must refuse at PRODUCTION time, not rely
+    # on the later complete-root validator.
+    root = tmp_path / "root"; root.mkdir()
+    (root / ".git").mkdir()
+    (root / "keep").write_bytes(b"k")
+    root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        spec = _root_spec(inventory.observe_root(root_fd), root_kind=root_kind)
+        req = _assembly_requirement(spec["root_id"])
+        with pytest.raises(NativeIdentityUnavailable,
+                           match="direct .git"):
+            inventory.build_native_inventory(
+                program_ref=PROGRAM_REF, base_commit="0" * 40,
+                native_inventory_plan_ref=REF, root_spec=spec,
+                observation_requirement=req, observer_assignment_ref=None,
+                observation_workspace_id=None, root_dir_fd=root_fd)
     finally:
         os.close(root_fd)

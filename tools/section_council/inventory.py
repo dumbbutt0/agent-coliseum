@@ -30,6 +30,10 @@ from .native import (NativeIdentityUnavailable, fail_closed, observe_fd,
 _SYS_getdents64 = 217
 _DOTGIT = b".git"
 _READ_CHUNK = 1 << 20
+# Full-tree roots that must contain no delegated Git control tree: a decoded
+# direct child .git refuses at production time (design §6.0).
+_DOTGIT_REFUSING_ROOT_KINDS = frozenset(
+    {"candidate", "builder-output", "assessor-output"})
 
 
 def _readdir(fd: int) -> list[bytes]:
@@ -99,6 +103,10 @@ def _collect(parent_fd: int, name: bytes, segments: list[bytes],
             if observe_fd(read_fd) != observation:
                 fail_closed("native identity changed between opens")
             data = _read_all(read_fd)
+            # Post-read stability: the identity must be unchanged after the
+            # content is read, so a file cannot drift under the digest.
+            if observe_fd(read_fd) != observation:
+                fail_closed("native identity changed during read")
         finally:
             os.close(read_fd)
         entries.append(_entry(segments, observation,
@@ -108,23 +116,38 @@ def _collect(parent_fd: int, name: bytes, segments: list[bytes],
         try:
             if observe_fd(dir_fd) != observation:
                 fail_closed("native identity changed between opens")
+            names = sorted(_readdir(dir_fd))
             entries.append(_entry(segments, observation, None, "directory"))
-            for child in sorted(_readdir(dir_fd)):
+            for child in names:
                 _collect(dir_fd, child, segments + [child], entries)
+            # Post-enumeration stability (design §6.0): repeat the observation
+            # and the raw-name set after the subtree is walked; either drifting
+            # refuses an otherwise-"exhaustive" inventory.
+            if observe_fd(dir_fd) != observation:
+                fail_closed("directory identity changed during enumeration")
+            if sorted(_readdir(dir_fd)) != names:
+                fail_closed("directory name set changed during enumeration")
         finally:
             os.close(dir_fd)
 
 
 def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False,
-              expected_dotgit_identity: dict | None = None) \
-        -> list[dict[str, Any]]:
+              expected_dotgit_identity: dict | None = None,
+              refuse_dotgit: bool = False) -> list[dict[str, Any]]:
     """Every descendant of the root as a sorted, unique ``NATIVE_ENTRY`` list.
 
     ``exclude_dotgit`` implements the ``checkout-excluding-delegated-dotgit-v1``
     view: the ``.git`` child is excluded only after it is proven to be exactly
     one direct directory whose live native identity equals the delegated
     common-Git root (``expected_dotgit_identity``). A missing, regular-file,
-    symlink, or mismatched ``.git`` fails closed."""
+    symlink, or mismatched ``.git`` fails closed.
+
+    ``refuse_dotgit`` implements design §6.0 for candidate/export full-tree
+    roots: a decoded direct child ``.git`` refuses at production time rather
+    than being silently excluded or emitted for a later validator to reject.
+    ``exclude_dotgit`` and ``refuse_dotgit`` are mutually exclusive."""
+    if exclude_dotgit and refuse_dotgit:
+        fail_closed("a root is either a delegated checkout or a full tree")
     names = sorted(_readdir(root_dir_fd))
     if exclude_dotgit:
         if _DOTGIT not in names:
@@ -140,11 +163,16 @@ def walk_root(root_dir_fd: int, *, exclude_dotgit: bool = False,
                 dotgit != expected_dotgit_identity:
             fail_closed("checkout .git identity differs from the delegated "
                         "common-Git root")
+    if refuse_dotgit and _DOTGIT in names:
+        fail_closed("candidate/output full-tree root contains a direct .git")
     entries: list[dict[str, Any]] = []
     for name in names:
         if exclude_dotgit and name == _DOTGIT:
             continue
         _collect(root_dir_fd, name, [name], entries)
+    # Post-enumeration stability for the root's own direct name set.
+    if sorted(_readdir(root_dir_fd)) != names:
+        fail_closed("root name set changed during enumeration")
     entries.sort(key=lambda e: tuple(
         bytes.fromhex(s) for s in e["path"]["segments_hex"]))
     decoded = [tuple(bytes.fromhex(s) for s in e["path"]["segments_hex"])
@@ -195,6 +223,10 @@ def build_native_inventory(*, program_ref: dict, base_commit: str,
     from .records import make_record  # local import: avoid a cycle
 
     exclude = root_spec["view_kind"] == "checkout-excluding-delegated-dotgit-v1"
+    # Candidate/export full-tree roots must contain no delegated Git control
+    # tree; a decoded direct child .git refuses at production time (design §6.0).
+    refuse_dotgit = (not exclude and
+                     root_spec["root_kind"] in _DOTGIT_REFUSING_ROOT_KINDS)
     root_observation = observe_root(root_dir_fd)
     # The COMPLETE observation must equal the frozen plan, not only the two
     # derived ids: a mode/link-count drift changes native_mode while leaving
@@ -209,7 +241,11 @@ def build_native_inventory(*, program_ref: dict, base_commit: str,
     entries = walk_root(
         root_dir_fd, exclude_dotgit=exclude,
         expected_dotgit_identity=root_spec["delegated_control_identity"]
-        if exclude else None)
+        if exclude else None, refuse_dotgit=refuse_dotgit)
+    # Post-walk root stability: the root's complete observation must be
+    # unchanged after the exhaustive enumeration.
+    if observe_root(root_dir_fd) != root_observation:
+        fail_closed("root identity changed during enumeration")
     phase = observation_requirement["phase"]
     payload = {
         "program_ref": program_ref,

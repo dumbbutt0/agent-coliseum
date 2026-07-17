@@ -72,10 +72,12 @@ def export_source(repo: str, commit: str, dest: str) -> list[dict[str, Any]]:
     try:
         for path, mode, obj_id in sorted(entries):
             _write_no_follow(dest_fd, path.split("/"), contents[obj_id], mode)
-        # Reread the ACTUAL exported tree no-follow and hash the real bytes, so
-        # a raced symlink that redirected a write cannot be laundered into a
-        # manifest that claims the bytes are inside the snapshot.
-        manifest = _reread_no_follow(dest_fd, entries)
+        # Reread the ACTUAL exported tree no-follow and require every byte to
+        # equal the exact fetched base-commit blob, so neither a raced symlink
+        # nor a short write can be laundered into a manifest that claims the
+        # snapshot is the base tree when the bytes on disk differ.
+        manifest = _reread_no_follow(dest_fd, entries, contents)
+        os.fsync(dest_fd)  # persist the exported directory metadata
     finally:
         os.close(dest_fd)
     return manifest
@@ -101,7 +103,13 @@ def _write_no_follow(dest_fd: int, segments: list[str], data: bytes,
                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                        perm, dir_fd=parent)
         try:
-            os.write(leaf, data)
+            written = 0
+            while written < len(data):
+                n = os.write(leaf, data[written:])
+                if n <= 0:
+                    raise HSCValidationError(
+                        "source export write did not advance")
+                written += n
             os.fsync(leaf)
         finally:
             os.close(leaf)
@@ -110,12 +118,12 @@ def _write_no_follow(dest_fd: int, segments: list[str], data: bytes,
             os.close(fd)
 
 
-def _reread_no_follow(dest_fd: int, entries: list[tuple[str, str, str]]) \
-        -> list[dict[str, Any]]:
+def _reread_no_follow(dest_fd: int, entries: list[tuple[str, str, str]],
+                      contents: dict[str, bytes]) -> list[dict[str, Any]]:
     from .native import open_beneath  # local: avoid an import cycle
 
     manifest: list[dict[str, Any]] = []
-    for path, mode, _obj_id in entries:
+    for path, mode, obj_id in entries:
         fd = open_beneath(dest_fd, path.encode("utf-8"), readable=True)
         try:
             chunks = []
@@ -127,6 +135,13 @@ def _reread_no_follow(dest_fd: int, entries: list[tuple[str, str, str]]) \
         finally:
             os.close(fd)
         data = b"".join(chunks)
+        # The exported bytes must BE the exact fetched Git blob; a short write
+        # or a redirected write cannot content-address the wrong bytes under
+        # the base commit.
+        expected = contents[obj_id]
+        if data != expected:
+            raise HSCValidationError(
+                f"exported bytes for {path} differ from the base-commit blob")
         manifest.append({"path": path, "git_mode": mode,
                          "blob_sha256": hashlib.sha256(data).hexdigest(),
                          "byte_length": len(data)})

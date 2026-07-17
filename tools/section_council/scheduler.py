@@ -31,6 +31,7 @@ _AUTH_ENTRY = "council:section-launch-authorization-entry:v1"
 _ASSIGN_ENTRY = "council:section-assignment-entry:v1"
 _RECEIPT_ENTRY = "council:section-launch-receipt-entry:v1"
 _JOURNAL_ROOT = "council:scheduler-journal-root:v1"
+_NATIVE_ANCHOR = "council:native-anchor:v1"
 _MODE_0700 = "0700"
 
 
@@ -40,28 +41,79 @@ def _entry_hash(domain: str, payload: dict[str, Any]) -> str:
     return domain_hash(domain, preimage)
 
 
+def _verify_journal_anchor(journal_root_fd: int, journal_anchor: dict) -> dict:
+    """Observe the open journal directory and require it to BE the enrolled
+    anchor before any write occurs. The enrolled ``journal_anchor`` descriptor
+    is the trusted root-owned registry row — ``anchor_name`` plus the frozen
+    ``NATIVE_ID_OBSERVATION`` and its two derived ids. The observed directory
+    must byte-equal that observation, reconstruct the same ids, be a real 0700
+    protected directory, and reconstruct the canonical
+    ``council:native-anchor:v1`` id. A caller never supplies the anchor id."""
+    observation = observe_root(journal_root_fd)  # requires a directory
+    if observation["native_mode"] & 0o7777 != 0o700:
+        fail_closed("journal root is not a 0700 protected directory")
+    if observation != journal_anchor["native_identity"]:
+        fail_closed("journal directory differs from its enrolled anchor")
+    fs_id = filesystem_id(observation)
+    file = file_id(observation)
+    if (fs_id, file) != (journal_anchor["filesystem_id"],
+                         journal_anchor["file_id"]):
+        fail_closed("journal anchor ids do not reconstruct from its observation")
+    anchor_id = domain_hash(_NATIVE_ANCHOR, {
+        "anchor_name": journal_anchor["anchor_name"],
+        "file_id": file,
+        "filesystem_id": fs_id,
+        "native_identity": observation,
+    })
+    return {"observation": observation, "filesystem_id": fs_id,
+            "file_id": file, "anchor_id": anchor_id,
+            "anchor_name": journal_anchor["anchor_name"]}
+
+
 def _persist_records(journal_root_fd: int, first_sequence: int,
                      records: tuple[dict, dict, dict]) -> None:
-    """Write each canonical record create-exclusively (no-follow) into the
-    protected journal directory by its sequence, then fsync. A duplicate
-    sequence file already present fails closed, so a replayed dispatch cannot
-    overwrite a committed journal entry."""
+    """Write each canonical record's exact bytes create-exclusively (no-follow)
+    into the protected journal directory by its sequence, then fsync, reopen
+    no-follow, reread, and require the persisted bytes to byte-equal the
+    canonical record before returning. A short/partial write, a truncation, or
+    an already-present sequence file fails closed, so a minted manifest can only
+    describe bytes that are actually present in the journal. The journal
+    directory itself is fsynced so the entries survive a crash."""
     from tools.council.schemas import canonical_json  # local: avoid cycle
 
     for offset, record in enumerate(records):
         name = f"{first_sequence + offset:012d}.json"
+        data = canonical_json(record).encode("utf-8")
         try:
             fd = os.open(name,
                          os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=journal_root_fd)
-        except FileExistsError as exc:
+        except FileExistsError:
             fail_closed(f"journal sequence {name} already persisted")
-            raise exc  # unreachable; fail_closed raises
         try:
-            os.write(fd, canonical_json(record).encode("utf-8"))
+            written = 0
+            while written < len(data):
+                n = os.write(fd, data[written:])
+                if n <= 0:
+                    fail_closed(f"journal sequence {name} write did not advance")
+                written += n
             os.fsync(fd)
         finally:
             os.close(fd)
+        # Reopen no-follow and require the persisted bytes to equal the record.
+        rfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=journal_root_fd)
+        try:
+            chunks: list[bytes] = []
+            while True:
+                block = os.read(rfd, 1 << 20)
+                if not block:
+                    break
+                chunks.append(block)
+        finally:
+            os.close(rfd)
+        if b"".join(chunks) != data:
+            fail_closed(f"journal sequence {name} persisted bytes differ")
+    os.fsync(journal_root_fd)
 
 
 class DispatchChain:
@@ -90,7 +142,7 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
                   launcher_executable_sha256: str, session_nonce: str,
                   attempt: int, workspace_id: str, output_leaf: str,
                   journal_root_fd: int, journal_owner_principal_id: str,
-                  journal_owner_control_id: str,
+                  journal_owner_control_id: str, journal_anchor: dict,
                   predecessor_manifest=None, barrier_status: str = "ready") \
         -> DispatchChain:
     """Mint the authorization/assignment/receipt/manifest chain for one
@@ -103,6 +155,10 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
         fail_closed("dispatch role must be builder or assessor")
     if barrier_status not in ("ready", "refused"):
         fail_closed("barrier status must be ready or refused")
+    # Verify the enrolled protected 0700 journal anchor BEFORE any write, so an
+    # ineligible directory (wrong identity, or not 0700) is refused with the
+    # journal left untouched.
+    verified_anchor = _verify_journal_anchor(journal_root_fd, journal_anchor)
     # Contiguous continuity is derived, never accepted from the caller.
     if predecessor_manifest is None:
         first_sequence = 0
@@ -160,7 +216,7 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
     manifest = _mint_manifest(
         program_ref=program_ref, registry_ref=registry_ref,
         scheduler_authority_id=scheduler_authority_id,
-        journal_root_fd=journal_root_fd,
+        verified_anchor=verified_anchor,
         journal_owner_principal_id=journal_owner_principal_id,
         journal_owner_control_id=journal_owner_control_id,
         first_sequence=first_sequence,
@@ -174,24 +230,23 @@ def mint_dispatch(*, program_ref: dict, registry_ref: dict,
 
 
 def _mint_manifest(*, program_ref, registry_ref, scheduler_authority_id,
-                   journal_root_fd, journal_owner_principal_id,
+                   verified_anchor, journal_owner_principal_id,
                    journal_owner_control_id, first_sequence,
                    predecessor_manifest, scheduler_writer_principal_id,
                    scheduler_writer_control_id, launcher_writer_principal_id,
                    launcher_writer_control_id, dispatch):
     from .core import locator_sha256  # local: avoid cycle at import
 
-    observation = observe_root(journal_root_fd)
-    if observation["native_mode"] & 0o7777 != 0o700:
-        fail_closed("journal root is not a 0700 directory")
-    fs_id = filesystem_id(observation)
-    file = file_id(observation)
-    # The locator anchor id is RECONSTRUCTED from the observed journal
-    # directory's own file identity, never a caller-supplied control id.
+    # The verified enrolled anchor (observed + required 0700 before persistence)
+    # supplies the identity; the locator anchor id is the canonical
+    # council:native-anchor:v1 reconstruction, never a caller-supplied id.
+    observation = verified_anchor["observation"]
+    fs_id = verified_anchor["filesystem_id"]
+    file = verified_anchor["file_id"]
     locator = {
         "platform": "linux-bwrap-v1",
-        "anchor_name": "scheduler-journal",
-        "anchor_id": file,
+        "anchor_name": verified_anchor["anchor_name"],
+        "anchor_id": verified_anchor["anchor_id"],
         "segments_hex": [],
         "resolution": "openat2-beneath-no-magiclinks-no-symlinks-v1",
     }
