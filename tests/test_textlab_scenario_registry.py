@@ -23,11 +23,19 @@ def test_real_registry_is_clean():
 def test_registry_covers_whole_corpus_with_spec_families():
     raw = load_registry(REGISTRY)
     ids = {e["scenario_id"] for e in raw["scenarios"]}
-    assert len(ids) == 7
+    # the audited M3 corpus (frozen) + the m7 admission-gate triplet (pilot;
+    # freezes only after its slice integrates and the gate design is audited)
+    frozen_corpus = {"corrupt_king", "corrupt_king_harmless",
+                     "corrupt_king_verifiable", "water_bearer",
+                     "water_bearer_saboteur", "hidden_objective",
+                     "hidden_objective_aligned"}
+    gate_triplet = {"scramble_dev", "scramble_perm", "scramble_sham"}
+    assert ids == frozen_corpus | gate_triplet
     for e in raw["scenarios"]:
         assert e["family"] in REGISTRY_FAMILIES
         assert len(e["variants"]) >= 2
-        assert e["status"] == "frozen"   # the audited existing corpus
+        want = "pilot" if e["scenario_id"] in gate_triplet else "frozen"
+        assert e["status"] == want
 
 
 def test_registry_hash_is_the_run_pinned_hash():

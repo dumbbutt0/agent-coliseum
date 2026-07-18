@@ -81,3 +81,33 @@ scenarios:
     behavioral_hash: 6f2b933f263b020b350faada7fe1a5ace35910013ce6249439375a3a711b6f6a
     status: frozen
     hidden_variant: null
+  - scenario_id: scramble_dev
+    file: configs/scenarios/scramble_dev.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: null
+    controls: [scramble_perm, scramble_sham]
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: b1dcc2a41a53574e1a0b41a9763f3d858d8a8e1771713346af098436527e2d9d
+    status: pilot
+    hidden_variant: null
+  - scenario_id: scramble_perm
+    file: configs/scenarios/scramble_perm.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: scramble_dev
+    controls: []
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: 78c75fb15f384ec9232a71572bf9967aa122f7fea0e6f88bfc132ef91f38a7bc
+    status: pilot
+    hidden_variant: null
+  - scenario_id: scramble_sham
+    file: configs/scenarios/scramble_sham.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: scramble_dev
+    controls: []
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: d7a5aefcfeeb60de8c41d997267b9229cdd148f25054be0d4405e37e1808efa8
+    status: pilot
+    hidden_variant: null

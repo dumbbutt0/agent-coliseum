@@ -181,6 +181,97 @@ def structural_issues(issues: list) -> list:
     return [i for i in issues if not i.startswith("note:")]
 
 
+# --------------------------------- scrambled-history gate invariants (m7)
+#
+# The admission-gate conditions are only interpretable if they are matched-
+# except-order: A and B must carry the IDENTICAL multiset of world events merely
+# reordered, and C must be semantically identical to A (wording/formatting only).
+# lint_twin_pair checks per-step structure; these functions close the gap it
+# leaves (it never compares the reordered event multiset). Run as a preflight
+# assertion before any gate run — never in the hot loop.
+
+_VAL_POS_RE = re.compile(r"^val_pos(\d+)$")
+
+
+def _event_dps(s: Scenario) -> list:
+    return [dp for dp in s.decision_points if "event" in dp.facts]
+
+
+def experience_sequence(s: Scenario) -> list:
+    """Ordered (event_label, valence) pairs as delivered by this scenario.
+
+    Also enforces the positional-delta contract: every action at an event dp
+    must write the IDENTICAL delta (the event is world-driven, choice-
+    independent), and that delta must be exactly `val_pos<K> add <valence>`
+    where K is the event's 1-based fire position in THIS scenario."""
+    seq = []
+    for pos, dp in enumerate(_event_dps(s), start=1):
+        event, valence = dp.facts.get("event"), dp.facts.get("valence")
+        if event is None or valence is None:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event dp needs "
+                              "facts.event and facts.valence")
+        deltas = set()
+        for aid in dp.available_actions:
+            ops = s.outcome_rules[f"{dp.dp_id}/{aid}"].get("state_delta", [])
+            deltas.add(tuple(sorted(
+                (o["field"], o["op"], o["value"]) for o in ops
+                if _VAL_POS_RE.match(str(o.get("field", ""))))))
+        if len(deltas) != 1:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event valence "
+                              "delta is choice-DEPENDENT (must be identical "
+                              "for every action at an event dp)")
+        (val_ops,) = deltas
+        want = ((f"val_pos{pos}", "add", valence),)
+        if val_ops != want:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: positional delta "
+                              f"{val_ops} != expected {want} (val_pos index "
+                              "must equal the event's fire position)")
+        seq.append((event, valence))
+    return seq
+
+
+def experience_multiset(s: Scenario) -> dict:
+    """Position-agnostic multiset of (event_label, valence) — the content that
+    must be IDENTICAL across matched-except-order conditions."""
+    counts: dict = {}
+    for pair in experience_sequence(s):
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+
+def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
+    """Guard that the gate's conditions are matched-except-order.
+
+    A = developmental order, B = same multiset permuted, C = sham reorder
+    (semantically identical to A; agent-facing wording/formatting only).
+    Returns issue strings (empty = clean); raises SchemaError if a scenario
+    violates the positional-delta contract itself."""
+    issues = []
+    if experience_multiset(a) != experience_multiset(b):
+        issues.append("A/B carry DIFFERENT experience multisets — B is not a "
+                      "permutation of A")
+    if experience_sequence(a) == experience_sequence(b):
+        issues.append("A/B deliver the identical order — B is not scrambled")
+    if experience_sequence(a) != experience_sequence(c):
+        issues.append("C differs from A in semantic event order — not a "
+                      "sham (formatting-only) control")
+    # C must be A everywhere EXCEPT agent-facing variant text: same state,
+    # actions, decision structure, and outcome rules.
+    for key in ("initial_state", "actions", "decision_points", "outcome_rules"):
+        if a.raw.get(key) != c.raw.get(key):
+            issues.append(f"C differs from A in behavioral key {key!r} — the "
+                          "sham control may vary wording only")
+    a_texts = [(v.get("intro", ""), v.get("decision_texts")) for v in a.variants]
+    c_texts = [(v.get("intro", ""), v.get("decision_texts")) for v in c.variants]
+    if a_texts == c_texts:
+        issues.append("C's variant text is byte-identical to A — a sham "
+                      "control must actually change the surface form")
+    for twin, name in ((b, "B"), (c, "C")):
+        if twin.control_of != a.scenario_id:
+            issues.append(f"{name}: control_of != {a.scenario_id!r}")
+    return issues
+
+
 # ----------------------------------------------------- scenario registry (M3)
 
 # The SPEC's eight scenario families (docs/first-gladiator/SPEC.md §3,
