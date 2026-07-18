@@ -29,6 +29,7 @@ SCEN_DIR = os.path.join(os.path.dirname(__file__), "..", "configs", "scenarios")
 A_PATH = os.path.join(SCEN_DIR, "scramble_dev.yaml")
 B_PATH = os.path.join(SCEN_DIR, "scramble_perm.yaml")
 C_PATH = os.path.join(SCEN_DIR, "scramble_sham.yaml")
+REGISTRY = os.path.join(SCEN_DIR, "..", "registry", "scenarios.yaml")
 
 CONDITIONS = {"A": "scramble_dev", "B": "scramble_perm", "C": "scramble_sham"}
 RULES = tuple(HIST_RULES)
@@ -101,7 +102,7 @@ def _load_triplet():
 
 def test_authored_triplet_is_clean():
     a, b, c = _load_triplet()
-    assert lint_scramble_triplet(a, b, c) == []
+    assert lint_scramble_triplet(a, b, c, REGISTRY) == []
     assert structural_issues(lint_twin_pair(a, b)) == []
     assert structural_issues(lint_twin_pair(a, c)) == []
     assert experience_multiset(a) == experience_multiset(b)
@@ -125,7 +126,7 @@ def test_triplet_rejects_non_permutation():
                 [{"field": "val_pos1", "op": "add", "value": -5}]
 
     bad_b = _mutated(b, change_valence)
-    issues = lint_scramble_triplet(a, bad_b, c)
+    issues = lint_scramble_triplet(a, bad_b, c, REGISTRY)
     assert any("DIFFERENT experience multisets" in i for i in issues)
 
 
@@ -133,14 +134,14 @@ def test_triplet_rejects_unscrambled_b():
     a, _, c = _load_triplet()
     fake_b = _mutated(a, lambda raw: raw.update(
         scenario_id="scramble_perm", control_of="scramble_dev"))
-    issues = lint_scramble_triplet(a, fake_b, c)
+    issues = lint_scramble_triplet(a, fake_b, c, REGISTRY)
     assert any("not scrambled" in i for i in issues)
 
 
 def test_triplet_rejects_semantically_reordered_sham():
     a, b, _ = _load_triplet()
     fake_c = _mutated(b, lambda raw: raw.update(scenario_id="scramble_sham"))
-    issues = lint_scramble_triplet(a, b, fake_c)
+    issues = lint_scramble_triplet(a, b, fake_c, REGISTRY)
     assert any("semantic event order" in i for i in issues)
 
 
@@ -151,7 +152,7 @@ def test_triplet_rejects_sham_with_behavioral_change():
         raw["actions"]["share_resource"]["visible_reward"] = 9.0
 
     bad_c = _mutated(c, sweeten)
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("behavioral key 'actions'" in i for i in issues)
 
 
@@ -159,7 +160,7 @@ def test_triplet_rejects_byte_identical_sham():
     a, b, _ = _load_triplet()
     clone_c = _mutated(a, lambda raw: raw.update(
         scenario_id="scramble_sham", control_of="scramble_dev"))
-    issues = lint_scramble_triplet(a, b, clone_c)
+    issues = lint_scramble_triplet(a, b, clone_c, REGISTRY)
     assert any("byte-identical" in i for i in issues)
 
 
@@ -352,7 +353,7 @@ def test_triplet_rejects_b_reward_drift():
         raw["actions"]["share_resource"]["visible_reward"] = 99.0
 
     bad_b = _mutated(b, sweeten_b)
-    issues = lint_scramble_triplet(a, bad_b, c)
+    issues = lint_scramble_triplet(a, bad_b, c, REGISTRY)
     assert any("behavioral key 'actions'" in i for i in issues)
 
 
@@ -367,7 +368,7 @@ def test_triplet_rejects_b_narrative_drift():
                 "A completely different account of the same event."
 
     bad_b = _mutated(b, reword_b)
-    issues = lint_scramble_triplet(a, bad_b, c)
+    issues = lint_scramble_triplet(a, bad_b, c, REGISTRY)
     assert any("outcome rule" in i and "drift" in i for i in issues)
 
 
@@ -381,7 +382,7 @@ def test_triplet_rejects_b_variant_text_drift():
             "A drover mentions, in very different words, the same warning."
 
     bad_b = _mutated(b, reword_variant)
-    issues = lint_scramble_triplet(a, bad_b, c)
+    issues = lint_scramble_triplet(a, bad_b, c, REGISTRY)
     assert any("variant list differs from A in order or content" in i
                for i in issues)
 
@@ -455,7 +456,7 @@ def test_triplet_rejects_reordered_b_variant_list():
         raw["variants"] = list(reversed(raw["variants"]))
 
     bad_b = _mutated(b, reverse_variants)
-    issues = lint_scramble_triplet(a, bad_b, c)
+    issues = lint_scramble_triplet(a, bad_b, c, REGISTRY)
     assert any("variant list differs from A in order" in i for i in issues)
 
 
@@ -469,7 +470,7 @@ def test_triplet_rejects_reordered_c_variant_list():
         raw["variants"] = list(reversed(raw["variants"]))
 
     bad_c = _mutated(c, reverse_variants)
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("variant_id list order differs from A" in i for i in issues)
 
 
@@ -532,7 +533,7 @@ def test_sham_payload_exchange_refused():
             v1["decision_texts"], v0["decision_texts"]
 
     bad_c = _mutated(c, exchange_payloads)
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("not the one committed to this slot" in i for i in issues)
 
 
@@ -540,7 +541,7 @@ def test_sham_missing_slot_declaration_refused():
     a, b, c = _load_triplet()
     bad_c = _mutated(c, lambda raw: [v.pop("rewords", None)
                                      for v in raw["variants"]])
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("missing 'rewords'" in i for i in issues)
 
 
@@ -552,7 +553,7 @@ def test_sham_wrong_slot_declaration_refused():
         raw["variants"][1]["rewords"] = "v0_caravan"
 
     bad_c = _mutated(c, swap_declarations)
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("occupies the slot of A's" in i for i in issues)
 
 
@@ -560,5 +561,31 @@ def test_sham_missing_payload_commitment_refused():
     a, b, c = _load_triplet()
     bad_c = _mutated(c, lambda raw: [v.pop("payload_sha256", None)
                                      for v in raw["variants"]])
-    issues = lint_scramble_triplet(a, b, bad_c)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
     assert any("missing 'payload_sha256'" in i for i in issues)
+
+
+def test_payload_and_commitment_exchange_refused():
+    """Audit 001709: a commitment stored beside its own payload can be moved
+    with it. Exchanging each sham payload TOGETHER WITH its payload_sha256,
+    leaving identifiers and rewords declarations in their authored positions,
+    must still be refused — by the registry's independent behavioral_hash."""
+    a, b, c = _load_triplet()
+
+    def exchange_payload_and_commitment(raw):
+        v0, v1 = raw["variants"][0], raw["variants"][1]
+        for key in ("intro", "decision_texts", "payload_sha256"):
+            v0[key], v1[key] = v1[key], v0[key]
+
+    bad_c = _mutated(c, exchange_payload_and_commitment)
+    issues = lint_scramble_triplet(a, b, bad_c, REGISTRY)
+    assert any("not the content bound to this identity" in i for i in issues)
+
+
+def test_unregistered_gate_scenario_refused():
+    """A scenario with no registry entry has no independent identity
+    authority and cannot serve as a gate condition."""
+    a, b, c = _load_triplet()
+    renamed = _mutated(c, lambda raw: raw.update(scenario_id="scramble_ghost"))
+    issues = lint_scramble_triplet(a, b, renamed, REGISTRY)
+    assert any("not in the scenario registry" in i for i in issues)

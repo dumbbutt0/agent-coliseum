@@ -287,6 +287,35 @@ def experience_multiset(s: Scenario) -> dict:
 
 
 
+
+def _registry_binding_issues(scenarios, registry_path: str) -> list:
+    """Each gate scenario must match its REGISTERED behavioral_hash — the
+    independent, out-of-file authority binding content (including the ordered
+    variant payloads) to its declared identity."""
+    issues = []
+    try:
+        registered = {e.get("scenario_id"): e
+                      for e in load_registry(registry_path)["scenarios"]}
+    except (SchemaError, OSError, yaml.YAMLError) as exc:
+        return [f"gate preflight cannot read the scenario registry at "
+                f"{registry_path!r}: {exc}"]
+    for s in scenarios:
+        entry = registered.get(s.scenario_id)
+        if entry is None:
+            issues.append(f"{s.scenario_id}: not in the scenario registry — "
+                          "an unregistered scenario has no independent "
+                          "identity authority")
+            continue
+        if entry.get("behavioral_hash") != s.behavioral_hash():
+            issues.append(
+                f"{s.scenario_id}: behavioral_hash "
+                f"{s.behavioral_hash()[:12]}… != registered "
+                f"{str(entry.get('behavioral_hash'))[:12]}… — the scenario's "
+                "content (including the ordered variant payloads) is not the "
+                "content bound to this identity")
+    return issues
+
+
 def variant_payload_hash(variant: dict) -> str:
     """sha256 over a variant's agent-facing payload (intro + decision_texts).
 
@@ -389,14 +418,24 @@ def _b_equivalence_issues(a: Scenario, b: Scenario) -> list:
     return issues
 
 
-def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
+def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario,
+                         registry_path: str) -> list:
     """Guard that the gate's conditions are matched-except-order.
 
     A = developmental order, B = same multiset permuted, C = sham reorder
     (semantically identical to A; agent-facing wording/formatting only).
     Returns issue strings (empty = clean); raises SchemaError if a scenario
-    violates the positional-delta contract itself."""
+    violates the positional-delta contract itself.
+
+    `registry_path` is REQUIRED and supplies the INDEPENDENT authority for
+    content-to-slot binding (audit 001709): a payload commitment stored beside
+    its own payload can simply be moved with it, so integrity alone proves
+    nothing about which slot a text belongs to. The scenario registry lives
+    outside the scenario file and pins each scenario's behavioral_hash, which
+    covers the ORDERED variants list — exchanging payloads (with or without
+    their adjacent hashes) changes that hash and is refused here."""
     issues = []
+    issues.extend(_registry_binding_issues((a, b, c), registry_path))
     if experience_multiset(a) != experience_multiset(b):
         issues.append("A/B carry DIFFERENT experience multisets — B is not a "
                       "permutation of A")
