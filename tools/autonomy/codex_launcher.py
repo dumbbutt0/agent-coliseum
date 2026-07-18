@@ -53,7 +53,10 @@ CODEX_BIN = "/home/dummy/.local/bin/codex"
 AUDIT_TIMEOUT_SECONDS = 3600.0
 STORAGE_CAP_MB = 2048.0
 LAUNCHER_LOCK = "_codex_launcher"
-MAX_CONSECUTIVE_FAILURES = 3
+# Bounded ROUTING budget: how many consecutive attempts may fail to
+# deliver an admissible auditor response before the owner is told every
+# authorized route is unavailable. Says nothing about the candidate.
+MAX_ROUTING_ATTEMPTS = 3
 
 # request state -> the kind of Codex session that resolves it. `claimed`
 # is the recovery trigger: a session that claimed and then died stranded
@@ -102,20 +105,41 @@ def actionable(chain: list, requests: dict) -> list:
     return [(rid, kind) for _i, rid, kind in sorted(work)]
 
 
-def launcher_failures(chain: list, rid: str) -> int:
-    """Consecutive codex_launcher SESSION failures for rid since its
-    current published cycle began (a new publish or result-audit request
-    resets the count) — derived from the chain, never from process memory.
-    Only events flagged failure:true count; logged stale-lock clearances
-    are bookkeeping, not failures."""
+# Terminal verdicts of ANY audit kind — an admitted one proves the route works.
+_ADMITTED_TERMINAL = frozenset().union(*EXPECTED_TERMINAL.values())
+
+
+def routing_failures(chain: list, rid: str) -> int:
+    """Consecutive ROUTING failures for rid — attempts that did not deliver
+    an admissible auditor response.
+
+    THIS BUDGET MEASURES DELIVERY, NEVER CANDIDATE QUALITY. The provider
+    exposes no attributable failure signal (every failed session exits 1), so
+    the launcher cannot know WHY a session produced nothing; it only knows
+    that no admissible response arrived. Charging that to the candidate would
+    let an auditor outage masquerade as evidence about the work under review.
+
+    Candidate accounting lives elsewhere and is untouched by this counter: a
+    candidate-attributable outcome is an ADMITTED VERDICT, and the revision
+    budget for those is the five-audit-cycles-per-request limit enforced in
+    publish.publish_request.
+
+    Derived from the chain, never from process memory. Resets on a new
+    published cycle AND on any admitted terminal verdict — a session that
+    delivered proves the route is working, so earlier delivery failures are
+    no longer consecutive. Logged stale-lock clearances are bookkeeping and
+    never count (they carry no failure flag)."""
     count = 0
     for event in chain:
         if event["request_id"] != rid:
             continue
-        if event["event_type"] in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT",
-                                   "RESULT_AUDIT_REQUESTED"):
+        etype = event["event_type"]
+        if etype in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT",
+                     "RESULT_AUDIT_REQUESTED"):
             count = 0
-        elif event["event_type"] == "WATCHER_ERROR" and \
+        elif etype in _ADMITTED_TERMINAL and event["sender"] == SENDER:
+            count = 0          # delivery succeeded; the route is proven
+        elif etype == "WATCHER_ERROR" and \
                 event["payload"].get("phase") == "codex_launcher" and \
                 event["payload"].get("failure") is True:
             count += 1
@@ -260,25 +284,46 @@ def _log_paths(repo: str, rid: str, kind: str) -> tuple:
 
 
 def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
-                    commit: str, reason: str, logs: tuple) -> str:
-    """WATCHER_ERROR (failure:true) now; AUTONOMY_PAUSED after the third
-    consecutive session failure in this published cycle. Returns 'failed'
-    or 'paused'."""
-    print(f"codex_launcher: {kind} session for {rid} failed — {reason}",
-          file=sys.stderr)
+                    commit: str, reason: str, logs: tuple,
+                    failure_kind: str = "no_admissible_response") -> str:
+    """Record ONE routing attempt that failed to deliver an admissible
+    auditor response; pause when the bounded routing budget is exhausted.
+    Returns 'failed' or 'paused'.
+
+    `failure_kind` is derived STRUCTURALLY, never from log text:
+      transport             - the session could not be run or completed at
+                              all (spawn failure, missing or non-executable
+                              binary, timeout kill, storage cap).
+      no_admissible_response - the session ran but no admissible auditor
+                              response reached the chain.
+    Both are DELIVERY failures. Neither says anything about the candidate,
+    and neither may consume candidate revision budget. The log paths are
+    recorded as pointers to evidence; their CONTENT is never parsed, so no
+    diagnostic text can influence any decision made here."""
+    print(f"codex_launcher: {kind} session for {rid} failed to deliver a "
+          f"verdict ({failure_kind}) — {reason}", file=sys.stderr)
     events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo,
                         commit, {"phase": "codex_launcher", "kind": kind,
                                  "failure": True, "reason": reason,
+                                 # structural, not inferred from any log text
+                                 "failure_kind": failure_kind,
+                                 "accounting": "routing",
+                                 "candidate_attributable": False,
                                  "stdout_log": logs[0], "stderr_log": logs[1]})
     chain = events.read_chain(root)
-    failures = launcher_failures(chain, rid)
-    if failures >= MAX_CONSECUTIVE_FAILURES:
+    failures = routing_failures(chain, rid)
+    if failures >= MAX_ROUTING_ATTEMPTS:
         events.pause_autonomy(
             root, cfg, SENDER, rid, repo, commit,
-            f"{failures} consecutive codex_launcher failures for {rid} "
-            f"({kind}); last: {reason}")
-        print("codex_launcher: AUTONOMY_PAUSED — the owner decides next.",
-              file=sys.stderr)
+            f"ROUTING EXHAUSTED for {rid}: {failures} consecutive attempts "
+            f"failed to deliver an admissible auditor response (last kind: "
+            f"{kind}, {failure_kind}; reason: {reason}). Every authorized "
+            "audit route is currently unavailable. This says NOTHING about "
+            "the candidate: no candidate revision budget was consumed and "
+            "the candidate has neither passed nor failed review.")
+        print("codex_launcher: AUTONOMY_PAUSED — every authorized audit "
+              "route is unavailable (routing exhaustion; the candidate is "
+              "unjudged).", file=sys.stderr)
         return "paused"
     return "failed"
 
@@ -421,8 +466,13 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
     reason = refusal or (
         "session ended without the expected codex-signed terminal verdict "
         f"(state now {state_now!r})")
+    # STRUCTURAL classification: a refusal means the session could not be
+    # run or completed; otherwise it ran and delivered nothing admissible.
+    # No log content is consulted.
     outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
-                              logs)
+                              logs,
+                              failure_kind=("transport" if refusal is not None
+                                            else "no_admissible_response"))
     if state_now == "claimed" and kind in (
             "source_audit", "source_audit_resume", "result_audit"):
         # Clear only the lock this exact bounded session can prove it owns.

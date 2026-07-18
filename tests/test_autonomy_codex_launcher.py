@@ -467,8 +467,12 @@ def test_three_consecutive_failures_pause_autonomy(env, tmp_path,
     assert codex_launcher.main(["--once"]) == 1
     chain = events.read_chain(root)
     assert chain[-1]["event_type"] == "AUTONOMY_PAUSED"
-    assert "consecutive codex_launcher failures" in \
-        chain[-1]["payload"]["reason"]
+    # the pause names ROUTING exhaustion and disclaims candidate judgement:
+    # exhausting delivery attempts says nothing about the work under review
+    reason = chain[-1]["payload"]["reason"]
+    assert "ROUTING EXHAUSTED" in reason
+    assert "consecutive attempts failed to deliver" in reason
+    assert "NOTHING about the candidate" in reason
     # paused flag now stops any further cycle before a launch
     assert codex_launcher.main(["--once"]) == 0
 
@@ -521,8 +525,12 @@ def test_missing_codex_binary_is_bounded_failure(env, tmp_path, monkeypatch):
     assert codex_launcher.main(["--once"]) == 1  # three strikes
     chain = events.read_chain(root)
     assert chain[-1]["event_type"] == "AUTONOMY_PAUSED"
-    assert "consecutive codex_launcher failures" in \
-        chain[-1]["payload"]["reason"]
+    # the pause names ROUTING exhaustion and disclaims candidate judgement:
+    # exhausting delivery attempts says nothing about the work under review
+    reason = chain[-1]["payload"]["reason"]
+    assert "ROUTING EXHAUSTED" in reason
+    assert "consecutive attempts failed to deliver" in reason
+    assert "NOTHING about the candidate" in reason
 
 
 def test_non_executable_codex_binary_is_bounded_failure(env, tmp_path,
