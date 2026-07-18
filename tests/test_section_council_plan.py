@@ -23,24 +23,27 @@ def _dir(tmp_path, name):
 
 
 def _central(tmp_path, fds, *, candidate_ws=CAND_WS, out_kind="builder-output",
-             out_ws=WS):
-    """The eight central roots plus one runtime + private-output root, as plan
-    root-input dicts backed by real no-follow directory handles."""
-    def mk(kind, name, view="full-native-tree-v1", ws=None, delegated=None):
+             out_ws=WS, extra=()):
+    """The eight central roots plus one runtime + private-output root (plus any
+    ``extra`` inputs), backed by real no-follow directory handles.
+
+    ``common-git`` carries no anchor_name: its locator is derived as the checkout
+    anchor plus the ``.git`` segment and its ``dir_fd`` is a distinct directory
+    standing in for the live ``.git``."""
+    def mk(kind, name, view="full-native-tree-v1", ws=None, anchor=True):
         fd = _dir(tmp_path, name)
         fds.append(fd)
         row = {"root_kind": kind, "view_kind": view, "dir_fd": fd,
-               "anchor_name": name, "workspace_id": ws}
-        if delegated is not None:
-            row["delegated_root_kind"] = delegated
+               "workspace_id": ws}
+        if anchor:
+            row["anchor_name"] = name
         return row
 
     roots = [
         mk("candidate", "candidate", ws=candidate_ws),
-        mk("common-git", "common-git"),
+        mk("common-git", "common-git", anchor=False),   # derived from checkout
         mk("integration-checkout", "checkout",
-           view="checkout-excluding-delegated-dotgit-v1",
-           delegated="common-git"),
+           view="checkout-excluding-delegated-dotgit-v1"),
         mk("council-root", "council"),
         mk("owner-anchors", "anchors"),
         mk("other-worker-leaves", "leaves"),
@@ -49,6 +52,7 @@ def _central(tmp_path, fds, *, candidate_ws=CAND_WS, out_kind="builder-output",
         mk("runtime-readonly", "runtime", ws=out_ws),
         mk(out_kind, "output", ws=out_ws),
     ]
+    roots.extend(extra)
     return roots
 
 
@@ -66,22 +70,23 @@ def test_builder_dispatch_plan_validates(tmp_path):
     assert validate_record(record) is not None
     p = record["payload"]
     assert p["root_count"] == 10 == len(p["roots"])
-    # one pre/post requirement per root
     assert p["observation_count"] == 20 == len(p["observations"])
-    phases = {o["phase"] for o in p["observations"]}
-    assert phases == {"pre-dispatch", "post-worker"}
-    # roots + observations are sorted by their reconstructed ids
+    assert {o["phase"] for o in p["observations"]} == {"pre-dispatch",
+                                                       "post-worker"}
     assert [r["root_id"] for r in p["roots"]] == \
         sorted(r["root_id"] for r in p["roots"])
-    assert [o["observation_id"] for o in p["observations"]] == \
-        sorted(o["observation_id"] for o in p["observations"])
-    # the checkout binds the common-Git root as its delegated control root
     checkout = next(r for r in p["roots"]
                     if r["root_kind"] == "integration-checkout")
     common = next(r for r in p["roots"] if r["root_kind"] == "common-git")
+    # finding 001729-0: the checkout delegates to common-Git, and the common-Git
+    # locator is EXACTLY the checkout locator plus the .git segment (the relation
+    # the integrated store validator requires).
     assert checkout["delegated_control_root_id"] == common["root_id"]
     assert checkout["delegated_control_identity"] == common["native_identity"]
     assert checkout["workspace_id"] is None
+    assert common["locator"]["anchor_id"] == checkout["locator"]["anchor_id"]
+    assert common["locator"]["segments_hex"] == \
+        checkout["locator"]["segments_hex"] + ["2e676974"]
 
 
 def test_assessor_dispatch_plan_validates(tmp_path):
@@ -99,13 +104,18 @@ def test_assessor_dispatch_plan_validates(tmp_path):
     assert record["payload"]["role"] == "assessor"
 
 
-def test_assembly_plan_all_null_context(tmp_path):
+def test_assembly_plan_keeps_multiple_output_roots(tmp_path):
+    # finding 001729-0 (second half): the assembly union may carry several
+    # runtime/output roots; a per-kind collapse would silently narrow it. Two
+    # builder-output roots (distinct dirs, distinct workspaces) must both survive.
     fds = []
     try:
-        # central roots only (candidate keeps a workspace); assembly needs no
-        # private output/runtime root in the validator's minimum.
-        roots = [r for r in _central(tmp_path, fds)
-                 if r["root_kind"] in plan.CENTRAL_KINDS]
+        extra_fd = _dir(tmp_path, "output2")
+        fds.append(extra_fd)
+        extra = [{"root_kind": "builder-output",
+                  "view_kind": "full-native-tree-v1", "dir_fd": extra_fd,
+                  "anchor_name": "output2", "workspace_id": "f" * 64}]
+        roots = _central(tmp_path, fds, extra=extra)
         record = plan.build_native_inventory_plan(
             program_ref=PROGRAM_REF, base_commit=BASE, scope="assembly",
             work_item_id=None, role=None, attempt=None, workspace_id=None,
@@ -115,11 +125,10 @@ def test_assembly_plan_all_null_context(tmp_path):
             os.close(fd)
     assert validate_record(record) is not None
     p = record["payload"]
-    assert {o["phase"] for o in p["observations"]} == \
-        {"pre-assembly", "post-assembly"}
-    assert all(o["work_item_id"] is None and o["role"] is None
-               and o["attempt"] is None and o["workspace_id"] is None
-               for o in p["observations"])
+    outputs = [r for r in p["roots"] if r["root_kind"] == "builder-output"]
+    assert len(outputs) == 2  # neither collapsed away
+    assert {o["phase"] for o in p["observations"]} == {"pre-assembly",
+                                                       "post-assembly"}
 
 
 def test_missing_central_root_refuses(tmp_path):

@@ -33,6 +33,23 @@ def test_assembled_tree_excludes_own_envelope():
     assert got == evidence_root.assembled_tree_sha256(only_project, RID)
 
 
+def test_assembled_tree_refuses_malformed_file_ref():
+    # finding 001729-4: a FILE_REF outside the frozen algebra (non-hex blob,
+    # bad path, extra keys, or duplicate path) must fail closed, never be hashed.
+    good = {"path": "src/a.py", "blob_sha256": "1" * 64, "git_mode": "100644",
+            "kind": "file"}
+    with pytest.raises(Exception):  # non-hex blob
+        evidence_root.assembled_tree_sha256(
+            [{**good, "blob_sha256": "z" * 64}], RID)
+    with pytest.raises(Exception):  # extra key
+        evidence_root.assembled_tree_sha256([{**good, "extra": 1}], RID)
+    with pytest.raises(Exception):  # duplicate path
+        evidence_root.assembled_tree_sha256([good, dict(good)], RID)
+    with pytest.raises(Exception):  # invalid absolute path
+        evidence_root.assembled_tree_sha256(
+            [{**good, "path": "/etc/passwd"}], RID)
+
+
 def _prediction():
     return {"path": "src/new.py", "kind": "add", "rename_source": None,
             "blob_before": None, "mode_before": None, "required": True}

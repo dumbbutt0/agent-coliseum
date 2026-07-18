@@ -20,7 +20,8 @@ from typing import Any
 
 from tools.council.schemas import domain_hash
 
-from .core import parse_hsc_request_binding
+from .core import (HSCValidationError, parse_hsc_request_binding, require_h,
+                   validate_path)
 from .records import compute_record_content_sha256, make_record
 
 _PROJECT_TREE = "council:section-project-tree:v1"
@@ -33,14 +34,28 @@ def _prefix(request_id: str) -> str:
 def assembled_tree_sha256(file_refs: list[dict], request_id: str) -> str:
     """``domain_hash`` over the sorted ``FILE_REF`` array for the complete
     candidate Git tree after project changes, excluding the request's own
-    ``artifacts/section-council/<request_id>/`` envelope (design §6.9)."""
+    ``artifacts/section-council/<request_id>/`` envelope (design §6.9).
+
+    Every supplied row — including an excluded envelope row — must be an exact
+    ``FILE_REF`` (closed key set, canonical repository path, lowercase-hex
+    ``blob_sha256``, permitted Git mode, ``kind=="file"``); a malformed value or
+    a duplicate/colliding path fails closed rather than being hashed."""
     prefix = _prefix(request_id)
-    kept = [ref for ref in file_refs if not ref["path"].startswith(prefix)]
-    for ref in kept:
-        if set(ref) != {"path", "blob_sha256", "git_mode", "kind"} or \
-                ref["kind"] != "file" or ref["git_mode"] not in \
-                ("100644", "100755"):
-            raise ValueError("invalid FILE_REF for assembled tree hash")
+    validated: list[dict] = []
+    for ref in file_refs:
+        if not isinstance(ref, dict) or \
+                set(ref) != {"path", "blob_sha256", "git_mode", "kind"}:
+            raise HSCValidationError("assembled-tree FILE_REF has wrong keys")
+        path = validate_path(ref["path"], "assembled-tree FILE_REF path")
+        require_h(ref["blob_sha256"], "assembled-tree FILE_REF blob_sha256")
+        if ref["kind"] != "file" or ref["git_mode"] not in ("100644", "100755"):
+            raise HSCValidationError("assembled-tree FILE_REF kind/mode invalid")
+        validated.append({"path": path, "blob_sha256": ref["blob_sha256"],
+                          "git_mode": ref["git_mode"], "kind": "file"})
+    seen = [ref["path"] for ref in validated]
+    if len(seen) != len(set(seen)):
+        raise HSCValidationError("assembled-tree FILE_REF paths are not unique")
+    kept = [ref for ref in validated if not ref["path"].startswith(prefix)]
     return domain_hash(_PROJECT_TREE,
                        sorted(kept, key=lambda ref: ref["path"]))
 

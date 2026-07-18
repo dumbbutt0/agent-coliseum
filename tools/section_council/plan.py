@@ -26,8 +26,8 @@ from typing import Any
 
 from tools.council.schemas import domain_hash
 
-from .core import locator_sha256
-from .native import enrolled_anchor
+from .core import file_id, filesystem_id, locator_sha256
+from .native import enrolled_anchor, observe_fd
 from .records import make_record
 
 _PLATFORM = "linux-bwrap-v1"
@@ -45,23 +45,19 @@ _DISPATCH_PHASES = ("pre-dispatch", "post-worker")
 _ASSEMBLY_PHASES = ("pre-assembly", "post-assembly")
 
 
-def _root_spec(program_ref: dict, *, root_kind: str, view_kind: str,
-               dir_fd: int, anchor_name: str, workspace_id: str | None,
+_DOTGIT_SEGMENT = "2e676974"  # ".git" hex — the delegated control-tree segment
+
+
+def _spec_from(program_ref: dict, *, root_kind: str, view_kind: str,
+               locator: dict, observation: dict, workspace_id: str | None,
                delegated: dict | None) -> dict[str, Any]:
-    """One ``NATIVE_ROOT_SPEC`` whose every id reconstructs from the live
-    no-follow observation of ``dir_fd``.
+    """One ``NATIVE_ROOT_SPEC`` from a fully-formed ``locator`` and the live
+    no-follow ``observation`` of the root directory. Every derived id
+    reconstructs exactly as the HSC-A validator recomputes it.
 
     ``delegated`` (only for the ``checkout-excluding-delegated-dotgit-v1`` view)
     is the already-built common-Git root spec; its ``root_id`` and
     ``native_identity`` are bound as the delegated control root."""
-    enrolled = enrolled_anchor(dir_fd, anchor_name)
-    locator = {
-        "platform": _PLATFORM,
-        "anchor_name": anchor_name,
-        "anchor_id": enrolled["anchor_id"],
-        "segments_hex": [],
-        "resolution": _RESOLUTION,
-    }
     loc_sha = locator_sha256(locator)
     namespace_id = domain_hash(_NAMESPACE, {
         "locator_sha256": loc_sha,
@@ -88,9 +84,9 @@ def _root_spec(program_ref: dict, *, root_kind: str, view_kind: str,
         "namespace_id": namespace_id,
         "locator": locator,
         "locator_sha256": loc_sha,
-        "native_identity": enrolled["native_identity"],
-        "filesystem_id": enrolled["filesystem_id"],
-        "file_id": enrolled["file_id"],
+        "native_identity": observation,
+        "filesystem_id": filesystem_id(observation),
+        "file_id": file_id(observation),
         "workspace_id": workspace_id,
         "delegated_control_root_id": delegated_root_id,
         "delegated_control_identity": delegated_identity,
@@ -98,6 +94,20 @@ def _root_spec(program_ref: dict, *, root_kind: str, view_kind: str,
     root_id = domain_hash(_ROOT, {"program_ref": program_ref,
                                   "root_spec": without_id})
     return {"root_id": root_id, **without_id}
+
+
+def _own_anchor_locator(dir_fd: int, anchor_name: str) -> tuple[dict, dict]:
+    """Enroll a directory as its own anchor and return
+    ``(locator_with_empty_segments, observation)``."""
+    enrolled = enrolled_anchor(dir_fd, anchor_name)
+    locator = {
+        "platform": _PLATFORM,
+        "anchor_name": anchor_name,
+        "anchor_id": enrolled["anchor_id"],
+        "segments_hex": [],
+        "resolution": _RESOLUTION,
+    }
+    return locator, enrolled["native_identity"]
 
 
 def _observation(program_ref: dict, *, root_id: str, phase: str, scope: str,
@@ -131,42 +141,61 @@ def build_native_inventory_plan(*, program_ref: dict, base_commit: str,
 
     ``roots`` is the caller-assembled closed required-root set: one dict per
     root with ``root_kind``, ``view_kind``, ``dir_fd`` (an open no-follow
-    directory descriptor), ``anchor_name``, ``workspace_id``, and — for the
-    integration checkout only — ``delegated_root_kind`` naming the common-Git
-    root whose identity is delegated. The completeness/uniqueness/phase-coverage
-    invariants are enforced by the HSC-A validator via ``make_record`` (a missing
-    or duplicated central root, an unbalanced phase set, a colliding native
-    object, or an id that fails to reconstruct all refuse the record)."""
+    directory descriptor), ``workspace_id``, and ``anchor_name`` for every root
+    that enrolls its own anchor (every kind except ``common-git``, whose locator
+    is derived as the checkout anchor plus the ``.git`` segment and whose
+    ``dir_fd`` is the live ``.git`` directory). The completeness/uniqueness/
+    phase-coverage invariants are enforced by the HSC-A validator via
+    ``make_record`` (a missing or duplicated central root, an unbalanced phase
+    set, a colliding native object, or an id that fails to reconstruct all
+    refuse the record)."""
     phases = _ASSEMBLY_PHASES if scope == "assembly" else _DISPATCH_PHASES
 
-    # Two passes so a checkout root can bind an already-built common-Git spec:
-    # every full-native-tree root first, then the delegated-.git checkout roots.
-    specs_by_kind: dict[str, dict] = {}
-    deferred: list[dict] = []
+    by_kind: dict[str, list[dict]] = {}
     for spec_input in roots:
-        if spec_input["view_kind"] == "checkout-excluding-delegated-dotgit-v1":
-            deferred.append(spec_input)
-            continue
-        spec = _root_spec(
-            program_ref, root_kind=spec_input["root_kind"],
-            view_kind=spec_input["view_kind"], dir_fd=spec_input["dir_fd"],
-            anchor_name=spec_input["anchor_name"],
-            workspace_id=spec_input["workspace_id"], delegated=None)
-        specs_by_kind[spec_input["root_kind"]] = spec
-    for spec_input in deferred:
-        delegated_kind = spec_input["delegated_root_kind"]
-        delegated = specs_by_kind.get(delegated_kind)
-        if delegated is None:
-            raise ValueError(f"checkout delegates to absent root "
-                             f"{delegated_kind!r}")
-        spec = _root_spec(
-            program_ref, root_kind=spec_input["root_kind"],
-            view_kind=spec_input["view_kind"], dir_fd=spec_input["dir_fd"],
-            anchor_name=spec_input["anchor_name"],
-            workspace_id=spec_input["workspace_id"], delegated=delegated)
-        specs_by_kind[spec_input["root_kind"]] = spec
+        by_kind.setdefault(spec_input["root_kind"], []).append(spec_input)
+    checkout_inputs = by_kind.get("integration-checkout", [])
+    common_inputs = by_kind.get("common-git", [])
+    if len(checkout_inputs) != 1 or len(common_inputs) != 1:
+        raise ValueError("a plan needs exactly one checkout and one common-Git "
+                         "root")
+    checkout_in, common_in = checkout_inputs[0], common_inputs[0]
 
-    specs = sorted(specs_by_kind.values(), key=lambda s: s["root_id"])
+    # The checkout is enrolled as its own anchor; the common-Git root is the
+    # SAME anchor plus the ".git" segment (store.py requires common_git.locator
+    # == checkout.locator + [".git"]), while its identity is the live .git
+    # directory. Build common-Git first so the checkout can delegate to it.
+    checkout_locator, checkout_obs = _own_anchor_locator(
+        checkout_in["dir_fd"], checkout_in["anchor_name"])
+    common_locator = dict(checkout_locator)
+    common_locator["segments_hex"] = (
+        list(checkout_locator["segments_hex"]) + [_DOTGIT_SEGMENT])
+    common_spec = _spec_from(
+        program_ref, root_kind="common-git", view_kind="full-native-tree-v1",
+        locator=common_locator, observation=observe_fd(common_in["dir_fd"]),
+        workspace_id=common_in["workspace_id"], delegated=None)
+    checkout_spec = _spec_from(
+        program_ref, root_kind="integration-checkout",
+        view_kind="checkout-excluding-delegated-dotgit-v1",
+        locator=checkout_locator, observation=checkout_obs,
+        workspace_id=checkout_in["workspace_id"], delegated=common_spec)
+
+    # Every other root enrolls its own anchor. Repeated root kinds (e.g. several
+    # runtime/output roots in an assembly union) are NOT collapsed — each spec is
+    # kept, and uniqueness is enforced by the validator on root_id/native object.
+    specs = [common_spec, checkout_spec]
+    for spec_input in roots:
+        if spec_input["root_kind"] in ("integration-checkout", "common-git"):
+            continue
+        locator, observation = _own_anchor_locator(
+            spec_input["dir_fd"], spec_input["anchor_name"])
+        specs.append(_spec_from(
+            program_ref, root_kind=spec_input["root_kind"],
+            view_kind=spec_input["view_kind"], locator=locator,
+            observation=observation, workspace_id=spec_input["workspace_id"],
+            delegated=None))
+
+    specs = sorted(specs, key=lambda s: s["root_id"])
     observations = []
     for spec in specs:
         for phase in phases:

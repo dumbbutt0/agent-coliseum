@@ -20,7 +20,7 @@ def _sha(data):
 
 
 def _checkout(tmp_path, files):
-    """Materialize a base checkout; return (root_fd, base_tree)."""
+    """Materialize a base checkout; return (root, root_fd, base_tree)."""
     root = tmp_path / "checkout"
     root.mkdir()
     base = {}
@@ -32,6 +32,18 @@ def _checkout(tmp_path, files):
         base[path] = (_sha(data), mode)
     fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     return root, fd, base
+
+
+def _pred(change, *, required=True):
+    """Derive the authorized prediction that matches a proposal change."""
+    return {"path": change["path"], "kind": change["kind"],
+            "rename_source": change["rename_source"],
+            "blob_before": change["blob_before"],
+            "mode_before": change["mode_before"], "required": required}
+
+
+def _preds(proposal):
+    return [_pred(c) for c in proposal["changes"]]
 
 
 def test_add_modify_mode_delete_rename(tmp_path):
@@ -62,20 +74,18 @@ def test_add_modify_mode_delete_rename(tmp_path):
          "mode_after": None, "blob_before": _sha(b"moved\n"),
          "mode_before": "100644"},
     ]}
-    # dst/ must exist for the rename destination parent to resolve no-follow.
     (root / "dst").mkdir()
     try:
         changes = assembler.apply_proposal(
-            fd, base, proposal,
+            fd, base, proposal, predicted_changes=_preds(proposal),
             predicted_renames=[{"path": "dst/to.txt",
                                 "rename_source": "src/from.txt"}])
     finally:
         os.close(fd)
-    # Resulting on-disk state
     assert (root / "new.txt").read_bytes() == b"hi\n"
     assert (root / "edit.txt").read_bytes() == b"new\n"
     assert oct(os.stat(root / "flip.sh").st_mode & 0o777) == "0o755"
-    assert (root / "flip.sh").read_bytes() == b"#!/bin/sh\n"  # content untouched
+    assert (root / "flip.sh").read_bytes() == b"#!/bin/sh\n"
     assert not (root / "drop.txt").exists()
     assert not (root / "src/from.txt").exists()
     assert (root / "dst/to.txt").read_bytes() == b"moved\n"
@@ -93,8 +103,9 @@ def test_add_over_existing_refuses(tmp_path):
          "mode_after": "100644", "blob_before": None, "mode_before": None}]}
     try:
         with pytest.raises(HSCValidationError, match="already exists"):
-            assembler.apply_proposal(fd, base, proposal)
-        assert (root / "a.txt").read_bytes() == b"x\n"  # untouched
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+        assert (root / "a.txt").read_bytes() == b"x\n"
     finally:
         os.close(fd)
 
@@ -107,9 +118,12 @@ def test_modify_base_mismatch_refuses(tmp_path):
          "mode_after": "100644", "blob_before": _sha(b"WRONG\n"),
          "mode_before": "100644"}]}
     try:
+        # the prediction agrees with the (wrong) declared base, so the scope gate
+        # passes and the on-disk base check is what fires
         with pytest.raises(HSCValidationError, match="base blob/mode mismatch"):
-            assembler.apply_proposal(fd, base, proposal)
-        assert (root / "a.txt").read_bytes() == b"real\n"  # untouched
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+        assert (root / "a.txt").read_bytes() == b"real\n"
     finally:
         os.close(fd)
 
@@ -119,7 +133,6 @@ def test_symlink_target_refuses(tmp_path):
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"secret\n")
     os.symlink(str(outside), str(root / "link"))
-    # A modify aimed at the symlink name must fail closed, never follow it.
     proposal = {"changes": [
         {"work_item_id": WID_A, "kind": "modify", "path": "link",
          "rename_source": None, "content_after_hex": b"pwn\n".hex(),
@@ -127,8 +140,9 @@ def test_symlink_target_refuses(tmp_path):
          "mode_before": "100644"}]}
     try:
         with pytest.raises(HSCValidationError, match="symlink or unopenable"):
-            assembler.apply_proposal(fd, base, proposal)
-        assert outside.read_bytes() == b"secret\n"  # never redirected through
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+        assert outside.read_bytes() == b"secret\n"
     finally:
         os.close(fd)
 
@@ -143,8 +157,9 @@ def test_rename_dest_exists_refuses(tmp_path):
          "mode_before": "100644"}]}
     try:
         with pytest.raises(HSCValidationError, match="dest .* already exists"):
-            assembler.apply_proposal(fd, base, proposal)
-        assert (root / "from.txt").read_bytes() == b"m\n"  # untouched
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+        assert (root / "from.txt").read_bytes() == b"m\n"
     finally:
         os.close(fd)
 
@@ -160,6 +175,61 @@ def test_duplicate_work_item_refuses(tmp_path):
          "mode_after": "100644", "blob_before": None, "mode_before": None}]}
     try:
         with pytest.raises(HSCValidationError, match="reuses a work_item_id"):
-            assembler.apply_proposal(fd, base, proposal)
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+    finally:
+        os.close(fd)
+
+
+def test_non_hex_work_item_refuses(tmp_path):
+    # finding 001729-3: a 64-char non-hex identity must fail the canonical
+    # SHA-256 grammar, never merely len==64.
+    root, fd, base = _checkout(tmp_path, {"a.txt": (b"x\n", "100644")})
+    proposal = {"changes": [
+        {"work_item_id": "z" * 64, "kind": "add", "path": "b.txt",
+         "rename_source": None, "content_after_hex": b"1\n".hex(),
+         "mode_after": "100644", "blob_before": None, "mode_before": None}]}
+    try:
+        with pytest.raises(HSCValidationError, match="work_item_id"):
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=_preds(proposal))
+    finally:
+        os.close(fd)
+
+
+def test_unpredicted_change_refuses(tmp_path):
+    # finding 001729-3: an operation outside the frozen authorized scope must be
+    # refused BEFORE any write, not applied and left to later real-diff.
+    root, fd, base = _checkout(tmp_path, {"a.txt": (b"x\n", "100644")})
+    proposal = {"changes": [
+        {"work_item_id": WID_A, "kind": "add", "path": "sneaky.txt",
+         "rename_source": None, "content_after_hex": b"1\n".hex(),
+         "mode_after": "100644", "blob_before": None, "mode_before": None}]}
+    other = {"path": "authorized.txt", "kind": "add", "rename_source": None,
+             "blob_before": None, "mode_before": None, "required": False}
+    try:
+        with pytest.raises(HSCValidationError,
+                           match="outside the authorized predicted scope"):
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=[other])
+        assert not (root / "sneaky.txt").exists()  # nothing written
+    finally:
+        os.close(fd)
+
+
+def test_missing_required_prediction_refuses(tmp_path):
+    root, fd, base = _checkout(tmp_path, {"a.txt": (b"x\n", "100644")})
+    proposal = {"changes": [
+        {"work_item_id": WID_A, "kind": "add", "path": "b.txt",
+         "rename_source": None, "content_after_hex": b"1\n".hex(),
+         "mode_after": "100644", "blob_before": None, "mode_before": None}]}
+    preds = _preds(proposal) + [
+        {"path": "must-have.txt", "kind": "add", "rename_source": None,
+         "blob_before": None, "mode_before": None, "required": True}]
+    try:
+        with pytest.raises(HSCValidationError,
+                           match="required predicted change .* is missing"):
+            assembler.apply_proposal(fd, base, proposal,
+                                     predicted_changes=preds)
     finally:
         os.close(fd)

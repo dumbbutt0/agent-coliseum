@@ -126,6 +126,46 @@ def test_finding_s4_export_refuses_when_bytes_differ_from_blob(tmp_path,
         sandbox.export_source(repo, commit, dest)
 
 
+def test_finding_s6_export_forces_exact_git_mode_under_umask(tmp_path):
+    # finding 001729-2: Git executable mode is part of the tree identity, so the
+    # export must force the exact 0644/0755 bits regardless of the process umask
+    # and verify them on reread — not copy the mode from the ls-tree input.
+    repo, commit = _repo(tmp_path)  # run.sh is 100755, src/a.py is 100644
+    dest = str(tmp_path / "snap")
+    os.makedirs(dest)
+    old = os.umask(0o077)
+    try:
+        manifest = sandbox.export_source(repo, commit, dest)
+    finally:
+        os.umask(old)
+    # the executable survived the restrictive umask as a real 0755 inode
+    assert oct(os.stat(os.path.join(dest, "run.sh")).st_mode & 0o777) == "0o755"
+    assert oct(os.stat(os.path.join(dest, "src", "a.py")).st_mode & 0o777) \
+        == "0o644"
+    assert next(r for r in manifest
+               if r["path"] == "run.sh")["git_mode"] == "100755"
+
+
+def test_finding_s6_export_refuses_when_reread_mode_differs(tmp_path,
+                                                            monkeypatch):
+    # If a materialized inode's observed permission bits do not equal the exact
+    # Git mode, the reread must fail closed rather than emit a manifest that
+    # claims a mode the tree does not have.
+    repo, commit = _repo(tmp_path)
+    dest = str(tmp_path / "snap")
+    os.makedirs(dest)
+    original = sandbox._write_no_follow
+
+    def wrong_mode(dest_fd, segments, data, mode):
+        # write the executable with plain 0644 bits, then defeat the fchmod
+        original(dest_fd, segments, data, "100644" if mode == "100755" else mode)
+
+    monkeypatch.setattr(sandbox, "_write_no_follow", wrong_mode)
+    with pytest.raises(HSCValidationError,
+                       match="differs from the base-commit Git mode"):
+        sandbox.export_source(repo, commit, dest)
+
+
 def test_finding3_write_does_not_follow_symlinked_dir_component(tmp_path):
     # Regression (audit 001635 finding 3): materialization must not follow a
     # symlinked path component. A raced symlink standing in for an intermediate

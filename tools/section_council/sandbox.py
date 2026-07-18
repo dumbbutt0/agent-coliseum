@@ -103,6 +103,10 @@ def _write_no_follow(dest_fd: int, segments: list[str], data: bytes,
                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                        perm, dir_fd=parent)
         try:
+            # The create mode is masked by the process umask, so force the exact
+            # Git permission bits: an exported executable/regular mode is part of
+            # the base-commit tree identity and must not depend on the umask.
+            os.fchmod(leaf, perm)
             written = 0
             while written < len(data):
                 n = os.write(leaf, data[written:])
@@ -122,10 +126,25 @@ def _reread_no_follow(dest_fd: int, entries: list[tuple[str, str, str]],
                       contents: dict[str, bytes]) -> list[dict[str, Any]]:
     from .native import open_beneath  # local: avoid an import cycle
 
+    import stat as _stat
+
     manifest: list[dict[str, Any]] = []
     for path, mode, obj_id in entries:
+        perm = 0o755 if mode == "100755" else 0o644
         fd = open_beneath(dest_fd, path.encode("utf-8"), readable=True)
         try:
+            # The exported inode must BE a regular single-link file whose
+            # observed permission bits equal the exact Git mode — the executable
+            # bit is part of the base-commit tree identity, so a umask-masked or
+            # perturbed mode fails closed rather than being copied from the input.
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise HSCValidationError(
+                    f"exported path {path} is not a regular single-link file")
+            if (st.st_mode & 0o777) != perm:
+                raise HSCValidationError(
+                    f"exported mode for {path} ({st.st_mode & 0o777:04o}) "
+                    f"differs from the base-commit Git mode {mode}")
             chunks = []
             while True:
                 block = os.read(fd, 1 << 20)

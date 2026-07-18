@@ -31,7 +31,7 @@ import os
 import stat
 from typing import Any
 
-from .core import HSCValidationError, validate_path
+from .core import HSCValidationError, require_h, validate_path
 from .diff import real_diff
 from .native import fail_closed, observe_fd
 
@@ -153,9 +153,12 @@ def _write_temp(parent_fd: int, name: str, data: bytes, mode: str) -> None:
 
 
 def _temp_name(work_item_id: str, target: str) -> str:
-    # A same-directory temp name unique to this work item and target leaf.
-    leaf = target.rsplit("/", 1)[-1]
-    return f".hsc-assemble.{work_item_id[:16]}.{leaf}"
+    # A same-directory temp name derived only from trusted fixed text plus a
+    # safe digest of the (work_item_id, target) pair — never from raw
+    # worker-controlled identifier bytes, so no path separator or traversal
+    # component can reach the pathname.
+    digest = hashlib.sha256(f"{work_item_id}\0{target}".encode()).hexdigest()
+    return f".hsc-assemble.{digest[:32]}"
 
 
 def _apply_change(root_fd: int, base: dict[str, tuple[str, str]],
@@ -251,9 +254,10 @@ def _validate_proposal_change(change: Any, seen_items: set) -> dict[str, Any]:
     kind = change["kind"]
     if kind not in _KINDS:
         raise HSCValidationError(f"proposal change kind {kind!r} is invalid")
-    wid = change["work_item_id"]
-    if not isinstance(wid, str) or len(wid) != 64:
-        raise HSCValidationError("proposal work_item_id must be a 64-hex id")
+    # A worker-supplied identity must be the canonical lowercase SHA-256 grammar,
+    # never merely 64 arbitrary characters — it orders application and seeds a
+    # temp pathname.
+    wid = require_h(change["work_item_id"], "proposal work_item_id")
     if wid in seen_items:
         raise HSCValidationError("proposal reuses a work_item_id")
     seen_items.add(wid)
@@ -282,15 +286,55 @@ def _validate_proposal_change(change: Any, seen_items: set) -> dict[str, Any]:
     return normalized
 
 
+def _authorize_against_scope(changes: list[dict],
+                             predicted_changes: list[dict]) -> None:
+    """Pre-write authorization gate: every proposal operation must equal exactly
+    one frozen predicted change in ``(path, kind, rename_source, blob_before,
+    mode_before)``, every predicted ``required`` operation must be present, and
+    no path/predicted change is used twice. The trusted writer proves the
+    proposal is the authorized scope BEFORE any byte is written — later real-diff
+    rejection on the disposable candidate is a backstop, not the gate."""
+    index: dict[tuple, dict] = {}
+    for pred in predicted_changes:
+        key = (pred["path"], pred["kind"], pred["rename_source"])
+        if key in index:
+            raise HSCValidationError("predicted scope repeats a change key")
+        index[key] = pred
+    consumed: set[tuple] = set()
+    for change in changes:
+        key = (change["path"], change["kind"], change["rename_source"])
+        pred = index.get(key)
+        if pred is None:
+            raise HSCValidationError(
+                f"proposal change {key} is outside the authorized predicted "
+                "scope")
+        if key in consumed:
+            raise HSCValidationError(f"proposal repeats predicted change {key}")
+        consumed.add(key)
+        if change["blob_before"] != pred["blob_before"] or \
+                change["mode_before"] != pred["mode_before"]:
+            raise HSCValidationError(
+                f"proposal change {key} base blob/mode differs from the "
+                "authorized prediction")
+    for key, pred in index.items():
+        if pred["required"] and key not in consumed:
+            raise HSCValidationError(
+                f"required predicted change {key} is missing from the proposal")
+
+
 def apply_proposal(root_fd: int, base_tree: dict[str, tuple[str, str]],
                    proposal: dict[str, Any], *,
+                   predicted_changes: list[dict],
                    predicted_renames: list | None = None) -> list[dict]:
     """Apply the parsed ``proposal`` to the integration checkout open at
     ``root_fd`` and return the resulting sorted ``ACTUAL_CHANGE`` list.
 
     ``base_tree`` maps every base project path to ``(blob_sha256, git_mode)``
-    (from the frozen source snapshot). Changes apply in sorted ``work_item_id``
-    order; each is validated against the base before its atomic operation."""
+    (from the frozen source snapshot). ``predicted_changes`` is the frozen
+    authorized scope (each ``{path, kind, rename_source, blob_before,
+    mode_before, required}``); every proposal operation must match one before any
+    write occurs. Changes apply in sorted ``work_item_id`` order; each is also
+    validated against the base before its atomic operation."""
     if not isinstance(proposal, dict) or set(proposal) != {"changes"}:
         raise HSCValidationError("proposal must be {'changes': [...]}")
     raw = proposal["changes"]
@@ -298,6 +342,7 @@ def apply_proposal(root_fd: int, base_tree: dict[str, tuple[str, str]],
         raise HSCValidationError("proposal changes must be a non-empty list")
     seen: set = set()
     changes = [_validate_proposal_change(c, seen) for c in raw]
+    _authorize_against_scope(changes, predicted_changes)
     changes.sort(key=lambda c: c["work_item_id"])
     for change in changes:
         if change["kind"] == "mode":

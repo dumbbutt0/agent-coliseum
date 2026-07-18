@@ -95,13 +95,21 @@ class ContentEmitter:
         self._content_slot = 0
 
     def wrap(self, program_ref: dict, artifact_type: str, data: bytes, *,
-             producer_assignment_ref: dict | None = None,
+             worker_relpath: str, producer_assignment_ref: dict | None = None,
              media_type: str = "application/json",
              parent_content_refs: list | None = None) -> dict:
         """Wrap raw ``data`` into a ``section_content_record.v1`` and stage its
-        bytes at a fresh ``content/`` slot. ``blob_sha256``/``byte_length`` bind
-        the exact bytes the store re-verifies."""
-        path = f"{self.prefix}content/{self._content_slot:04d}"
+        bytes under ``content/`` at the worker's exact leaf-relative path.
+
+        The storage path tail is the frozen ``worker_relpath`` (never an
+        anonymous slot), so the store's content-tail equality binds the declared
+        assessor output path to this exact ref. ``blob_sha256``/``byte_length``
+        bind the exact bytes the store re-verifies."""
+        rel = validate_path(worker_relpath, "worker_relpath")
+        path = f"{self.prefix}content/{rel}"
+        if path in self.blobs:
+            raise HSCValidationError(
+                f"worker leaf relpath {rel!r} wrapped twice")
         self._content_slot += 1
         payload = {
             "program_ref": program_ref,
@@ -121,9 +129,12 @@ class ContentEmitter:
 def output_inventory_bytes(content_records: list[dict]) -> bytes:
     """The closed whole-leaf inventory: canonical JSON of the sorted
     ``(output_relpath, byte_length, blob_sha256)`` tuples for every wrapped leaf
-    file (design §6.8). ``output_relpath`` is the storage slot's basename."""
+    file (design §6.8). ``output_relpath`` is the worker's exact leaf-relative
+    path (the content record's tail after ``/content/``), so it equals the path
+    the assessor declared."""
     rows = sorted(({
-        "output_relpath": rec["payload"]["storage_relpath"].rsplit("/", 1)[-1],
+        "output_relpath": rec["payload"]["storage_relpath"].split(
+            "/content/", 1)[1],
         "byte_length": rec["payload"]["byte_length"],
         "blob_sha256": rec["payload"]["blob_sha256"],
     } for rec in content_records), key=lambda row: row["output_relpath"])
@@ -242,11 +253,25 @@ def build_assessment_manifest(*, program_ref: dict, contract_ref: dict,
                               check_results: list[dict],
                               finding_records: list[dict],
                               finding_record_relpaths: dict[str, str],
-                              open_blocking_count: int, local_assessment: str,
+                              required_check_ids: list[str],
                               error_reason: str | None,
                               predecessor_assessment_ref: dict | None) -> dict:
     """Assemble the ``section_assessment_manifest.v1`` from purely recomputed
-    finding refs/inventory/counts and the derived disposition."""
+    finding refs/inventory/counts, a recomputed open-blocking count, and the
+    disposition derived once inside this constructor.
+
+    The disposition and blocker count are NEVER accepted from the caller (the
+    finding 001729 gap): they are derived from the finding records' own frozen
+    ``status``/``blocks_local_pass`` and the check results, so a caller cannot
+    present ``pass``/zero-blockers over blocking assessor bytes."""
+    finding_view = [{"status": rec["payload"]["status"],
+                     "blocks_local_pass": rec["payload"]["blocks_local_pass"]}
+                    for rec in finding_records]
+    open_blocking_count = sum(1 for f in finding_view
+                              if f["status"] == "open" and f["blocks_local_pass"])
+    local_assessment = derive_disposition(
+        required_check_ids=required_check_ids, check_results=check_results,
+        findings=finding_view, error_reason=error_reason)
     finding_refs = sorted((record_ref(rec) for rec in finding_records),
                           key=lambda r: r["record_id"])
     payload = {
