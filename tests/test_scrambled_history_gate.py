@@ -301,7 +301,7 @@ def test_aggregator_refuses_mixed_regimes(tmp_path):
                               out_root=str(tmp_path),
                               interaction_mode="sequential_history")
         run_dirs.append(result.run_dir)
-    # tamper: give B's run a different regime for the same agent_id
+    # modify the recorded manifest: give B's run a different regime
     b_manifest = os.path.join(run_dirs[1], "run.json")
     with open(b_manifest, encoding="utf-8") as fh:
         run = _json.load(fh)
@@ -386,15 +386,16 @@ def test_triplet_rejects_b_variant_text_drift():
                for i in issues)
 
 
-def test_event_dp_side_channel_refused():
-    """Finding 2: ANY extra state operation on an event dp — choice-dependent
-    or not, valence-named or not — is refused by the full-delta contract."""
+def test_event_dp_extra_state_field_refused():
+    """Finding 2: ANY extra state operation on an event dp — whether it
+    varies by action or not, and whether or not it is valence-named — is
+    refused by the complete-delta contract."""
     a, _, _ = _load_triplet()
 
     def add_choice_dependent(raw):
         raw["outcome_rules"]["e_trust/reflect"]["state_delta"] = [
             {"field": "val_pos1", "op": "add", "value": 2},
-            {"field": "choice_side_channel", "op": "add", "value": 1}]
+            {"field": "per_action_extra_field", "op": "add", "value": 1}]
 
     with pytest.raises(SchemaError, match="choice-DEPENDENT"):
         experience_sequence(_mutated(a, add_choice_dependent))
@@ -403,8 +404,8 @@ def test_event_dp_side_channel_refused():
         for aid in ("acknowledge", "reflect"):
             raw["outcome_rules"][f"e_trust/{aid}"]["state_delta"] = [
                 {"field": "val_pos1", "op": "add", "value": 2},
-                {"field": "shared_side_channel", "op": "add", "value": 1}]
-        raw["initial_state"]["shared_side_channel"] = 0
+                {"field": "shared_extra_field", "op": "add", "value": 1}]
+        raw["initial_state"]["shared_extra_field"] = 0
 
     with pytest.raises(SchemaError, match="extra state channels"):
         experience_sequence(_mutated(a, add_choice_independent))
@@ -491,9 +492,9 @@ def test_duplicate_variant_ids_refused_at_validation():
 
 
 def test_reversed_duplicate_id_sham_cannot_be_accepted():
-    """Audit 001683's exact exploit: with both C slots sharing one id, the
-    compared id sequence is reversal-invariant — so the collision itself must
-    be unconstructible, closing the A/C slot-misalignment channel."""
+    """Audit 001683's reported case: with both C slots sharing one id, the
+    compared id sequence is reversal-invariant — so the duplicate itself must
+    be unconstructible, closing the A/C slot-alignment gap."""
     c = load_scenario(C_PATH)
 
     def collide_and_reverse(raw):

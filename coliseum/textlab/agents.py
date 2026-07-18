@@ -181,7 +181,7 @@ class ScriptedAgent(AgentInterface):
 # state via outcome_rules.state_delta, surfaced in state_before at runner.py:304) —
 # never a derived label, metric, or aggregator output (measure-never-reward). No
 # agent-internal accumulator memory: order is read from on-record positional state,
-# so there is no unaudited side channel.
+# so no unrecorded state path exists.
 HIST_DECIDER_VERSION = "1"        # lineage input; bump on ANY rule/param/band change
 VALENCE_PREFIX = "val_pos"        # scenario contract: val_pos1..val_posN, 1-based fire order
 
