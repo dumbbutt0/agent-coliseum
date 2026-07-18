@@ -110,6 +110,14 @@ EVENT_TYPES = (
     # H4: human-token blessing of a specific legacy/nonconforming event so
     # quarantine-aware projection may treat it as authority again
     "MIGRATION_APPROVED",
+    # Owner-attested external fact (2026-07-18): the provider exposes no
+    # structured, session-attributable signal for auditor-access failures —
+    # only exit code 1 and unstructured text — so no agent can soundly
+    # determine WHY an auditor session failed. This event is the owner's
+    # authenticated attestation, bound to ONE specific failed attempt, that
+    # the attempt failed for access reasons. It never rewrites the original
+    # failure; it compensates it out of the EFFECTIVE budget.
+    "ACCESS_BOUNDARY_CONFIRMED",
 )
 
 ROLES = ("claude", "codex", "human")
@@ -168,6 +176,7 @@ SENDER_ALLOWED = {
     "HUMAN_IDENTITY_INITIALIZED": frozenset({"human"}),
     "HUMAN_IDENTITY_ROTATED": frozenset({"human"}),
     "MIGRATION_APPROVED": frozenset({"human"}),
+    "ACCESS_BOUNDARY_CONFIRMED": frozenset({"human"}),
 }
 
 # H1: events whose authority is a HUMAN one-time token (S/KEY chain,
@@ -179,6 +188,7 @@ HUMAN_TOKEN_REQUIRED_EVENT_TYPES = frozenset({
     "EXPERIMENT_APPROVED", "CONDITIONS_SATISFIED", "REQUEST_CANCELED",
     "STATUS_CHANGED", "POLICY_INITIALIZED", "POLICY_AMENDED",
     "HUMAN_IDENTITY_ROTATED", "MIGRATION_APPROVED",
+    "ACCESS_BOUNDARY_CONFIRMED",
 })
 
 # H1: bootstrap/control events appendable while the CONTROL record pauses

@@ -87,6 +87,10 @@ TRANSITIONS = {
 # events that never change request state (control/identity events use
 # synthetic request ids and carry no request authority)
 STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
+                              # an owner attestation about a PAST
+                              # attempt: recordable from any state,
+                              # advances nothing (audit 001760)
+                              "ACCESS_BOUNDARY_CONFIRMED",
                               "POLICY_INITIALIZED", "POLICY_AMENDED",
                               "HUMAN_IDENTITY_INITIALIZED",
                               "HUMAN_IDENTITY_ROTATED",
@@ -106,7 +110,10 @@ STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",
-                            "REQUEST_CANCELED"})
+                            "REQUEST_CANCELED",
+                            # an owner attestation about a past attempt never
+                            # moves the request and never re-binds its commit
+                            "ACCESS_BOUNDARY_CONFIRMED"})
 
 # once a request is in one of these states, its target_commit is bound
 _BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,

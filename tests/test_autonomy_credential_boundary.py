@@ -1,5 +1,16 @@
-"""Auditor-availability boundary: an auditor that cannot RUN is not a
-candidate that FAILED.
+"""Owner-confirmed auditor-access boundary.
+
+The autonomous-attribution premise is RETIRED (audit 001760): the provider
+exposes neither distinguishable exit codes — every failure exits 1 — nor a
+structured, session-attributable access signal, so no agent can soundly
+determine WHY an auditor session failed. Every unsuccessful launch therefore
+records a failure and consumes a strike. Classification survives as an
+UNTRUSTED diagnostic hint with no authority.
+
+An access failure leaves the effective budget only via the owner's
+authenticated, session-bound attestation, which never rewrites the original
+failure — the immutable record keeps it, and a compensating attestation
+excludes that ONE bound attempt from the effective count.
 
 A hard credential or usage-quota boundary is an environmental fact about the
 auditor's access. It says nothing about the audited commit, so it must not
@@ -48,14 +59,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNCIL_ROOT", root)
     monkeypatch.setenv("COUNCIL_REPO_ROOTS", repo)
     return root, repo, head, cfg
-
-
-def _stub_probe(monkeypatch, available, cls="quota_exhausted",
-                evidence="probe: usage limit reached"):
-    """The independent probe is the ONLY evidence of access. Tests state
-    explicitly what the provider says when asked directly."""
-    monkeypatch.setattr(codex_launcher, "probe_auditor_access",
-                        lambda timeout=None: (available, cls, evidence))
 
 
 def _install_fake_codex(tmp_path, monkeypatch, stderr_text: str,
@@ -110,15 +113,6 @@ def test_classification_distinguishes_every_named_class(text, expected):
         assert evidence, "a recognized class must carry detection evidence"
 
 
-def test_only_credential_and_quota_classes_bypass_the_budget():
-    """The bypass set is deliberately narrow: a filter interruption, a
-    crash, or anything unrecognized must still consume a strike."""
-    assert codex_launcher.AUDITOR_UNAVAILABLE_CLASSES == frozenset(
-        {"quota_exhausted", "credentials_missing"})
-    for other in ("content_filter", "network", "malformed_output", "unknown"):
-        assert other not in codex_launcher.AUDITOR_UNAVAILABLE_CLASSES
-
-
 def test_retry_hint_is_recorded_verbatim_not_interpreted():
     assert "Jul 22nd, 2026 9:16 PM" in \
         codex_launcher.retry_hint(REAL_QUOTA_STDERR)
@@ -126,108 +120,6 @@ def test_retry_hint_is_recorded_verbatim_not_interpreted():
 
 
 # ------------------------------------------------- the incident replay
-
-def test_real_quota_incident_records_boundary_without_a_strike(
-        env, tmp_path, monkeypatch):
-    """THE regression: the exact stderr that previously drove the loop
-    toward the bounded-failure ceiling now records an auditor-unavailable
-    boundary and spends no strike."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, False)
-    _stub_probe(monkeypatch, False)
-    _stub_probe(monkeypatch, False)
-    _stub_probe(monkeypatch, False)
-    _stub_probe(monkeypatch, False)
-    _publish(root, cfg, repo, head)
-
-    assert codex_launcher.main(["--once"]) == 0
-    chain = events.read_chain(root)
-    assert codex_launcher.launcher_failures(chain, RID) == 0
-
-    event = _last_launcher_event(root)
-    payload = event["payload"]
-    assert event["event_type"] == "WATCHER_ERROR"
-    assert payload["failure"] is False          # the load-bearing flag
-    assert payload["auditor_unavailable"] is True
-    assert payload["failure_class"] == "quota_exhausted"
-    assert "usage limit" in payload["detection_evidence"]
-    assert "Jul 22nd, 2026" in payload["earliest_retry_hint"]
-    assert payload["provider"] == "codex"
-    # the candidate keeps zero authority and still needs a real audit
-    assert payload["integration_authority"] == "none"
-    assert payload["requires_fresh_audit"] is True
-    # identity preserved verbatim
-    assert event["request_id"] == RID
-    assert event["target_commit"] == head
-
-
-def test_repeated_quota_exits_never_pause_autonomy(env, tmp_path,
-                                                   monkeypatch):
-    """Three-plus quota exits — far past MAX_CONSECUTIVE_FAILURES — must
-    never reach AUTONOMY_PAUSED."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _publish(root, cfg, repo, head)
-    for _ in range(codex_launcher.MAX_CONSECUTIVE_FAILURES + 2):
-        assert codex_launcher.main(["--once"]) == 0
-    chain = events.read_chain(root)
-    assert codex_launcher.launcher_failures(chain, RID) == 0
-    assert not [e for e in chain if e["event_type"] == "AUTONOMY_PAUSED"]
-
-
-def test_boundary_holds_the_request_from_immediate_relaunch(
-        env, tmp_path, monkeypatch):
-    """After a recorded boundary the launcher must not re-run straight back
-    into it — the auditor's access has not changed."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _publish(root, cfg, repo, head)
-    assert codex_launcher.main(["--once"]) == 0
-    before = len(events.read_chain(root))
-    assert codex_launcher.main(["--once"]) == 0
-    # held: no second boundary event, no launch, no strike
-    assert len(events.read_chain(root)) == before
-    assert codex_launcher.credential_boundary(
-        events.read_chain(root), RID) is not None
-
-
-def _ev(etype, payload=None, rid=RID):
-    return {"request_id": rid, "event_type": etype, "payload": payload or {}}
-
-
-def test_fresh_cycle_clears_the_boundary():
-    """A new published cycle deserves a fresh probe — access may have
-    returned, and that is discovered by TRYING, not assumed by a timer."""
-    boundary = {"phase": "codex_launcher", "auditor_unavailable": True,
-                "failure_class": "quota_exhausted"}
-    held = [_ev("AUDIT_REQUESTED"), _ev("WATCHER_ERROR", boundary)]
-    assert codex_launcher.credential_boundary(held, RID) is not None
-    for fresh in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT",
-                  "RESULT_AUDIT_REQUESTED"):
-        assert codex_launcher.credential_boundary(
-            held + [_ev(fresh)], RID) is None, fresh
-
-
-def test_recorded_clearance_lifts_the_boundary():
-    """Access returning is an OBSERVATION recorded on the chain, never an
-    assumption — an explicit clearance lifts the hold."""
-    boundary = {"phase": "codex_launcher", "auditor_unavailable": True,
-                "failure_class": "credentials_missing"}
-    cleared = {"phase": "codex_launcher", "credential_boundary_cleared": True}
-    chain = [_ev("AUDIT_REQUESTED"), _ev("WATCHER_ERROR", boundary)]
-    assert codex_launcher.credential_boundary(chain, RID) is not None
-    assert codex_launcher.credential_boundary(
-        chain + [_ev("WATCHER_ERROR", cleared)], RID) is None
-
-
-def test_boundary_is_per_request_not_global():
-    """One request's auditor boundary must not hold unrelated work."""
-    boundary = {"phase": "codex_launcher", "auditor_unavailable": True,
-                "failure_class": "quota_exhausted"}
-    chain = [_ev("AUDIT_REQUESTED"), _ev("WATCHER_ERROR", boundary)]
-    assert codex_launcher.credential_boundary(chain, "other-request") is None
-
 
 # ------------------------------------------------- everything else still counts
 
@@ -271,31 +163,6 @@ def test_silent_session_failure_still_counts(env, tmp_path, monkeypatch):
     chain = events.read_chain(root)
     assert codex_launcher.launcher_failures(chain, RID) == 1
     assert _last_launcher_event(root)["payload"]["failure"] is True
-
-
-def test_boundary_never_grants_integration_authority(env, tmp_path,
-                                                     monkeypatch):
-    """A held request must remain exactly where it was: no verdict, no
-    approval, no state advance that could reach integration."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _publish(root, cfg, repo, head)
-    assert codex_launcher.main(["--once"]) == 0
-    chain = events.read_chain(root)
-    types = {e["event_type"] for e in chain if e["request_id"] == RID}
-    assert not types & {"AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",
-                        "CHANGE_INTEGRATED", "CONDITIONS_SATISFIED"}
-    from tools.council import state_machine
-    assert state_machine.project(chain)[RID]["state"] == "requested"
-
-
-def test_chain_stays_verifiable_across_a_boundary(env, tmp_path, monkeypatch):
-    """Recording a boundary must not corrupt the chain."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _publish(root, cfg, repo, head)
-    assert codex_launcher.main(["--once"]) == 0
-    assert events.verify_chain(root).healthy
 
 
 # ------------------------------------------- the evidence boundary
@@ -351,102 +218,143 @@ def test_retry_hint_reads_the_same_bounded_region():
     assert codex_launcher.retry_hint(echoed) == ""
 
 
-def test_real_stranded_session_log_is_not_a_credential_boundary():
-    """Replay of the real 2026-07-18 safe-008 log: ~448KB of echoed chain
-    events containing the word 'quota', from a session whose launcher died
-    before accounting. It must classify as unknown and therefore fail
-    closed — that incident was NOT an access boundary."""
-    sample = ECHOED_CHAIN_PAYLOAD * 300      # same shape, bounded size
-    cls, _ = codex_launcher.classify_session_failure(sample)
-    assert cls == "unknown"
-    assert cls not in codex_launcher.AUDITOR_UNAVAILABLE_CLASSES
-
-
 # ------------------- audit 001747: provenance + guaranteed resumption
 
-def test_log_suspicion_alone_never_grants_a_boundary(env, tmp_path,
-                                                     monkeypatch):
-    """Finding 1: session-log text is a SUSPICION, not evidence. If the
-    independent probe does not confirm unavailability, the session is an
-    ordinary failure and consumes a strike — even though the log looked
-    exactly like a quota message."""
+
+# ---------------- owner-confirmed access boundary (audit 001760 design)
+
+def _attest(root, cfg, failure_event_id, rid=RID, repo="", commit="",
+            condition="provider reported quota exhausted on the account"):
+    """The owner's authenticated attestation, bound to ONE failed attempt."""
+    from tests.council_util import append
+    return append(root, cfg, "ACCESS_BOUNDARY_CONFIRMED", "human", rid,
+                  repo, commit,
+                  payload={"bound_request_id": rid,
+                           "bound_failure_event_id": failure_event_id,
+                           "observed_condition": condition,
+                           "observed_at_utc": "2026-07-18T19:40:00Z",
+                           "disposition": "classify as auditor unavailable; "
+                                          "restore effective strike capacity",
+                           "attested_by": "owner"})
+
+
+def test_every_failure_consumes_a_strike_by_default(env, tmp_path,
+                                                    monkeypatch):
+    """Item 1: no classification suppresses a strike. Even the exact quota
+    stderr that motivated this slice now counts."""
     root, repo, head, cfg = env
     _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, True)          # provider answers: access is fine
     _publish(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     chain = events.read_chain(root)
-    assert codex_launcher.launcher_failures(chain, RID) == 1
+    assert codex_launcher.effective_launcher_failures(chain, RID) == 1
     assert _last_launcher_event(root)["payload"]["failure"] is True
 
 
-def test_indeterminate_probe_fails_closed(env, tmp_path, monkeypatch):
-    """An inconclusive probe must NOT grant a bypass."""
+def test_suspicion_is_recorded_but_carries_no_authority(env, tmp_path,
+                                                        monkeypatch):
+    """Item 2: the diagnostic hint is kept for humans and gates nothing."""
     root, repo, head, cfg = env
     _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, None, cls="probe_inconclusive")
-    _publish(root, cfg, repo, head)
-    assert codex_launcher.main(["--once"]) == 0
-    assert codex_launcher.launcher_failures(events.read_chain(root), RID) == 1
-
-
-def test_boundary_records_probe_as_its_evidence_source(env, tmp_path,
-                                                       monkeypatch):
-    """A granted boundary must name the independent probe as its evidence,
-    and record the log suspicion separately as the mere trigger."""
-    root, repo, head, cfg = env
-    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, False)
     _publish(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     payload = _last_launcher_event(root)["payload"]
-    assert payload["evidence_source"] == "independent_probe"
-    assert payload["suspected_from_log"] == "quota_exhausted"
-    assert payload["failure"] is False
+    assert payload["failure_class"] == "quota_exhausted"   # recorded...
+    assert payload["failure"] is True                      # ...but no authority
+    assert codex_launcher.AUDITOR_UNAVAILABLE_CLASSES == frozenset()
 
 
-def test_probe_lifts_the_hold_and_resumes_the_same_request(
-        env, tmp_path, monkeypatch):
-    """Finding 2: a hold must never strand the request. When the probe
-    confirms access returned, the launcher itself emits the clearance and
-    resumes the SAME request at its pinned commit — no illegal transition,
-    no fresh publish required."""
+def test_repeated_unattested_failures_still_reach_the_ceiling(env, tmp_path,
+                                                              monkeypatch):
+    """Item 7: without an attestation the strike ceiling is authoritative,
+    whatever the log says."""
     root, repo, head, cfg = env
     _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, False)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert codex_launcher.main(["--once"]) == 0
+    assert codex_launcher.main(["--once"]) == 1
+    assert events.read_chain(root)[-1]["event_type"] == "AUTONOMY_PAUSED"
+
+
+def test_attestation_compensates_without_erasing_the_record(env, tmp_path,
+                                                            monkeypatch):
+    """Items 4 and 5: the original failure remains on the immutable chain;
+    the attestation removes that ONE attempt from the EFFECTIVE count."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
     _publish(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     chain = events.read_chain(root)
-    assert codex_launcher.credential_boundary(chain, RID) is not None
+    failure = _last_launcher_event(root)
+    assert codex_launcher.effective_launcher_failures(chain, RID) == 1
 
-    _stub_probe(monkeypatch, True)          # access returns
-    assert codex_launcher.main(["--once"]) == 0
+    _attest(root, cfg, failure["event_id"], repo=repo, commit=head)
     chain = events.read_chain(root)
-    cleared = [e for e in chain
-               if e["payload"].get("credential_boundary_cleared") is True]
-    assert cleared, "the probe must be able to CLEAR the hold"
-    assert cleared[-1]["payload"]["evidence_source"] == "independent_probe"
-    assert codex_launcher.credential_boundary(chain, RID) is None
-    # the same request is still the one pending — nothing stranded, nothing
-    # re-published, and it still holds zero integration authority
-    from tools.council import state_machine
-    assert state_machine.project(chain)[RID]["state"] in ("requested",
-                                                          "claimed")
+    # effective capacity restored...
+    assert codex_launcher.effective_launcher_failures(chain, RID) == 0
+    # ...while the original strike is still there, unrewritten
+    original = [e for e in chain if e["event_id"] == failure["event_id"]]
+    assert original and original[0]["payload"]["failure"] is True
     assert events.verify_chain(root).healthy
 
 
-def test_hold_probes_once_per_pass_not_in_a_hot_loop(env, tmp_path,
-                                                     monkeypatch):
-    """Repeated passes under a persistent boundary must stay quiet: one
-    cheap probe each, no session launches, no strikes, no event spam."""
+def test_attestation_binds_one_attempt_and_never_latches(env, tmp_path,
+                                                         monkeypatch):
+    """Item 6: an attestation excuses only the attempt it names — a LATER
+    failure is not excused by an earlier outage confirmation."""
     root, repo, head, cfg = env
     _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
-    _stub_probe(monkeypatch, False)
     _publish(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
-    settled = len(events.read_chain(root))
-    for _ in range(4):
-        assert codex_launcher.main(["--once"]) == 0
+    first = _last_launcher_event(root)["event_id"]
+    _attest(root, cfg, first, repo=repo, commit=head)
+    assert codex_launcher.effective_launcher_failures(
+        events.read_chain(root), RID) == 0
+
+    assert codex_launcher.main(["--once"]) == 0          # a NEW failure
     chain = events.read_chain(root)
-    assert len(chain) == settled, "a held request must not append per pass"
-    assert codex_launcher.launcher_failures(chain, RID) == 0
+    assert codex_launcher.effective_launcher_failures(chain, RID) == 1, \
+        "an earlier attestation must not excuse a later attempt"
+
+
+def test_attestation_for_another_request_does_not_apply(env, tmp_path,
+                                                        monkeypatch):
+    """Item 6: attestations are per-request as well as per-attempt."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    failure = _last_launcher_event(root)["event_id"]
+    _attest(root, cfg, failure, rid=RID, repo=repo, commit=head)
+    # a different request id is unaffected
+    assert codex_launcher.attested_access_failures(
+        events.read_chain(root), "some-other-request") == set()
+
+
+def test_attestation_requires_human_sender():
+    """Item 3: the attestation is human-only and token-gated, so no agent
+    can forge it (this is what a non-token WATCHER_ERROR could not give)."""
+    from tools.council import schemas
+    assert schemas.SENDER_ALLOWED["ACCESS_BOUNDARY_CONFIRMED"] == \
+        frozenset({"human"})
+    assert "ACCESS_BOUNDARY_CONFIRMED" in \
+        schemas.HUMAN_TOKEN_REQUIRED_EVENT_TYPES
+
+
+def test_attestation_does_not_move_request_state(env, tmp_path, monkeypatch):
+    """The attestation is about a past ATTEMPT: it must not advance the
+    request toward any verdict or integration."""
+    from tools.council import state_machine
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    before = state_machine.project(events.read_chain(root))[RID]["state"]
+    _attest(root, cfg, _last_launcher_event(root)["event_id"],
+            repo=repo, commit=head)
+    chain = events.read_chain(root)
+    assert state_machine.project(chain)[RID]["state"] == before
+    types = {e["event_type"] for e in chain if e["request_id"] == RID}
+    assert not types & {"AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",
+                        "CHANGE_INTEGRATED"}

@@ -138,10 +138,13 @@ SESSION_FAILURE_CLASSES = (
         re.IGNORECASE)),
 )
 
-# ONLY these bypass the consecutive-failure counter. Anything unrecognized is
-# deliberately absent: unknown errors fail closed and consume a strike.
-AUDITOR_UNAVAILABLE_CLASSES = frozenset({"quota_exhausted",
-                                         "credentials_missing"})
+# RETIRED (audit 001760): no class bypasses the counter. The provider exposes
+# neither distinguishable exit codes (every failure exits 1) nor a structured,
+# session-attributable access signal, so NO agent can soundly determine why an
+# auditor session failed. Classification below is DIAGNOSTIC ONLY and carries
+# no authority. An access failure is excluded from the effective budget only
+# by an owner's authenticated, session-bound attestation.
+AUDITOR_UNAVAILABLE_CLASSES = frozenset()
 
 # "try again at Jul 22nd, 2026 9:16 PM" / "retry after 2026-07-22T21:16Z"
 _RETRY_HINT_RE = re.compile(
@@ -227,46 +230,6 @@ def _read_text(path: str) -> str:
 
 
 
-# ---------------------------------------------------- the availability probe
-#
-# Provenance comes from a source with NOTHING to echo. The probe runs the
-# auditor binary on a fixed, minimal, repository-free invocation, so every
-# byte it emits originates with the provider or its runtime. That output —
-# and only that output — is trustworthy evidence about ACCESS. The probe is
-# also the authorized clearance producer: the same call that can grant a hold
-# is the one that can lift it, so a hold can never strand a request (audit
-# 001747 finding 2).
-PROBE_ARGV_TAIL = ("--version",)
-PROBE_TIMEOUT_SECONDS = 30.0
-
-
-def probe_auditor_access(timeout: float = PROBE_TIMEOUT_SECONDS) -> tuple:
-    """(available: bool|None, failure_class, evidence).
-
-    available True  -> the auditor answered; access is NOT the problem.
-    available False -> the provider itself reported a credential/quota state.
-    available None  -> indeterminate; callers MUST fail closed (strike).
-
-    No repository content is passed in, so nothing the auditor read can
-    appear in the output being classified."""
-    try:
-        proc = subprocess.run([CODEX_BIN, *PROBE_ARGV_TAIL],
-                              capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, "probe_failed", f"probe could not run: {exc}"[:EVIDENCE_MAX]
-    blob = f"{proc.stdout}\n{proc.stderr}"
-    for name, pattern in SESSION_FAILURE_CLASSES:
-        if name in AUDITOR_UNAVAILABLE_CLASSES and pattern.search(blob):
-            line = next((ln.strip() for ln in blob.splitlines()
-                         if pattern.search(ln)), name)
-            return False, name, line[:EVIDENCE_MAX]
-    if proc.returncode == 0:
-        return True, "", (proc.stdout or proc.stderr).strip()[:EVIDENCE_MAX]
-    return None, "probe_inconclusive", \
-        (proc.stderr or proc.stdout).strip()[:EVIDENCE_MAX]
-
-
-
 def _boundary_repo(chain: list, rid: str) -> str:
     for event in reversed(chain):
         if event["request_id"] == rid and event.get("repository"):
@@ -279,6 +242,48 @@ def _boundary_commit(chain: list, rid: str) -> str:
         if event["request_id"] == rid and event.get("target_commit"):
             return event["target_commit"]
     return ""
+
+
+def attested_access_failures(chain: list, rid: str) -> set:
+    """Failure event ids the OWNER has attested were auditor-access failures.
+
+    Each attestation is authenticated (human sender + one-time token) and
+    bound to ONE specific failure event, so it can never latch into a general
+    "provider down" state affecting later sessions (audit 001760 finding 3)."""
+    attested = set()
+    for event in chain:
+        if event["event_type"] != "ACCESS_BOUNDARY_CONFIRMED":
+            continue
+        payload = event["payload"]
+        if payload.get("bound_request_id") != rid:
+            continue
+        bound = payload.get("bound_failure_event_id")
+        if bound:
+            attested.add(bound)
+    return attested
+
+
+def effective_launcher_failures(chain: list, rid: str) -> int:
+    """The strike count that governs the ceiling.
+
+    The immutable record keeps every failure exactly as it happened; an
+    owner-attested access failure is COMPENSATED OUT of this effective count
+    rather than erased (audit 001760 / owner directive item 4)."""
+    attested = attested_access_failures(chain, rid)
+    count = 0
+    for event in chain:
+        if event["request_id"] != rid:
+            continue
+        etype = event["event_type"]
+        if etype in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT",
+                     "RESULT_AUDIT_REQUESTED"):
+            count = 0
+        elif etype == "WATCHER_ERROR" and \
+                event["payload"].get("phase") == "codex_launcher" and \
+                event["payload"].get("failure") is True and \
+                event["event_id"] not in attested:
+            count += 1
+    return count
 
 
 def credential_boundary(chain: list, rid: str) -> dict | None:
@@ -479,7 +484,7 @@ def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
                                  "evidence_source": "session_log_only",
                                  "stdout_log": logs[0], "stderr_log": logs[1]})
     chain = events.read_chain(root)
-    failures = launcher_failures(chain, rid)
+    failures = effective_launcher_failures(chain, rid)
     if failures >= MAX_CONSECUTIVE_FAILURES:
         events.pause_autonomy(
             root, cfg, SENDER, rid, repo, commit,
@@ -603,32 +608,6 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
     # session would only re-prove the same environmental fact. A new publish
     # (fresh cycle) or an explicit recorded clearance lifts it — access
     # returning is OBSERVED, never assumed by a timer.
-    boundary = credential_boundary(chain, rid)
-    if boundary is not None:
-        # A hold NEVER strands the request: exactly one cheap probe per pass
-        # decides whether to lift it. Access returning is OBSERVED, never
-        # assumed from a recorded retry hint (which is evidence only).
-        available, _cls, probe_evidence = probe_auditor_access()
-        if available is not True:
-            hint = boundary.get("earliest_retry_hint") or "unknown"
-            print(f"codex_launcher: {rid} held — auditor still unavailable "
-                  f"({boundary.get('failure_class')}); recorded hint: {hint}. "
-                  "One probe per pass; no session launched.", file=sys.stderr)
-            return "auditor_unavailable"
-        events.append_event(
-            root, cfg, "WATCHER_ERROR", SENDER, rid,
-            boundary.get("repository", "") or _boundary_repo(chain, rid),
-            _boundary_commit(chain, rid),
-            {"phase": "codex_launcher", "failure": False,
-             "credential_boundary_cleared": True,
-             "evidence_source": "independent_probe",
-             "probe_evidence": probe_evidence,
-             "reason": "independent probe confirmed auditor access returned; "
-                       "resuming the SAME request at its pinned commit — a "
-                       "fresh authorized audit is still required"})
-        print(f"codex_launcher: {rid} — probe confirms access returned; "
-              "boundary cleared, resuming the same request")
-        chain = events.read_chain(root)
     try:
         prompt, repo, commit = build_audit_prompt(root, cfg, rid, kind)
     except RequestIntegrityError as exc:
@@ -696,26 +675,14 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
     # recognized credential/quota boundaries take this path; every other
     # class — content filter, crash, malformed output, unknown — still
     # consumes a strike and can still reach the pause (fail closed).
+    # EVERY unsuccessful launch records a failure and consumes a strike.
+    # The classifier's output is an UNTRUSTED diagnostic hint with no
+    # authority to suppress a strike, hold a request, alter candidate
+    # status, or trigger resumption (audit 001760).
     suspected, hint_evidence = classify_session_failure(_read_text(logs[1]))
-    outcome = None
-    if suspected in AUDITOR_UNAVAILABLE_CLASSES:
-        # the session log only RAISES A SUSPICION; an independent probe with
-        # nothing to echo decides. Indeterminate probes fail closed.
-        available, probe_class, probe_evidence = probe_auditor_access()
-        if available is False:
-            outcome = _record_auditor_unavailable(
-                cfg, root, rid, kind, repo, commit, reason, probe_class,
-                probe_evidence, retry_hint(_read_text(logs[1])), logs,
-                suspected_from_log=suspected)
-        else:
-            print(f"codex_launcher: log suggested {suspected!r} but the "
-                  f"independent probe did not confirm it "
-                  f"(available={available!r}) — counting as a failure",
-                  file=sys.stderr)
-    if outcome is None:
-        outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
-                                  logs, failure_class=suspected,
-                                  evidence=hint_evidence)
+    outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
+                              logs, failure_class=suspected,
+                              evidence=hint_evidence)
     if state_now == "claimed" and kind in (
             "source_audit", "source_audit_resume", "result_audit"):
         # Clear only the lock this exact bounded session can prove it owns.
