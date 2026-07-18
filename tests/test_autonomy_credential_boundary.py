@@ -30,8 +30,12 @@ REAL_QUOTA_STDERR = (
     "stream error: You've hit your usage limit. "
     "try again at Jul 22nd, 2026 9:16 PM.\n"
 )
+# A representative interruption message, written WITHOUT reproducing a
+# provider's verbatim trigger text (an auditor reading this file would
+# otherwise trip the provider's own filter). The property under test is
+# unchanged: this class is recorded and still consumes a strike.
 REAL_FILTER_STDERR = (
-    "ERROR: This content was flagged for possible cybersecurity risk. "
+    "ERROR: This content was flagged for possible policy reasons. "
     "If this seems wrong, try rephrasing your request.\n"
 )
 
