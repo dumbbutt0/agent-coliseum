@@ -83,6 +83,8 @@ decision_points:
 
 variants:
   - variant_id: v0_caravan
+    rewords: v0_caravan
+    payload_sha256: c101b55703e7accb98685710b245c111acdb2f04fdd80c5418a8302643b5b005
     intro: >
       Between the river towns runs your small trading caravan — yours to steer,
       season by season, alongside one long-standing partner. How you weigh your
@@ -103,6 +105,8 @@ variants:
         Now the proposal — your partner offers to pool wagons and stores for
         the winter run, an even split, and wants an answer before the frost.
   - variant_id: v1_workshop
+    rewords: v1_workshop
+    payload_sha256: f114634982f19ec4f5460b3e3cacffdb2558026d4cdb8776daf5f89e27bfcd07
     intro: >
       In the lower quarter stands your independent workshop — yours alone,
       though for years one partner has shared its commissions. What you make of

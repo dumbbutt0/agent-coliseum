@@ -286,6 +286,19 @@ def experience_multiset(s: Scenario) -> dict:
     return counts
 
 
+
+def variant_payload_hash(variant: dict) -> str:
+    """sha256 over a variant's agent-facing payload (intro + decision_texts).
+
+    Used to commit a sham-control payload to its positional slot: selection is
+    positional, so identifiers alone cannot prove which text a seed receives."""
+    import hashlib
+    from .schema import canonical_json
+    body = {"intro": variant.get("intro", ""),
+            "decision_texts": variant.get("decision_texts")}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+
+
 def _dp_raw(dp) -> dict:
     return {"dp_id": dp.dp_id, "available_actions": list(dp.available_actions),
             "authority_pressure": dp.authority_pressure,
@@ -412,6 +425,33 @@ def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
         issues.append("C: variant_id list order differs from A — seed-to-"
                       "variant selection is positional, so slot order must "
                       "match for A|C to be a same-seed wording comparison")
+    # payload-to-slot binding (audit 001700): matching ids in matching order
+    # are NOT sufficient — C's two payloads can be exchanged while the ids
+    # stay put, so a seed records one slot identity while receiving the other
+    # slot's text. Each C variant must therefore DECLARE which A slot it
+    # rewords and COMMIT its own payload by hash. Exchanging payloads breaks
+    # the committed hash; recomputing the hash changes scramble_sham's
+    # behavioral_hash, which the scenario registry pins (revision-bound
+    # identity), so both routes are refused.
+    for pos, cv in enumerate(c.variants):
+        where = f"C slot {pos} ({cv.get('variant_id')!r})"
+        declared = cv.get("rewords")
+        expected = a.variants[pos]["variant_id"] if pos < len(a.variants) else None
+        if declared is None:
+            issues.append(f"{where}: missing 'rewords' — each sham slot must "
+                          "declare which A slot it rewords")
+        elif declared != expected:
+            issues.append(f"{where}: rewords {declared!r} but occupies the "
+                          f"slot of A's {expected!r}")
+        committed = cv.get("payload_sha256")
+        actual = variant_payload_hash(cv)
+        if committed is None:
+            issues.append(f"{where}: missing 'payload_sha256' — the sham "
+                          "payload must be committed to its slot")
+        elif committed != actual:
+            issues.append(f"{where}: payload_sha256 {str(committed)[:12]}… != "
+                          f"recomputed {actual[:12]}… — the agent-facing "
+                          "payload is not the one committed to this slot")
     for twin, name in ((b, "B"), (c, "C")):
         if twin.control_of != a.scenario_id:
             issues.append(f"{name}: control_of != {a.scenario_id!r}")

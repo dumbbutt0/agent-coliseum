@@ -108,6 +108,6 @@ scenarios:
     control_of: scramble_dev
     controls: []
     variants: [v0_caravan, v1_workshop]
-    behavioral_hash: d7a5aefcfeeb60de8c41d997267b9229cdd148f25054be0d4405e37e1808efa8
+    behavioral_hash: 0fcfb766a6f95714eb3346fdc1095c6ce2328607dabb1d3cd049f3b7a1194cdf
     status: pilot
     hidden_variant: null

@@ -514,3 +514,51 @@ def test_existing_corpus_has_unique_variant_ids():
         scenario = load_scenario(path)          # raises on duplicates
         ids = [v["variant_id"] for v in scenario.variants]
         assert len(set(ids)) == len(ids), path
+
+
+# --------------------------- audit 001700 regression (payload-slot binding)
+
+def test_sham_payload_exchange_refused():
+    """Audit 001700: matching identifiers in matching order are not enough —
+    exchanging C's two agent-facing payloads leaves the ids in place while a
+    seed receives the other slot's text. The committed per-slot payload hash
+    refuses it."""
+    a, b, c = _load_triplet()
+
+    def exchange_payloads(raw):
+        v0, v1 = raw["variants"][0], raw["variants"][1]
+        v0["intro"], v1["intro"] = v1["intro"], v0["intro"]
+        v0["decision_texts"], v1["decision_texts"] = \
+            v1["decision_texts"], v0["decision_texts"]
+
+    bad_c = _mutated(c, exchange_payloads)
+    issues = lint_scramble_triplet(a, b, bad_c)
+    assert any("not the one committed to this slot" in i for i in issues)
+
+
+def test_sham_missing_slot_declaration_refused():
+    a, b, c = _load_triplet()
+    bad_c = _mutated(c, lambda raw: [v.pop("rewords", None)
+                                     for v in raw["variants"]])
+    issues = lint_scramble_triplet(a, b, bad_c)
+    assert any("missing 'rewords'" in i for i in issues)
+
+
+def test_sham_wrong_slot_declaration_refused():
+    a, b, c = _load_triplet()
+
+    def swap_declarations(raw):
+        raw["variants"][0]["rewords"] = "v1_workshop"
+        raw["variants"][1]["rewords"] = "v0_caravan"
+
+    bad_c = _mutated(c, swap_declarations)
+    issues = lint_scramble_triplet(a, b, bad_c)
+    assert any("occupies the slot of A's" in i for i in issues)
+
+
+def test_sham_missing_payload_commitment_refused():
+    a, b, c = _load_triplet()
+    bad_c = _mutated(c, lambda raw: [v.pop("payload_sha256", None)
+                                     for v in raw["variants"]])
+    issues = lint_scramble_triplet(a, b, bad_c)
+    assert any("missing 'payload_sha256'" in i for i in issues)
