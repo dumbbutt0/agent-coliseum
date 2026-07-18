@@ -382,7 +382,8 @@ def test_triplet_rejects_b_variant_text_drift():
 
     bad_b = _mutated(b, reword_variant)
     issues = lint_scramble_triplet(a, bad_b, c)
-    assert any("variant intro/decision_texts differ" in i for i in issues)
+    assert any("variant list differs from A in order or content" in i
+               for i in issues)
 
 
 def test_event_dp_side_channel_refused():
@@ -439,3 +440,33 @@ def test_choice_dependent_successor_refused():
 
     with pytest.raises(SchemaError, match="successor is choice-DEPENDENT"):
         experience_sequence(_mutated(a, branch))
+
+
+# --------------------------- audit 001678 regression (cycle-3 hardening)
+
+def test_triplet_rejects_reordered_b_variant_list():
+    """Audit 001678: pick_variant selects by LIST POSITION, so reversing B's
+    otherwise-unchanged variant list changes which paraphrase each seed
+    delivers — a content-divergence channel that must be refused."""
+    a, b, c = _load_triplet()
+
+    def reverse_variants(raw):
+        raw["variants"] = list(reversed(raw["variants"]))
+
+    bad_b = _mutated(b, reverse_variants)
+    issues = lint_scramble_triplet(a, bad_b, c)
+    assert any("variant list differs from A in order" in i for i in issues)
+
+
+def test_triplet_rejects_reordered_c_variant_list():
+    """Audit 001678: the same positional-selection rule applies to C — its
+    slots are reworded but the slot ORDER must match A's, else A|C compares
+    different paraphrase slots for the same seed."""
+    a, b, c = _load_triplet()
+
+    def reverse_variants(raw):
+        raw["variants"] = list(reversed(raw["variants"]))
+
+    bad_c = _mutated(c, reverse_variants)
+    issues = lint_scramble_triplet(a, b, bad_c)
+    assert any("variant_id list order differs from A" in i for i in issues)

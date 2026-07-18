@@ -333,14 +333,20 @@ def _b_equivalence_issues(a: Scenario, b: Scenario) -> list:
         if a.raw.get(key) != b.raw.get(key):
             issues.append(f"B differs from A in behavioral key {key!r} — "
                           "order is the only permitted difference")
-    a_texts = {v["variant_id"]: (v.get("intro", ""), v.get("decision_texts"))
-               for v in a.variants}
-    b_texts = {v["variant_id"]: (v.get("intro", ""), v.get("decision_texts"))
-               for v in b.variants}
-    if a_texts != b_texts:
-        issues.append("B: variant intro/decision_texts differ from A — "
-                      "wording drift is a content confound, not an order "
-                      "manipulation")
+    # ORDERED comparison (audit 001678): pick_variant selects by LIST POSITION
+    # (variants[seed % len]), so the variant LIST — ids, order, and content —
+    # must be identical, not merely equal as an unordered mapping. A reordered
+    # but otherwise unchanged list would silently deliver different wording
+    # for the same seed.
+    a_vars = [(v["variant_id"], v.get("intro", ""), v.get("decision_texts"))
+              for v in a.variants]
+    b_vars = [(v["variant_id"], v.get("intro", ""), v.get("decision_texts"))
+              for v in b.variants]
+    if a_vars != b_vars:
+        issues.append("B: variant list differs from A in order or content — "
+                      "seed-to-variant selection is positional, so list "
+                      "drift changes the delivered wording (content "
+                      "confound, not an order manipulation)")
     # outcome rules: narratives, deferred consequences, and COMPLETE deltas
     # must match A's modulo val_pos renumbering; successors must follow each
     # scenario's own declared chain (validated by _walked_dps)
@@ -389,6 +395,14 @@ def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
     if a_texts == c_texts:
         issues.append("C's variant text is byte-identical to A — a sham "
                       "control must actually change the surface form")
+    # positional alignment (audit 001678): C rewords each SLOT, but the slot
+    # sequence must match A's — pick_variant is positional, so a reordered
+    # variant_id list would compare different paraphrase slots per seed
+    if [v["variant_id"] for v in a.variants] != \
+            [v["variant_id"] for v in c.variants]:
+        issues.append("C: variant_id list order differs from A — seed-to-"
+                      "variant selection is positional, so slot order must "
+                      "match for A|C to be a same-seed wording comparison")
     for twin, name in ((b, "B"), (c, "C")):
         if twin.control_of != a.scenario_id:
             issues.append(f"{name}: control_of != {a.scenario_id!r}")
