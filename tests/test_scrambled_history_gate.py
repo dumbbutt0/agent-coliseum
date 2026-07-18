@@ -470,3 +470,46 @@ def test_triplet_rejects_reordered_c_variant_list():
     bad_c = _mutated(c, reverse_variants)
     issues = lint_scramble_triplet(a, b, bad_c)
     assert any("variant_id list order differs from A" in i for i in issues)
+
+
+# --------------------------- audit 001683 regression (cycle-4 hardening)
+
+def test_duplicate_variant_ids_refused_at_validation():
+    """Audit 001683: variant selection is positional, so colliding
+    variant_ids make slot identity ambiguous — two positions carrying the
+    same id can swap content behind an unchanged-looking id sequence.
+    Refused for every scenario at validation, not just gate triplets."""
+    for path in (A_PATH, B_PATH, C_PATH):
+        scenario = load_scenario(path)
+
+        def collide(raw):
+            for v in raw["variants"]:
+                v["variant_id"] = "duplicate_slot"
+
+        with pytest.raises(SchemaError, match="duplicate variant_id"):
+            _mutated(scenario, collide)
+
+
+def test_reversed_duplicate_id_sham_cannot_be_accepted():
+    """Audit 001683's exact exploit: with both C slots sharing one id, the
+    compared id sequence is reversal-invariant — so the collision itself must
+    be unconstructible, closing the A/C slot-misalignment channel."""
+    c = load_scenario(C_PATH)
+
+    def collide_and_reverse(raw):
+        for v in raw["variants"]:
+            v["variant_id"] = "duplicate_slot"
+        raw["variants"] = list(reversed(raw["variants"]))
+
+    with pytest.raises(SchemaError, match="duplicate variant_id"):
+        _mutated(c, collide_and_reverse)
+
+
+def test_existing_corpus_has_unique_variant_ids():
+    """The uniqueness rule is repo-wide (pick_variant is positional
+    everywhere), so the whole authored corpus must satisfy it."""
+    import glob
+    for path in sorted(glob.glob(os.path.join(SCEN_DIR, "*.yaml"))):
+        scenario = load_scenario(path)          # raises on duplicates
+        ids = [v["variant_id"] for v in scenario.variants]
+        assert len(set(ids)) == len(ids), path

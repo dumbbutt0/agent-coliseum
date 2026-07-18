@@ -91,6 +91,15 @@ def build_scenario(raw: dict, where: str) -> Scenario:
     variants = _req(raw, "variants", where)
     if len(variants) < 2:
         raise SchemaError(f"{where}: needs >=2 paraphrase variants, got {len(variants)}")
+    # variant_ids must be UNIQUE: pick_variant selects by LIST POSITION
+    # (variants[seed % len]), so a colliding id makes slot identity ambiguous —
+    # two positions could carry the same id while delivering different text,
+    # hiding a content swap behind an unchanged-looking id sequence.
+    vids = [v.get("variant_id") for v in variants]
+    if len(set(vids)) != len(vids):
+        raise SchemaError(f"{where}: duplicate variant_id in {vids} — "
+                          "variant selection is positional, so ids must "
+                          "uniquely identify their slot")
     for v in variants:
         vid = _req(v, "variant_id", f"{where}.variants")
         lint_agent_facing(v.get("intro", ""), f"{where}.{vid}.intro")
