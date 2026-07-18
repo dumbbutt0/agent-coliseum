@@ -279,3 +279,67 @@ def test_chain_stays_verifiable_across_a_boundary(env, tmp_path, monkeypatch):
     _publish(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     assert events.verify_chain(root).healthy
+
+
+# ------------------------------------------- the evidence boundary
+#
+# The dangerous direction is a FALSE boundary: echoed text minting a
+# credential class would SKIP a strike and hide a real failure. A session log
+# is mostly material the auditor READ — chain events, request payloads,
+# source — which routinely contains these very words (this feature's own
+# commit message says "usage limit"). Only a bounded terminal region of
+# unstructured diagnostic lines may be evidence about the auditor's ACCESS.
+
+ECHOED_CHAIN_PAYLOAD = (
+    '{"event_id":"001592-d791eafd","event_type":"BUILD_STARTED",'
+    '"payload":{"reason":"quota exhausted; usage limit reached",'
+    '"scope":["not logged in"]},"request_id":"r-1"}\n'
+)
+
+
+def test_echoed_payload_words_never_mint_a_boundary():
+    """The exact hazard: quota/credential words inside echoed structured
+    payloads must NOT be read as evidence about the auditor's access."""
+    crash = ECHOED_CHAIN_PAYLOAD + "Traceback (most recent call last):\nboom\n"
+    cls, _ = codex_launcher.classify_session_failure(crash)
+    assert cls == "unknown", "echoed payload text minted a false class"
+    assert cls not in codex_launcher.AUDITOR_UNAVAILABLE_CLASSES
+
+
+def test_echoed_payload_before_a_genuine_boundary_still_classifies():
+    """Bulk echoed material must not SUPPRESS a real terminal diagnostic."""
+    text = ECHOED_CHAIN_PAYLOAD * 50 + REAL_QUOTA_STDERR
+    cls, evidence = codex_launcher.classify_session_failure(text)
+    assert cls == "quota_exhausted"
+    assert "usage limit" in evidence
+    assert '"event_id"' not in evidence, "evidence must be the diagnostic"
+
+
+def test_buried_diagnostic_outside_the_terminal_region_is_not_evidence():
+    """A provider's terminal error is terminal. A quota-shaped line buried
+    thousands of lines up is echoed material, not this session's outcome."""
+    buried = REAL_QUOTA_STDERR + ("noise line\n" * 200)
+    assert codex_launcher.classify_session_failure(buried)[0] == "unknown"
+
+
+def test_long_structured_lines_are_not_diagnostics():
+    """A 500+ char line is bulk output, never a provider message."""
+    long_line = "x" * 600 + " you've hit your usage limit\n"
+    assert codex_launcher.classify_session_failure(long_line)[0] == "unknown"
+
+
+def test_retry_hint_reads_the_same_bounded_region():
+    """A hint inside echoed payload text must not be harvested."""
+    echoed = '{"payload":{"note":"try again at Jan 1st, 1999"}}\nboom\n'
+    assert codex_launcher.retry_hint(echoed) == ""
+
+
+def test_real_stranded_session_log_is_not_a_credential_boundary():
+    """Replay of the real 2026-07-18 safe-008 log: ~448KB of echoed chain
+    events containing the word 'quota', from a session whose launcher died
+    before accounting. It must classify as unknown and therefore fail
+    closed — that incident was NOT an access boundary."""
+    sample = ECHOED_CHAIN_PAYLOAD * 300      # same shape, bounded size
+    cls, _ = codex_launcher.classify_session_failure(sample)
+    assert cls == "unknown"
+    assert cls not in codex_launcher.AUDITOR_UNAVAILABLE_CLASSES

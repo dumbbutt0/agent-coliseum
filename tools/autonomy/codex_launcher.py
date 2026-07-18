@@ -144,21 +144,51 @@ _RETRY_HINT_RE = re.compile(
 
 EVIDENCE_MAX = 400
 
+# --- the evidence boundary -------------------------------------------------
+# A provider's terminal diagnostic appears at the END of the stream, on its
+# own short line. The bulk of a session log is ECHOED material the auditor
+# read — chain events, request payloads, source text — which routinely
+# contains the very words these patterns look for (this file's own commit
+# message says "usage limit"). Matching anywhere in the stream would let
+# echoed text mint a false credential boundary and SKIP a strike, hiding a
+# real failure. So classification reads only a bounded terminal region and
+# only lines that look like diagnostics, never structured/echoed payloads.
+DIAGNOSTIC_TAIL_LINES = 40      # provider errors are terminal, not buried
+DIAGNOSTIC_MAX_LINE = 500       # a longer line is bulk output, not a message
+# markers of echoed structured material (chain events, request payloads, JSON)
+_ECHOED_MARKERS = ('"event_id"', '"event_hash"', '"request_id"', '"payload"',
+                   '"target_commit"', '"schema_version"', '"scope"',
+                   '"blockers_addressed"', '"expected_test_command"')
+
+
+def diagnostic_lines(stderr_text: str) -> list:
+    """The bounded, unstructured terminal region a provider diagnostic can
+    legitimately occupy. Everything else is echoed material and is NOT
+    evidence about the auditor's access."""
+    out = []
+    for raw in (stderr_text or "").splitlines()[-DIAGNOSTIC_TAIL_LINES:]:
+        line = raw.strip()
+        if not line or len(line) > DIAGNOSTIC_MAX_LINE:
+            continue
+        if line[:1] in "{[" or any(m in line for m in _ECHOED_MARKERS):
+            continue                      # echoed structured payload
+        out.append(line)
+    return out
+
 
 def classify_session_failure(stderr_text: str) -> tuple:
     """(class, evidence_line) for a session that produced no verdict.
 
     Pure function over the auditor's own stderr — no clock, no chain, no
-    process state, so it is fully testable and replay-stable. Returns
-    ("unknown", "") when nothing is recognized; unknown NEVER bypasses the
-    failure budget."""
-    text = stderr_text or ""
+    process state, so it is fully testable and replay-stable. Only the
+    bounded diagnostic region is consulted (see diagnostic_lines), so echoed
+    chain payloads or source text mentioning these words can never mint a
+    boundary. Returns ("unknown", "") when nothing is recognized; unknown
+    NEVER bypasses the failure budget."""
     for name, pattern in SESSION_FAILURE_CLASSES:
-        match = pattern.search(text)
-        if match:
-            line = next((ln.strip() for ln in text.splitlines()
-                         if pattern.search(ln)), match.group(0))
-            return name, line[:EVIDENCE_MAX]
+        for line in diagnostic_lines(stderr_text):
+            if pattern.search(line):
+                return name, line[:EVIDENCE_MAX]
     return "unknown", ""
 
 
@@ -166,8 +196,11 @@ def retry_hint(stderr_text: str) -> str:
     """The provider's stated earliest-retry condition, verbatim and
     uninterpreted ("" when absent). Recorded as evidence; never parsed into a
     clock decision, so a garbled hint can never silently extend a block."""
-    match = _RETRY_HINT_RE.search(stderr_text or "")
-    return match.group(1).strip()[:EVIDENCE_MAX] if match else ""
+    for line in diagnostic_lines(stderr_text):
+        match = _RETRY_HINT_RE.search(line)
+        if match:
+            return match.group(1).strip()[:EVIDENCE_MAX]
+    return ""
 
 
 def _read_text(path: str) -> str:
