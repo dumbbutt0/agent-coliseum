@@ -22,16 +22,13 @@ from typing import Any
 
 from tools.council.schemas import domain_hash
 
-from .core import HSCValidationError, file_id, filesystem_id
-from .inventory import observe_root
-from .native import fail_closed
+from .native import enrolled_anchor, fail_closed
 from .records import make_record, record_ref
 
 _AUTH_ENTRY = "council:section-launch-authorization-entry:v1"
 _ASSIGN_ENTRY = "council:section-assignment-entry:v1"
 _RECEIPT_ENTRY = "council:section-launch-receipt-entry:v1"
 _JOURNAL_ROOT = "council:scheduler-journal-root:v1"
-_NATIVE_ANCHOR = "council:native-anchor:v1"
 _MODE_0700 = "0700"
 
 
@@ -49,25 +46,19 @@ def _verify_journal_anchor(journal_root_fd: int, journal_anchor: dict) -> dict:
     must byte-equal that observation, reconstruct the same ids, be a real 0700
     protected directory, and reconstruct the canonical
     ``council:native-anchor:v1`` id. A caller never supplies the anchor id."""
-    observation = observe_root(journal_root_fd)  # requires a directory
-    if observation["native_mode"] & 0o7777 != 0o700:
-        fail_closed("journal root is not a 0700 protected directory")
-    if observation != journal_anchor["native_identity"]:
+    # One canonical native-anchor derivation, shared with the inventory-plan
+    # expander (native.enrolled_anchor); the 0700 mode is enforced there.
+    live = enrolled_anchor(journal_root_fd, journal_anchor["anchor_name"],
+                           require_mode=0o700)
+    if live["native_identity"] != journal_anchor["native_identity"]:
         fail_closed("journal directory differs from its enrolled anchor")
-    fs_id = filesystem_id(observation)
-    file = file_id(observation)
-    if (fs_id, file) != (journal_anchor["filesystem_id"],
-                         journal_anchor["file_id"]):
+    if (live["filesystem_id"], live["file_id"]) != \
+            (journal_anchor["filesystem_id"], journal_anchor["file_id"]):
         fail_closed("journal anchor ids do not reconstruct from its observation")
-    anchor_id = domain_hash(_NATIVE_ANCHOR, {
-        "anchor_name": journal_anchor["anchor_name"],
-        "file_id": file,
-        "filesystem_id": fs_id,
-        "native_identity": observation,
-    })
-    return {"observation": observation, "filesystem_id": fs_id,
-            "file_id": file, "anchor_id": anchor_id,
-            "anchor_name": journal_anchor["anchor_name"]}
+    return {"observation": live["native_identity"],
+            "filesystem_id": live["filesystem_id"],
+            "file_id": live["file_id"], "anchor_id": live["anchor_id"],
+            "anchor_name": live["anchor_name"]}
 
 
 def _persist_records(journal_root_fd: int, first_sequence: int,

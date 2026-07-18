@@ -22,8 +22,12 @@ import ctypes
 import os
 from typing import Any
 
+from tools.council.schemas import domain_hash
+
 from .core import (HSCValidationError, file_id, filesystem_id,
                    validate_native_observation)
+
+_NATIVE_ANCHOR = "council:native-anchor:v1"
 
 
 class NativeIdentityUnavailable(HSCValidationError):
@@ -226,6 +230,38 @@ def observe_ids(anchor_fd: int, name: bytes, *,
     """``(observation, filesystem_id, file_id)`` for one native target."""
     observation = observe(anchor_fd, name, directory=directory)
     return observation, filesystem_id(observation), file_id(observation)
+
+
+def enrolled_anchor(dir_fd: int, anchor_name: str, *,
+                    require_mode: int | None = None) -> dict[str, Any]:
+    """Resolve the trusted root-owned registry row for an already-open no-follow
+    directory descriptor (design §6.0 lines 442-460).
+
+    The enrolled row is exactly ``anchor_name`` plus the frozen
+    ``NATIVE_ID_OBSERVATION`` and its two derived ids; ``anchor_id`` is
+    reconstructed by the canonical ``council:native-anchor:v1`` derivation, never
+    supplied by a caller. ``require_mode`` (e.g. ``0o700`` for a protected
+    journal) fails closed unless the directory's permission bits match exactly.
+    Returns ``{anchor_name, anchor_id, native_identity, filesystem_id,
+    file_id}``."""
+    observation = observe_fd(dir_fd)
+    if observation["file_type"] != "directory":
+        fail_closed("an enrolled anchor must be a directory")
+    if require_mode is not None and \
+            (observation["native_mode"] & 0o7777) != require_mode:
+        fail_closed(f"anchor {anchor_name!r} is not a "
+                    f"{require_mode:04o} protected directory")
+    fs_id = filesystem_id(observation)
+    fid = file_id(observation)
+    anchor_id = domain_hash(_NATIVE_ANCHOR, {
+        "anchor_name": anchor_name,
+        "file_id": fid,
+        "filesystem_id": fs_id,
+        "native_identity": observation,
+    })
+    return {"anchor_name": anchor_name, "anchor_id": anchor_id,
+            "native_identity": observation, "filesystem_id": fs_id,
+            "file_id": fid}
 
 
 def probe_availability() -> None:
