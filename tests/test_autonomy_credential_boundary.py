@@ -46,6 +46,14 @@ def env(tmp_path, monkeypatch):
     return root, repo, head, cfg
 
 
+def _stub_probe(monkeypatch, available, cls="quota_exhausted",
+                evidence="probe: usage limit reached"):
+    """The independent probe is the ONLY evidence of access. Tests state
+    explicitly what the provider says when asked directly."""
+    monkeypatch.setattr(codex_launcher, "probe_auditor_access",
+                        lambda timeout=None: (available, cls, evidence))
+
+
 def _install_fake_codex(tmp_path, monkeypatch, stderr_text: str,
                         exit_code: int = 1) -> None:
     """A fake auditor that emits the given stderr and exits without ever
@@ -122,6 +130,11 @@ def test_real_quota_incident_records_boundary_without_a_strike(
     boundary and spends no strike."""
     root, repo, head, cfg = env
     _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, False)
+    _stub_probe(monkeypatch, False)
+    _stub_probe(monkeypatch, False)
+    _stub_probe(monkeypatch, False)
+    _stub_probe(monkeypatch, False)
     _publish(root, cfg, repo, head)
 
     assert codex_launcher.main(["--once"]) == 0
@@ -343,3 +356,93 @@ def test_real_stranded_session_log_is_not_a_credential_boundary():
     cls, _ = codex_launcher.classify_session_failure(sample)
     assert cls == "unknown"
     assert cls not in codex_launcher.AUDITOR_UNAVAILABLE_CLASSES
+
+
+# ------------------- audit 001747: provenance + guaranteed resumption
+
+def test_log_suspicion_alone_never_grants_a_boundary(env, tmp_path,
+                                                     monkeypatch):
+    """Finding 1: session-log text is a SUSPICION, not evidence. If the
+    independent probe does not confirm unavailability, the session is an
+    ordinary failure and consumes a strike — even though the log looked
+    exactly like a quota message."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, True)          # provider answers: access is fine
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    chain = events.read_chain(root)
+    assert codex_launcher.launcher_failures(chain, RID) == 1
+    assert _last_launcher_event(root)["payload"]["failure"] is True
+
+
+def test_indeterminate_probe_fails_closed(env, tmp_path, monkeypatch):
+    """An inconclusive probe must NOT grant a bypass."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, None, cls="probe_inconclusive")
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert codex_launcher.launcher_failures(events.read_chain(root), RID) == 1
+
+
+def test_boundary_records_probe_as_its_evidence_source(env, tmp_path,
+                                                       monkeypatch):
+    """A granted boundary must name the independent probe as its evidence,
+    and record the log suspicion separately as the mere trigger."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, False)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    payload = _last_launcher_event(root)["payload"]
+    assert payload["evidence_source"] == "independent_probe"
+    assert payload["suspected_from_log"] == "quota_exhausted"
+    assert payload["failure"] is False
+
+
+def test_probe_lifts_the_hold_and_resumes_the_same_request(
+        env, tmp_path, monkeypatch):
+    """Finding 2: a hold must never strand the request. When the probe
+    confirms access returned, the launcher itself emits the clearance and
+    resumes the SAME request at its pinned commit — no illegal transition,
+    no fresh publish required."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, False)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    chain = events.read_chain(root)
+    assert codex_launcher.credential_boundary(chain, RID) is not None
+
+    _stub_probe(monkeypatch, True)          # access returns
+    assert codex_launcher.main(["--once"]) == 0
+    chain = events.read_chain(root)
+    cleared = [e for e in chain
+               if e["payload"].get("credential_boundary_cleared") is True]
+    assert cleared, "the probe must be able to CLEAR the hold"
+    assert cleared[-1]["payload"]["evidence_source"] == "independent_probe"
+    assert codex_launcher.credential_boundary(chain, RID) is None
+    # the same request is still the one pending — nothing stranded, nothing
+    # re-published, and it still holds zero integration authority
+    from tools.council import state_machine
+    assert state_machine.project(chain)[RID]["state"] in ("requested",
+                                                          "claimed")
+    assert events.verify_chain(root).healthy
+
+
+def test_hold_probes_once_per_pass_not_in_a_hot_loop(env, tmp_path,
+                                                     monkeypatch):
+    """Repeated passes under a persistent boundary must stay quiet: one
+    cheap probe each, no session launches, no strikes, no event spam."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, REAL_QUOTA_STDERR)
+    _stub_probe(monkeypatch, False)
+    _publish(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    settled = len(events.read_chain(root))
+    for _ in range(4):
+        assert codex_launcher.main(["--once"]) == 0
+    chain = events.read_chain(root)
+    assert len(chain) == settled, "a held request must not append per pass"
+    assert codex_launcher.launcher_failures(chain, RID) == 0
