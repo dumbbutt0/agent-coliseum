@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -100,6 +101,105 @@ def actionable(chain: list, requests: dict) -> list:
             for rid, req in requests.items()
             if req["state"] in TRIGGER_STATES]
     return [(rid, kind) for _i, rid, kind in sorted(work)]
+
+
+# ---------------------------------------------------- session failure classes
+#
+# An auditor being UNAVAILABLE is not a candidate FAILING. A hard credential or
+# usage-quota boundary is an environmental fact about the auditor's access; it
+# says nothing about the audited commit, so it must not consume the bounded
+# failure budget that exists to stop a genuinely broken build-audit loop.
+# Everything else — including content-filter interruptions, crashes, malformed
+# auditor output, and unknown errors — still counts and still fails closed.
+SESSION_FAILURE_CLASSES = (
+    # (class, provider-agnostic signature)
+    ("quota_exhausted", re.compile(
+        r"usage limit|rate limit reached|quota (?:exceeded|exhausted)|"
+        r"insufficient_quota|billing (?:hard )?limit|"
+        r"you(?:'| ha)ve (?:hit|reached) your .{0,40}limit", re.IGNORECASE)),
+    ("credentials_missing", re.compile(
+        r"not (?:logged in|authenticated|signed in)|invalid api key|"
+        r"missing api key|expired (?:token|credential|session)|"
+        r"401 unauthorized|authentication (?:failed|required)", re.IGNORECASE)),
+    ("content_filter", re.compile(
+        r"flagged for possible cybersecurity risk|content(?:_| )?filter|"
+        r"was flagged|refused to (?:continue|comply)", re.IGNORECASE)),
+    ("network", re.compile(
+        r"connection (?:refused|reset|timed out)|temporary failure in name "
+        r"resolution|network is unreachable|dns", re.IGNORECASE)),
+    ("malformed_output", re.compile(
+        r"verdict schema|invalid verdict|malformed json|json decode",
+        re.IGNORECASE)),
+)
+
+# ONLY these bypass the consecutive-failure counter. Anything unrecognized is
+# deliberately absent: unknown errors fail closed and consume a strike.
+AUDITOR_UNAVAILABLE_CLASSES = frozenset({"quota_exhausted",
+                                         "credentials_missing"})
+
+# "try again at Jul 22nd, 2026 9:16 PM" / "retry after 2026-07-22T21:16Z"
+_RETRY_HINT_RE = re.compile(
+    r"(?:try again|retry|resets?|available again)\s*(?:at|after|on|in)?\s*"
+    r"([^\n\.]{4,60})", re.IGNORECASE)
+
+EVIDENCE_MAX = 400
+
+
+def classify_session_failure(stderr_text: str) -> tuple:
+    """(class, evidence_line) for a session that produced no verdict.
+
+    Pure function over the auditor's own stderr — no clock, no chain, no
+    process state, so it is fully testable and replay-stable. Returns
+    ("unknown", "") when nothing is recognized; unknown NEVER bypasses the
+    failure budget."""
+    text = stderr_text or ""
+    for name, pattern in SESSION_FAILURE_CLASSES:
+        match = pattern.search(text)
+        if match:
+            line = next((ln.strip() for ln in text.splitlines()
+                         if pattern.search(ln)), match.group(0))
+            return name, line[:EVIDENCE_MAX]
+    return "unknown", ""
+
+
+def retry_hint(stderr_text: str) -> str:
+    """The provider's stated earliest-retry condition, verbatim and
+    uninterpreted ("" when absent). Recorded as evidence; never parsed into a
+    clock decision, so a garbled hint can never silently extend a block."""
+    match = _RETRY_HINT_RE.search(stderr_text or "")
+    return match.group(1).strip()[:EVIDENCE_MAX] if match else ""
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def credential_boundary(chain: list, rid: str) -> dict | None:
+    """The auditor-unavailable boundary in force for rid, or None.
+
+    Derived from the chain exactly like launcher_failures: a new publish (or
+    result-audit request) clears it, because a fresh cycle deserves a fresh
+    probe. A recorded CLEARANCE also clears it — access returning is an
+    observation, never an assumption."""
+    active = None
+    for event in chain:
+        if event["request_id"] != rid:
+            continue
+        etype, payload = event["event_type"], event["payload"]
+        if etype in ("AUDIT_REQUESTED", "READY_FOR_REAUDIT",
+                     "RESULT_AUDIT_REQUESTED"):
+            active = None
+        elif etype == "WATCHER_ERROR" and \
+                payload.get("phase") == "codex_launcher":
+            if payload.get("auditor_unavailable") is True:
+                active = dict(payload)
+            elif payload.get("credential_boundary_cleared") is True:
+                active = None
+    return active
 
 
 def launcher_failures(chain: list, rid: str) -> int:
@@ -260,7 +360,9 @@ def _log_paths(repo: str, rid: str, kind: str) -> tuple:
 
 
 def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
-                    commit: str, reason: str, logs: tuple) -> str:
+                    commit: str, reason: str, logs: tuple,
+                    failure_class: str = "unknown",
+                    evidence: str = "") -> str:
     """WATCHER_ERROR (failure:true) now; AUTONOMY_PAUSED after the third
     consecutive session failure in this published cycle. Returns 'failed'
     or 'paused'."""
@@ -269,6 +371,8 @@ def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
     events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo,
                         commit, {"phase": "codex_launcher", "kind": kind,
                                  "failure": True, "reason": reason,
+                                 "failure_class": failure_class,
+                                 "detection_evidence": evidence,
                                  "stdout_log": logs[0], "stderr_log": logs[1]})
     chain = events.read_chain(root)
     failures = launcher_failures(chain, rid)
@@ -281,6 +385,35 @@ def _record_failure(cfg, root: str, rid: str, kind: str, repo: str,
               file=sys.stderr)
         return "paused"
     return "failed"
+
+
+def _record_auditor_unavailable(cfg, root: str, rid: str, kind: str,
+                                repo: str, commit: str, reason: str,
+                                failure_class: str, evidence: str,
+                                hint: str, logs: tuple) -> str:
+    """The auditor's ACCESS failed, not the candidate. Recorded as a
+    non-failure WATCHER_ERROR so launcher_failures (which counts only
+    failure:true) leaves the bounded budget untouched and no AUTONOMY_PAUSE
+    is triggered. The candidate commit and request identity are preserved
+    verbatim; the request keeps ZERO integration authority, and a fresh
+    authorized audit is still required before anything integrates."""
+    print(f"codex_launcher: {kind} session for {rid} could not run — auditor "
+          f"unavailable ({failure_class}); NOT counted as a candidate "
+          "failure", file=sys.stderr)
+    events.append_event(root, cfg, "WATCHER_ERROR", SENDER, rid, repo, commit,
+                        {"phase": "codex_launcher", "kind": kind,
+                         # the load-bearing flags:
+                         "failure": False,
+                         "auditor_unavailable": True,
+                         "failure_class": failure_class,
+                         "provider": "codex",
+                         "detection_evidence": evidence,
+                         "earliest_retry_hint": hint,
+                         "reason": reason,
+                         "integration_authority": "none",
+                         "requires_fresh_audit": True,
+                         "stdout_log": logs[0], "stderr_log": logs[1]})
+    return "auditor_unavailable"
 
 
 def _clear_stale_claim_lock(cfg, root: str, rid: str, repo: str,
@@ -357,7 +490,20 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
     """Launch one bounded Codex session and verify success from the chain
     alone: ONLY the expected codex-signed terminal verdict at the pinned
     commit, appearing after the pre-launch chain position, counts.
-    Returns 'ok', 'failed', 'paused', or 'waiting'."""
+    Returns 'ok', 'failed', 'paused', 'waiting', or 'auditor_unavailable'."""
+    # Do not relaunch straight back into a hard boundary already recorded for
+    # this published cycle: the auditor's access has not changed, so another
+    # session would only re-prove the same environmental fact. A new publish
+    # (fresh cycle) or an explicit recorded clearance lifts it — access
+    # returning is OBSERVED, never assumed by a timer.
+    boundary = credential_boundary(chain, rid)
+    if boundary is not None:
+        hint = boundary.get("earliest_retry_hint") or "unknown"
+        print(f"codex_launcher: {rid} held — auditor unavailable "
+              f"({boundary.get('failure_class')}); earliest retry: {hint}. "
+              "Publish a fresh cycle or record a clearance to retry.",
+              file=sys.stderr)
+        return "auditor_unavailable"
     try:
         prompt, repo, commit = build_audit_prompt(root, cfg, rid, kind)
     except RequestIntegrityError as exc:
@@ -421,8 +567,19 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
     reason = refusal or (
         "session ended without the expected codex-signed terminal verdict "
         f"(state now {state_now!r})")
-    outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
-                              logs)
+    # An auditor that could not RUN is not a candidate that FAILED. Only
+    # recognized credential/quota boundaries take this path; every other
+    # class — content filter, crash, malformed output, unknown — still
+    # consumes a strike and can still reach the pause (fail closed).
+    failure_class, evidence = classify_session_failure(_read_text(logs[1]))
+    if failure_class in AUDITOR_UNAVAILABLE_CLASSES:
+        outcome = _record_auditor_unavailable(
+            cfg, root, rid, kind, repo, commit, reason, failure_class,
+            evidence, retry_hint(_read_text(logs[1])), logs)
+    else:
+        outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
+                                  logs, failure_class=failure_class,
+                                  evidence=evidence)
     if state_now == "claimed" and kind in (
             "source_audit", "source_audit_resume", "result_audit"):
         # Clear only the lock this exact bounded session can prove it owns.
@@ -559,8 +716,11 @@ def _run(cfg, root: str, args) -> int:
         for rid, kind in work:
             outcome = process_one(cfg, root, chain, requests, rid, kind,
                                   args.audit_timeout_seconds)
-            if outcome == "waiting":
-                continue  # a later work item may be actionable now
+            if outcome in ("waiting", "auditor_unavailable"):
+                # neither is a launch and neither is a failure: move on to
+                # other work, which keeps building and auditing whatever the
+                # unavailable auditor does not block
+                continue
             launched = True
             launches += 1
             if outcome == "paused":
