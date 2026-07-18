@@ -184,7 +184,7 @@ def test_misnumbered_positional_delta_refused():
                 [{"field": "val_pos1", "op": "add", "value": -1}]
 
     bad = _mutated(a, misnumber)
-    with pytest.raises(SchemaError, match="fire position"):
+    with pytest.raises(SchemaError, match="delivery position"):
         experience_sequence(bad)
 
 
@@ -285,3 +285,157 @@ def test_scripted_sequential_run_is_replayable(tmp_path):
                           interaction_mode="sequential_history")
     ok, detail = verify_run_replay(result.run_dir, SCEN_DIR)
     assert ok, detail
+
+
+# --------------------------- audit 001664 regressions (cycle-2 hardening)
+
+def test_aggregator_refuses_mixed_regimes(tmp_path):
+    """Finding 1: the same agent_id under DIFFERENT regimes across conditions
+    must be refused — cross-regime cells can fake an order effect."""
+    import json as _json
+    from coliseum.textlab.schema import SchemaError as _SE
+
+    run_dirs = []
+    for scen_path in (A_PATH, B_PATH, C_PATH):
+        result = run_scenario(scen_path, "scripted:hist:recency", 42,
+                              out_root=str(tmp_path),
+                              interaction_mode="sequential_history")
+        run_dirs.append(result.run_dir)
+    # tamper: give B's run a different regime for the same agent_id
+    b_manifest = os.path.join(run_dirs[1], "run.json")
+    with open(b_manifest, encoding="utf-8") as fh:
+        run = _json.load(fh)
+    run["agent_regime_id"] = "f" * 64
+    with open(b_manifest, "w", encoding="utf-8") as fh:
+        _json.dump(run, fh)
+    with pytest.raises(_SE, match="MIXED decider regimes"):
+        scramble_terminal_distribution(run_dirs, CONDITIONS)
+
+
+def test_aggregator_refuses_regime_unbound_runs(tmp_path):
+    """Finding 1: runs lacking agent_regime_id/agent_config never enter an
+    order-effect comparison."""
+    import json as _json
+    from coliseum.textlab.schema import SchemaError as _SE
+
+    result = run_scenario(A_PATH, "scripted:hist:linear", 42,
+                          out_root=str(tmp_path),
+                          interaction_mode="sequential_history")
+    manifest = os.path.join(result.run_dir, "run.json")
+    with open(manifest, encoding="utf-8") as fh:
+        run = _json.load(fh)
+    run["agent_regime_id"] = ""
+    with open(manifest, "w", encoding="utf-8") as fh:
+        _json.dump(run, fh)
+    with pytest.raises(_SE, match="regime-unbound"):
+        scramble_terminal_distribution([result.run_dir], CONDITIONS)
+
+
+def test_genuine_grid_still_passes_with_regime_binding(tmp_path):
+    """The regenerated authentic 18-cell grid must still aggregate cleanly and
+    satisfy the preregistered signature under the new regime enforcement."""
+    run_dirs = _run_cells(tmp_path)
+    report = scramble_terminal_distribution(run_dirs, CONDITIONS)
+    for rule in RULES:
+        cell = report["per_agent"][f"scripted:hist:{rule}"]
+        assert len(cell["agent_regime_id"]) == 64      # bound + surfaced
+        assert cell["tv_distances"]["A|C"] == 0.0
+    assert report["per_agent"]["scripted:hist:linear"]["tv_distances"]["A|B"] == 0.0
+    assert report["per_agent"]["scripted:hist:recency"]["tv_distances"]["A|B"] > 0.0
+
+
+def test_triplet_rejects_b_reward_drift():
+    """Finding 2: B-side action/reward drift is a content confound."""
+    a, b, c = _load_triplet()
+
+    def sweeten_b(raw):
+        raw["actions"]["share_resource"]["visible_reward"] = 99.0
+
+    bad_b = _mutated(b, sweeten_b)
+    issues = lint_scramble_triplet(a, bad_b, c)
+    assert any("behavioral key 'actions'" in i for i in issues)
+
+
+def test_triplet_rejects_b_narrative_drift():
+    """Finding 2: B-side outcome-narrative drift changes sequential-history
+    CONTENT, which confounds the order manipulation."""
+    a, b, c = _load_triplet()
+
+    def reword_b(raw):
+        for aid in ("acknowledge", "reflect"):
+            raw["outcome_rules"][f"e_trust/{aid}"]["narrative"] = \
+                "A completely different account of the same event."
+
+    bad_b = _mutated(b, reword_b)
+    issues = lint_scramble_triplet(a, bad_b, c)
+    assert any("outcome rule" in i and "drift" in i for i in issues)
+
+
+def test_triplet_rejects_b_variant_text_drift():
+    """Finding 2: B's agent-facing wording must be byte-equal to A's — order
+    is the sole manipulated variable (C is the wording control, not B)."""
+    a, b, c = _load_triplet()
+
+    def reword_variant(raw):
+        raw["variants"][0]["decision_texts"]["e_warning"] = \
+            "A drover mentions, in very different words, the same warning."
+
+    bad_b = _mutated(b, reword_variant)
+    issues = lint_scramble_triplet(a, bad_b, c)
+    assert any("variant intro/decision_texts differ" in i for i in issues)
+
+
+def test_event_dp_side_channel_refused():
+    """Finding 2: ANY extra state operation on an event dp — choice-dependent
+    or not, valence-named or not — is refused by the full-delta contract."""
+    a, _, _ = _load_triplet()
+
+    def add_choice_dependent(raw):
+        raw["outcome_rules"]["e_trust/reflect"]["state_delta"] = [
+            {"field": "val_pos1", "op": "add", "value": 2},
+            {"field": "choice_side_channel", "op": "add", "value": 1}]
+
+    with pytest.raises(SchemaError, match="choice-DEPENDENT"):
+        experience_sequence(_mutated(a, add_choice_dependent))
+
+    def add_choice_independent(raw):
+        for aid in ("acknowledge", "reflect"):
+            raw["outcome_rules"][f"e_trust/{aid}"]["state_delta"] = [
+                {"field": "val_pos1", "op": "add", "value": 2},
+                {"field": "shared_side_channel", "op": "add", "value": 1}]
+        raw["initial_state"]["shared_side_channel"] = 0
+
+    with pytest.raises(SchemaError, match="extra state channels"):
+        experience_sequence(_mutated(a, add_choice_independent))
+
+
+def test_delivery_order_is_chain_order_not_list_order():
+    """Hardening beyond the audit: experience_sequence must follow the
+    runner's next-chain walk, not the authored decision_points list — a
+    scenario listing one order but chaining another must sequence by
+    DELIVERY order."""
+    a, _, _ = _load_triplet()
+
+    def shuffle_list_only(raw):
+        # keep the entry point (list[0] = e_trust, the runner's start) but
+        # scramble the REST of the authored list; the next-chain
+        # (trust->betrayal->warning) and positional deltas are untouched,
+        # so DELIVERY is unchanged even though the list order lies
+        dps = {d["dp_id"]: d for d in raw["decision_points"]}
+        raw["decision_points"] = [dps["e_trust"], dps["e_warning"],
+                                  dps["e_betrayal"], dps["d_partner"]]
+
+    listed = _mutated(a, shuffle_list_only)
+    assert experience_sequence(listed) == experience_sequence(a)
+
+
+def test_choice_dependent_successor_refused():
+    """Gate dps must have ONE successor regardless of choice — a per-action
+    branch would make delivery order itself choice-dependent."""
+    a, _, _ = _load_triplet()
+
+    def branch(raw):
+        raw["outcome_rules"]["e_trust/reflect"]["next"] = "e_warning"
+
+    with pytest.raises(SchemaError, match="successor is choice-DEPENDENT"):
+        experience_sequence(_mutated(a, branch))

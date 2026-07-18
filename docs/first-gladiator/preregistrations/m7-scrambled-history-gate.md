@@ -99,3 +99,35 @@ UNKNOWN order-sensitivity (`llm:ollama:<model>`), null-first H0 TV(A,B)=0,
 with TV(A,C) as the formatting control. Requires: Phase-1 PASS, its own
 preregistration + design freeze, council design audit, SC-6 owner approval for
 live runs, and result audit before any claim registers.
+
+## Appendix — exact regeneration commands (added cycle 2, audit 001664 LOW finding)
+
+*This appendix corrects the committed report's reproducibility instruction; the
+hypothesis, design, analysis rule, and thresholds above are UNCHANGED.* The
+evidence is fully deterministic — any checkout of the audited commit
+regenerates byte-identical runs:
+
+```sh
+# 1. run the 18-cell grid
+for scen in scramble_dev scramble_perm scramble_sham; do
+  for rule in linear recency hysteresis; do
+    for seed in 42 1; do
+      python3 -m coliseum.textlab.cli --out-root logs/runs/m7-scrambled-history-gate \
+        run --scenario $scen --agent scripted:hist:$rule --seed $seed \
+        --interaction sequential_history --arbitration planner_priority
+    done
+  done
+done
+
+# 2. byte-replay every run (the determinism gate)
+for d in logs/runs/m7-scrambled-history-gate/*/; do
+  python3 -m coliseum.textlab.cli --out-root logs/runs/m7-scrambled-history-gate \
+    replay "$(basename "$d")"
+done
+```
+
+The aggregator + preregistered thresholds are then applied via
+`coliseum.textlab.metrics.scramble_terminal_distribution` over the 18 run
+directories with conditions `{"A": "scramble_dev", "B": "scramble_perm",
+"C": "scramble_sham"}` (the committed report's `calibration_checks` are exactly
+rule 1–3 of *Primary event + threshold* above).

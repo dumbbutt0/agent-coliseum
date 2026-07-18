@@ -193,17 +193,53 @@ def structural_issues(issues: list) -> list:
 _VAL_POS_RE = re.compile(r"^val_pos(\d+)$")
 
 
+def _walked_dps(s: Scenario) -> list:
+    """Decision points in DELIVERY order — the runner's next-chain walk from
+    decision_points[0], not the authored list order (audit 001664 hardening:
+    a scenario could list one order and chain another). Requires every action
+    at a dp to share ONE successor (delivery is choice-independent for the
+    gate contract) and the walk to visit every dp exactly once, ending at
+    "end"."""
+    by_id = {dp.dp_id: dp for dp in s.decision_points}
+    walk, seen = [], set()
+    dp_id = s.decision_points[0].dp_id
+    while dp_id != "end":
+        if dp_id in seen:
+            raise SchemaError(f"{s.scenario_id}: delivery walk revisits "
+                              f"{dp_id!r} — the gate contract needs an "
+                              "acyclic single-pass chain")
+        dp = by_id[dp_id]
+        seen.add(dp_id)
+        walk.append(dp)
+        successors = {s.outcome_rules[f"{dp_id}/{aid}"].get(
+            "next", dp.next_default) for aid in dp.available_actions}
+        if len(successors) != 1:
+            raise SchemaError(f"{s.scenario_id}.{dp_id}: successor is "
+                              "choice-DEPENDENT (every action at a gate dp "
+                              "must share one `next`)")
+        (dp_id,) = successors
+    if len(walk) != len(s.decision_points):
+        missing = sorted(by_id.keys() - seen)
+        raise SchemaError(f"{s.scenario_id}: decision points {missing} are "
+                          "unreachable from the delivery walk")
+    return walk
+
+
 def _event_dps(s: Scenario) -> list:
-    return [dp for dp in s.decision_points if "event" in dp.facts]
+    return [dp for dp in _walked_dps(s) if "event" in dp.facts]
 
 
 def experience_sequence(s: Scenario) -> list:
-    """Ordered (event_label, valence) pairs as delivered by this scenario.
+    """Ordered (event_label, valence) pairs as DELIVERED by this scenario
+    (next-chain walk order, not authored list order).
 
-    Also enforces the positional-delta contract: every action at an event dp
-    must write the IDENTICAL delta (the event is world-driven, choice-
-    independent), and that delta must be exactly `val_pos<K> add <valence>`
-    where K is the event's 1-based fire position in THIS scenario."""
+    Enforces the positional-delta contract in full (audit 001664 finding 2):
+    every action at an event dp must carry the IDENTICAL COMPLETE state_delta
+    (the event is world-driven, choice-independent — no per-action side
+    channel of any kind), and that complete delta must be exactly ONE op,
+    `val_pos<K> add <valence>` where K is the event's 1-based delivery
+    position. Any additional operation on an event dp, valence-named or not,
+    is refused."""
     seq = []
     for pos, dp in enumerate(_event_dps(s), start=1):
         event, valence = dp.facts.get("event"), dp.facts.get("valence")
@@ -213,19 +249,21 @@ def experience_sequence(s: Scenario) -> list:
         deltas = set()
         for aid in dp.available_actions:
             ops = s.outcome_rules[f"{dp.dp_id}/{aid}"].get("state_delta", [])
-            deltas.add(tuple(sorted(
-                (o["field"], o["op"], o["value"]) for o in ops
-                if _VAL_POS_RE.match(str(o.get("field", ""))))))
+            deltas.add(tuple(
+                (o.get("field"), o.get("op"), o.get("value")) for o in ops))
         if len(deltas) != 1:
-            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event valence "
-                              "delta is choice-DEPENDENT (must be identical "
-                              "for every action at an event dp)")
-        (val_ops,) = deltas
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event delta is "
+                              "choice-DEPENDENT (the complete state_delta "
+                              "must be identical for every action at an "
+                              "event dp)")
+        (all_ops,) = deltas
         want = ((f"val_pos{pos}", "add", valence),)
-        if val_ops != want:
-            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: positional delta "
-                              f"{val_ops} != expected {want} (val_pos index "
-                              "must equal the event's fire position)")
+        if all_ops != want:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event delta "
+                              f"{all_ops} != expected {want} (exactly one "
+                              "positional valence op; val_pos index must "
+                              "equal the event's delivery position; no "
+                              "extra state channels on event dps)")
         seq.append((event, valence))
     return seq
 
@@ -237,6 +275,90 @@ def experience_multiset(s: Scenario) -> dict:
     for pair in experience_sequence(s):
         counts[pair] = counts.get(pair, 0) + 1
     return counts
+
+
+def _dp_raw(dp) -> dict:
+    return {"dp_id": dp.dp_id, "available_actions": list(dp.available_actions),
+            "authority_pressure": dp.authority_pressure,
+            "risk_level": dp.risk_level, "time_pressure": dp.time_pressure,
+            "facts": dict(dp.facts)}
+
+
+def _renumber_val_pos(ops: list, mapping: dict) -> list:
+    out = []
+    for op in ops:
+        op = dict(op)
+        m = _VAL_POS_RE.match(str(op.get("field", "")))
+        if m and int(m.group(1)) in mapping:
+            op["field"] = f"val_pos{mapping[int(m.group(1))]}"
+        out.append(op)
+    return out
+
+
+def _b_equivalence_issues(a: Scenario, b: Scenario) -> list:
+    """B must equal A modulo ONLY the declared event permutation and the
+    positional val_pos renumbering it induces (audit 001664 finding 2): same
+    actions, dials, facts, narratives, variant texts, terminal probe, and
+    complete state deltas — order is the sole manipulated variable."""
+    issues = []
+    a_events, b_events = _event_dps(a), _event_dps(b)
+    a_labels = [dp.facts["event"] for dp in a_events]
+    b_labels = [dp.facts["event"] for dp in b_events]
+    if len(set(a_labels)) != len(a_labels) or len(set(b_labels)) != len(b_labels):
+        issues.append("A/B: duplicate event labels make the permutation "
+                      "ambiguous — canonical B-equivalence cannot be proven")
+        return issues
+    if set(a_labels) != set(b_labels):
+        return issues        # multiset check already reports this
+    # position mapping induced by the permutation: A-position -> B-position
+    b_pos = {label: i for i, label in enumerate(b_labels, start=1)}
+    pos_map = {i: b_pos[label] for i, label in enumerate(a_labels, start=1)}
+
+    # event dps: identical raw content per event label (position-independent)
+    a_by_label = {dp.facts["event"]: dp for dp in a_events}
+    b_by_label = {dp.facts["event"]: dp for dp in b_events}
+    for label in a_labels:
+        if _dp_raw(a_by_label[label]) != _dp_raw(b_by_label[label]):
+            issues.append(f"B: event dp {label!r} differs from A beyond "
+                          "position (actions/dials/facts must be identical)")
+    # non-event dps (the terminal probe): identical raw content and identical
+    # relative order
+    a_rest = [_dp_raw(dp) for dp in _walked_dps(a) if "event" not in dp.facts]
+    b_rest = [_dp_raw(dp) for dp in _walked_dps(b) if "event" not in dp.facts]
+    if a_rest != b_rest:
+        issues.append("B: non-event decision points differ from A — the "
+                      "terminal probe must be identical")
+    # whole-scenario behavioral surfaces that must be byte-equal
+    for key in ("initial_state", "actions"):
+        if a.raw.get(key) != b.raw.get(key):
+            issues.append(f"B differs from A in behavioral key {key!r} — "
+                          "order is the only permitted difference")
+    a_texts = {v["variant_id"]: (v.get("intro", ""), v.get("decision_texts"))
+               for v in a.variants}
+    b_texts = {v["variant_id"]: (v.get("intro", ""), v.get("decision_texts"))
+               for v in b.variants}
+    if a_texts != b_texts:
+        issues.append("B: variant intro/decision_texts differ from A — "
+                      "wording drift is a content confound, not an order "
+                      "manipulation")
+    # outcome rules: narratives, deferred consequences, and COMPLETE deltas
+    # must match A's modulo val_pos renumbering; successors must follow each
+    # scenario's own declared chain (validated by _walked_dps)
+    for dp in a_events + [dp for dp in _walked_dps(a) if "event" not in dp.facts]:
+        for aid in dp.available_actions:
+            key = f"{dp.dp_id}/{aid}"
+            ra = dict(a.outcome_rules[key])
+            rb = dict(b.outcome_rules.get(key, {}))
+            for r in (ra, rb):
+                r.pop("next", None)      # chain topology is checked by walks
+            ra["state_delta"] = _renumber_val_pos(
+                ra.get("state_delta", []), pos_map)
+            rb["state_delta"] = list(rb.get("state_delta", []))
+            if ra != rb:
+                issues.append(f"B: outcome rule {key!r} differs from A "
+                              "beyond val_pos renumbering (narrative/delta/"
+                              "consequence drift)")
+    return issues
 
 
 def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
@@ -252,6 +374,7 @@ def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario) -> list:
                       "permutation of A")
     if experience_sequence(a) == experience_sequence(b):
         issues.append("A/B deliver the identical order — B is not scrambled")
+    issues.extend(_b_equivalence_issues(a, b))
     if experience_sequence(a) != experience_sequence(c):
         issues.append("C differs from A in semantic event order — not a "
                       "sham (formatting-only) control")

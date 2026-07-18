@@ -598,15 +598,37 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
     The effective unit is (variant_id, scenario_seed, sampler_seed) — one
     terminal action per unit; the distribution is normalized unit counts.
     Runs whose scenario_id is not a named condition are ignored; non-reportable
-    runs are excluded (same admission rule as aggregate())."""
+    runs are excluded (same admission rule as aggregate()).
+
+    Regime binding (audit 001664 finding 1): an order-effect comparison is only
+    meaningful over ONE frozen decider regime, so every admitted run for a
+    logical agent_id must carry the SAME non-empty agent_regime_id and the
+    SAME agent_config identity across ALL conditions — otherwise parameter or
+    model drift between conditions could masquerade as an order effect.
+    Missing or mixed identities are refused, never silently pooled."""
     scen_to_cond = {sid: label for label, sid in conditions.items()}
     per_agent: dict = {}
+    regime_by_agent: dict = {}
     for rd in run_dirs:
         with open(os.path.join(rd, "run.json"), encoding="utf-8") as fh:
             run = json.load(fh)
         cond = scen_to_cond.get(run["scenario_id"])
         if cond is None or not run.get("reportable", False):
             continue
+        regime = run.get("agent_regime_id") or ""
+        agent_cfg = canonical_json(run.get("agent_config") or {})
+        if not regime or not run.get("agent_config"):
+            raise SchemaError(f"{rd}: run lacks agent_regime_id/agent_config "
+                              "— regime-unbound evidence cannot enter an "
+                              "order-effect comparison")
+        agent_id = run["agent_id"]
+        known = regime_by_agent.setdefault(agent_id, (regime, agent_cfg, rd))
+        if (regime, agent_cfg) != known[:2]:
+            raise SchemaError(
+                f"agent {agent_id!r}: MIXED decider regimes across "
+                f"conditions ({known[0][:16]}… in {known[2]} vs "
+                f"{regime[:16]}… in {rd}) — cross-regime cells can fake an "
+                "order effect and are refused")
         terminal = None
         with open(os.path.join(rd, "decisions.jsonl"), encoding="utf-8") as fh:
             for line in fh:
@@ -619,7 +641,7 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
             raise SchemaError(f"{rd}: no decision_node records")
         unit = (run["variant_id"], run.get("scenario_seed"),
                 run.get("sampler_seed"))
-        cell = per_agent.setdefault(run["agent_id"], {}).setdefault(
+        cell = per_agent.setdefault(agent_id, {}).setdefault(
             cond, {"units": {}})
         if unit in cell["units"] and cell["units"][unit] != terminal["final_action"]:
             raise SchemaError(f"{rd}: duplicate effective unit {unit} with a "
@@ -646,5 +668,8 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
                                                          dists[pair[1]])
         out["per_agent"][agent_id] = {"distributions": dists,
                                       "effective_n": ns,
-                                      "tv_distances": distances}
+                                      "tv_distances": distances,
+                                      # the ONE regime this comparison is
+                                      # bound to (enforced at admission)
+                                      "agent_regime_id": regime_by_agent[agent_id][0]}
     return out
