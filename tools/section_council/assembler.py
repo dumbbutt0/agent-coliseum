@@ -287,53 +287,59 @@ def _validate_proposal_change(change: Any, seen_items: set) -> dict[str, Any]:
 
 
 def _authorize_against_scope(changes: list[dict],
-                             predicted_changes: list[dict]) -> None:
-    """Pre-write authorization gate: every proposal operation must equal exactly
-    one frozen predicted change in ``(path, kind, rename_source, blob_before,
+                             work_item_scope: dict[str, list[dict]]) -> None:
+    """Pre-write authorization gate bound to work-item OWNERSHIP: every proposal
+    operation must equal exactly one predicted change *owned by its own
+    ``work_item_id``* in ``(path, kind, rename_source, blob_before,
     mode_before)``, every predicted ``required`` operation must be present, and
-    no path/predicted change is used twice. The trusted writer proves the
-    proposal is the authorized scope BEFORE any byte is written — later real-diff
-    rejection on the disposable candidate is a backstop, not the gate."""
+    no owned prediction is used twice. Binding the key to the work item is what
+    stops a proposal from relabelling another work item's operation and slipping
+    through a program-wide predicted union (finding 001734-2). The trusted writer
+    proves the proposal is the authorized scope BEFORE any byte is written."""
     index: dict[tuple, dict] = {}
-    for pred in predicted_changes:
-        key = (pred["path"], pred["kind"], pred["rename_source"])
-        if key in index:
-            raise HSCValidationError("predicted scope repeats a change key")
-        index[key] = pred
+    for wid, preds in work_item_scope.items():
+        for pred in preds:
+            key = (wid, pred["path"], pred["kind"], pred["rename_source"])
+            if key in index:
+                raise HSCValidationError("work-item scope repeats a change key")
+            index[key] = pred
     consumed: set[tuple] = set()
     for change in changes:
-        key = (change["path"], change["kind"], change["rename_source"])
+        key = (change["work_item_id"], change["path"], change["kind"],
+               change["rename_source"])
         pred = index.get(key)
         if pred is None:
             raise HSCValidationError(
-                f"proposal change {key} is outside the authorized predicted "
-                "scope")
+                f"proposal change {key[1:]} is not owned by work item "
+                f"{change['work_item_id'][:12]} in the authorized scope")
         if key in consumed:
-            raise HSCValidationError(f"proposal repeats predicted change {key}")
+            raise HSCValidationError(f"proposal repeats owned change {key[1:]}")
         consumed.add(key)
         if change["blob_before"] != pred["blob_before"] or \
                 change["mode_before"] != pred["mode_before"]:
             raise HSCValidationError(
-                f"proposal change {key} base blob/mode differs from the "
+                f"proposal change {key[1:]} base blob/mode differs from the "
                 "authorized prediction")
     for key, pred in index.items():
         if pred["required"] and key not in consumed:
             raise HSCValidationError(
-                f"required predicted change {key} is missing from the proposal")
+                f"required predicted change {key[1:]} of work item "
+                f"{key[0][:12]} is missing from the proposal")
 
 
 def apply_proposal(root_fd: int, base_tree: dict[str, tuple[str, str]],
                    proposal: dict[str, Any], *,
-                   predicted_changes: list[dict],
+                   work_item_scope: dict[str, list[dict]],
                    predicted_renames: list | None = None) -> list[dict]:
     """Apply the parsed ``proposal`` to the integration checkout open at
     ``root_fd`` and return the resulting sorted ``ACTUAL_CHANGE`` list.
 
     ``base_tree`` maps every base project path to ``(blob_sha256, git_mode)``
-    (from the frozen source snapshot). ``predicted_changes`` is the frozen
-    authorized scope (each ``{path, kind, rename_source, blob_before,
-    mode_before, required}``); every proposal operation must match one before any
-    write occurs. Changes apply in sorted ``work_item_id`` order; each is also
+    (from the frozen source snapshot). ``work_item_scope`` maps each authorized
+    ``work_item_id`` to the list of predicted changes that item owns (each
+    ``{path, kind, rename_source, blob_before, mode_before, required}``); every
+    proposal operation must match one owned by its own work item before any write
+    occurs. Changes apply in sorted ``work_item_id`` order; each is also
     validated against the base before its atomic operation."""
     if not isinstance(proposal, dict) or set(proposal) != {"changes"}:
         raise HSCValidationError("proposal must be {'changes': [...]}")
@@ -342,7 +348,7 @@ def apply_proposal(root_fd: int, base_tree: dict[str, tuple[str, str]],
         raise HSCValidationError("proposal changes must be a non-empty list")
     seen: set = set()
     changes = [_validate_proposal_change(c, seen) for c in raw]
-    _authorize_against_scope(changes, predicted_changes)
+    _authorize_against_scope(changes, work_item_scope)
     changes.sort(key=lambda c: c["work_item_id"])
     for change in changes:
         if change["kind"] == "mode":

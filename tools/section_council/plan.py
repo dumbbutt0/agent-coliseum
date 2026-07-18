@@ -22,12 +22,13 @@ a builder-selected phase subset — determines the exhaustive requirement set.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from tools.council.schemas import domain_hash
 
 from .core import file_id, filesystem_id, locator_sha256
-from .native import enrolled_anchor, observe_fd
+from .native import enrolled_anchor, observe_fd, open_beneath
 from .records import make_record
 
 _PLATFORM = "linux-bwrap-v1"
@@ -163,16 +164,28 @@ def build_native_inventory_plan(*, program_ref: dict, base_commit: str,
 
     # The checkout is enrolled as its own anchor; the common-Git root is the
     # SAME anchor plus the ".git" segment (store.py requires common_git.locator
-    # == checkout.locator + [".git"]), while its identity is the live .git
-    # directory. Build common-Git first so the checkout can delegate to it.
+    # == checkout.locator + [".git"]). Its identity is NOT trusted from a caller
+    # descriptor — the producer opens ".git" no-follow FROM the checkout handle
+    # with the frozen locator resolution, so the delegated common-Git identity is
+    # exactly the checkout's own live control tree (finding 001734-0). A
+    # separately supplied common_in descriptor, if any, must observe equal.
     checkout_locator, checkout_obs = _own_anchor_locator(
         checkout_in["dir_fd"], checkout_in["anchor_name"])
+    dotgit_fd = open_beneath(checkout_in["dir_fd"], b".git", directory=True)
+    try:
+        common_obs = observe_fd(dotgit_fd)
+    finally:
+        os.close(dotgit_fd)
+    if common_in.get("dir_fd") is not None and \
+            observe_fd(common_in["dir_fd"]) != common_obs:
+        raise ValueError("supplied common-Git descriptor is not the checkout's "
+                         "own .git control tree")
     common_locator = dict(checkout_locator)
     common_locator["segments_hex"] = (
         list(checkout_locator["segments_hex"]) + [_DOTGIT_SEGMENT])
     common_spec = _spec_from(
         program_ref, root_kind="common-git", view_kind="full-native-tree-v1",
-        locator=common_locator, observation=observe_fd(common_in["dir_fd"]),
+        locator=common_locator, observation=common_obs,
         workspace_id=common_in["workspace_id"], delegated=None)
     checkout_spec = _spec_from(
         program_ref, root_kind="integration-checkout",

@@ -13,6 +13,40 @@ from tools.section_council.core import HSCValidationError
 from tools.section_council.records import (compute_record_content_sha256,
                                            record_ref, validate_record)
 
+RECORDS_PREFIX = f"artifacts/section-council/{'first-gladiator-hsc-b-pilot-001'}/records/"
+
+
+def _leaf(*, declared_disposition="pass", extra=None):
+    """A minimal sealed assessor leaf: one passing check, no findings."""
+    assessment = {
+        "program_ref": PROGRAM_REF, "contract_ref": REF,
+        "work_item_id": "1" * 64, "assessor_assignment_ref": REF,
+        "assessor_context_ref": REF, "proposal_ref": REF,
+        "predecessor_assessment_ref": None,
+        "declared_disposition": declared_disposition, "error_reason": None,
+        "check_declaration_output_relpaths": ["checks/c1.json"],
+        "finding_declaration_output_relpaths": [],
+    }
+    check = {"check_id": "c1", "status": "pass",
+             "evidence_output_relpath": "checks/c1.txt"}
+    leaf = {
+        "assessment.json": canonical_json(assessment).encode("utf-8"),
+        "checks/c1.json": canonical_json(check).encode("utf-8"),
+        "checks/c1.txt": b"c1 passed\n",
+    }
+    if extra:
+        leaf.update(extra)
+    return leaf
+
+
+def _package(leaf):
+    em = packager.ContentEmitter("first-gladiator-hsc-b-pilot-001")
+    return packager.package_assessment_leaf(
+        leaf, emitter=em, program_ref=PROGRAM_REF, contract_ref=REF,
+        work_item_id="1" * 64, assessor_assignment_ref=REF,
+        assessor_context_ref=REF, proposal_ref=REF, required_check_ids=["c1"],
+        records_prefix=RECORDS_PREFIX)
+
 PROGRAM_REF = {"record_id": "a" * 64, "content_sha256": "b" * 64}
 REF = {"record_id": "c" * 64, "content_sha256": "d" * 64}
 RID = "first-gladiator-hsc-b-pilot-001"
@@ -178,6 +212,44 @@ def test_build_assessment_manifest_recomputes_inventory():
         [finding], slot)
     assert p["local_assessment"] == "pass"
     assert p["open_blocking_count"] == 0
+
+
+def test_package_assessment_leaf_happy_path():
+    # finding 001734-1: one trusted transformation from the frozen leaf to the
+    # typed manifest, wrapping every-and-only member with its exact path.
+    out = _package(_leaf())
+    manifest = out["manifest"]
+    assert validate_record(manifest) is not None
+    p = manifest["payload"]
+    assert p["local_assessment"] == "pass" and p["open_blocking_count"] == 0
+    assert [c["check_id"] for c in p["check_results"]] == ["c1"]
+    # every wrapped content record traces to a real leaf path tail
+    tails = {rec["payload"]["storage_relpath"].split("/content/", 1)[1]
+             for rec in out["contents"]}
+    assert "assessment.json" in tails and "checks/c1.json" in tails
+    assert "assessor-output-inventory.json" in tails  # generated inventory
+
+
+def test_package_refuses_extra_leaf_file():
+    leaf = _leaf(extra={"stray.txt": b"unreferenced\n"})
+    with pytest.raises(HSCValidationError, match="membership differs"):
+        _package(leaf)
+
+
+def test_package_refuses_declared_disposition_mismatch():
+    # the sealed declaration claims 'blocked' but the derived disposition (a
+    # passing check, no findings) is 'pass' — the packager refuses.
+    leaf = _leaf(declared_disposition="blocked")
+    with pytest.raises(HSCValidationError,
+                       match="declared_disposition differs"):
+        _package(leaf)
+
+
+def test_package_refuses_missing_declared_check_file():
+    leaf = _leaf()
+    del leaf["checks/c1.txt"]  # declared evidence path now absent
+    with pytest.raises(HSCValidationError, match="membership differs|absent"):
+        _package(leaf)
 
 
 def test_manifest_recomputes_blocking_over_open_finding():

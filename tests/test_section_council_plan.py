@@ -39,11 +39,23 @@ def _central(tmp_path, fds, *, candidate_ws=CAND_WS, out_kind="builder-output",
             row["anchor_name"] = name
         return row
 
+    def mk_checkout():
+        # the checkout owns its live .git control tree; the producer derives the
+        # common-Git identity from it (no separate trusted descriptor).
+        (tmp_path / "checkout" / ".git").mkdir(parents=True)
+        fd = os.open(str(tmp_path / "checkout"),
+                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(fd)
+        return {"root_kind": "integration-checkout",
+                "view_kind": "checkout-excluding-delegated-dotgit-v1",
+                "dir_fd": fd, "anchor_name": "checkout",
+                "workspace_id": None}
+
     roots = [
         mk("candidate", "candidate", ws=candidate_ws),
-        mk("common-git", "common-git", anchor=False),   # derived from checkout
-        mk("integration-checkout", "checkout",
-           view="checkout-excluding-delegated-dotgit-v1"),
+        {"root_kind": "common-git", "view_kind": "full-native-tree-v1",
+         "dir_fd": None, "workspace_id": None},   # derived from checkout/.git
+        mk_checkout(),
         mk("council-root", "council"),
         mk("owner-anchors", "anchors"),
         mk("other-worker-leaves", "leaves"),

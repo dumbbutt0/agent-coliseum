@@ -42,8 +42,9 @@ def _pred(change, *, required=True):
             "mode_before": change["mode_before"], "required": required}
 
 
-def _preds(proposal):
-    return [_pred(c) for c in proposal["changes"]]
+def _scope(proposal):
+    """The per-work-item authorized scope: each change owned by its own wid."""
+    return {c["work_item_id"]: [_pred(c)] for c in proposal["changes"]}
 
 
 def test_add_modify_mode_delete_rename(tmp_path):
@@ -77,7 +78,7 @@ def test_add_modify_mode_delete_rename(tmp_path):
     (root / "dst").mkdir()
     try:
         changes = assembler.apply_proposal(
-            fd, base, proposal, predicted_changes=_preds(proposal),
+            fd, base, proposal, work_item_scope=_scope(proposal),
             predicted_renames=[{"path": "dst/to.txt",
                                 "rename_source": "src/from.txt"}])
     finally:
@@ -104,7 +105,7 @@ def test_add_over_existing_refuses(tmp_path):
     try:
         with pytest.raises(HSCValidationError, match="already exists"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
         assert (root / "a.txt").read_bytes() == b"x\n"
     finally:
         os.close(fd)
@@ -122,7 +123,7 @@ def test_modify_base_mismatch_refuses(tmp_path):
         # passes and the on-disk base check is what fires
         with pytest.raises(HSCValidationError, match="base blob/mode mismatch"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
         assert (root / "a.txt").read_bytes() == b"real\n"
     finally:
         os.close(fd)
@@ -141,7 +142,7 @@ def test_symlink_target_refuses(tmp_path):
     try:
         with pytest.raises(HSCValidationError, match="symlink or unopenable"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
         assert outside.read_bytes() == b"secret\n"
     finally:
         os.close(fd)
@@ -158,7 +159,7 @@ def test_rename_dest_exists_refuses(tmp_path):
     try:
         with pytest.raises(HSCValidationError, match="dest .* already exists"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
         assert (root / "from.txt").read_bytes() == b"m\n"
     finally:
         os.close(fd)
@@ -176,7 +177,7 @@ def test_duplicate_work_item_refuses(tmp_path):
     try:
         with pytest.raises(HSCValidationError, match="reuses a work_item_id"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
     finally:
         os.close(fd)
 
@@ -192,7 +193,7 @@ def test_non_hex_work_item_refuses(tmp_path):
     try:
         with pytest.raises(HSCValidationError, match="work_item_id"):
             assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=_preds(proposal))
+                                     work_item_scope=_scope(proposal))
     finally:
         os.close(fd)
 
@@ -205,14 +206,34 @@ def test_unpredicted_change_refuses(tmp_path):
         {"work_item_id": WID_A, "kind": "add", "path": "sneaky.txt",
          "rename_source": None, "content_after_hex": b"1\n".hex(),
          "mode_after": "100644", "blob_before": None, "mode_before": None}]}
-    other = {"path": "authorized.txt", "kind": "add", "rename_source": None,
-             "blob_before": None, "mode_before": None, "required": False}
+    scope = {WID_A: [{"path": "authorized.txt", "kind": "add",
+                      "rename_source": None, "blob_before": None,
+                      "mode_before": None, "required": False}]}
     try:
-        with pytest.raises(HSCValidationError,
-                           match="outside the authorized predicted scope"):
-            assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=[other])
+        with pytest.raises(HSCValidationError, match="not owned by work item"):
+            assembler.apply_proposal(fd, base, proposal, work_item_scope=scope)
         assert not (root / "sneaky.txt").exists()  # nothing written
+    finally:
+        os.close(fd)
+
+
+def test_relabeled_op_refuses(tmp_path):
+    # finding 001734-2: an operation authorized for work item B cannot be
+    # relabeled to work item A and slip through a program-wide union — ownership
+    # is keyed by (work_item_id, change).
+    root, fd, base = _checkout(tmp_path, {"a.txt": (b"x\n", "100644")})
+    proposal = {"changes": [
+        {"work_item_id": WID_A, "kind": "add", "path": "owned-by-b.txt",
+         "rename_source": None, "content_after_hex": b"1\n".hex(),
+         "mode_after": "100644", "blob_before": None, "mode_before": None}]}
+    # the operation exists in the scope, but owned by WID_B, not WID_A
+    scope = {WID_B: [{"path": "owned-by-b.txt", "kind": "add",
+                      "rename_source": None, "blob_before": None,
+                      "mode_before": None, "required": False}]}
+    try:
+        with pytest.raises(HSCValidationError, match="not owned by work item"):
+            assembler.apply_proposal(fd, base, proposal, work_item_scope=scope)
+        assert not (root / "owned-by-b.txt").exists()
     finally:
         os.close(fd)
 
@@ -223,13 +244,13 @@ def test_missing_required_prediction_refuses(tmp_path):
         {"work_item_id": WID_A, "kind": "add", "path": "b.txt",
          "rename_source": None, "content_after_hex": b"1\n".hex(),
          "mode_after": "100644", "blob_before": None, "mode_before": None}]}
-    preds = _preds(proposal) + [
+    scope = _scope(proposal)
+    scope[WID_A].append(
         {"path": "must-have.txt", "kind": "add", "rename_source": None,
-         "blob_before": None, "mode_before": None, "required": True}]
+         "blob_before": None, "mode_before": None, "required": True})
     try:
         with pytest.raises(HSCValidationError,
                            match="required predicted change .* is missing"):
-            assembler.apply_proposal(fd, base, proposal,
-                                     predicted_changes=preds)
+            assembler.apply_proposal(fd, base, proposal, work_item_scope=scope)
     finally:
         os.close(fd)

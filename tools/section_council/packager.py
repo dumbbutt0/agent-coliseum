@@ -23,7 +23,8 @@ from typing import Any
 
 from tools.council.schemas import canonical_json, domain_hash
 
-from .core import HSCValidationError, require_literal, validate_path
+from .core import (HSCValidationError, require_literal, strict_json_bytes,
+                   validate_path)
 from .native import observe_fd
 from .records import compute_record_content_sha256, make_record, record_ref
 
@@ -296,3 +297,170 @@ def build_assessment_manifest(*, program_ref: dict, contract_ref: dict,
         "predecessor_assessment_ref": predecessor_assessment_ref,
     }
     return make_record("section_assessment_manifest.v1", payload)
+
+
+_ASSESSMENT_DECL_KEYS = {
+    "program_ref", "contract_ref", "work_item_id", "assessor_assignment_ref",
+    "assessor_context_ref", "proposal_ref", "predecessor_assessment_ref",
+    "declared_disposition", "error_reason", "check_declaration_output_relpaths",
+    "finding_declaration_output_relpaths"}
+_CHECK_DECL_KEYS = {"check_id", "status", "evidence_output_relpath"}
+
+
+def package_assessment_leaf(leaf_map: dict[str, bytes], *, emitter: ContentEmitter,
+                            program_ref: dict, contract_ref: dict,
+                            work_item_id: str, assessor_assignment_ref: dict,
+                            assessor_context_ref: dict, proposal_ref: dict,
+                            required_check_ids: list[str],
+                            records_prefix: str,
+                            assessment_relpath: str = "assessment.json") -> dict:
+    """The ONE trusted packaging transformation (design §6.8, finding 001734-1).
+
+    Given the single frozen ``{leaf-relative path: bytes}`` map of a sealed
+    assessor output leaf, this parses and validates the sealed assessment /
+    check / finding declarations, wraps **every and only** leaf member exactly
+    once with its exact typed path, resolves every declared path through that
+    map, recomputes the check results / findings / finding inventory / disposition
+    / blocker count, and constructs the manifest — refusing on any omitted leaf
+    member, swapped path→ref mapping, mismatched declared disposition, or missing
+    contract-required check. Callers cannot omit a file, repoint a declared path,
+    or present a pass over blocking bytes: the mapping is exhaustive and derived.
+
+    Returns ``{"manifest", "findings", "contents"}``; the wrapped bytes are staged
+    in ``emitter.blobs``. ``records_prefix`` is the repository directory the
+    finding records are slotted under for the finding-inventory hash."""
+    if assessment_relpath not in leaf_map:
+        raise HSCValidationError("assessor leaf has no assessment declaration")
+    decl = strict_json_bytes(leaf_map[assessment_relpath], "assessment_declaration")
+    if not isinstance(decl, dict) or set(decl) != _ASSESSMENT_DECL_KEYS:
+        raise HSCValidationError("assessment declaration has unexpected keys")
+    # The sealed static context must equal the dispatch context exactly.
+    if decl["program_ref"] != program_ref or \
+            decl["contract_ref"] != contract_ref or \
+            decl["work_item_id"] != work_item_id or \
+            decl["assessor_assignment_ref"] != assessor_assignment_ref or \
+            decl["assessor_context_ref"] != assessor_context_ref or \
+            decl["proposal_ref"] != proposal_ref:
+        raise HSCValidationError("assessment declaration context differs from "
+                                 "its dispatch")
+
+    check_paths = decl["check_declaration_output_relpaths"]
+    finding_paths = decl["finding_declaration_output_relpaths"]
+    for label, paths in (("check", check_paths), ("finding", finding_paths)):
+        if not isinstance(paths, list) or len(paths) != len(set(paths)):
+            raise HSCValidationError(f"{label} declaration paths are not unique")
+
+    # Parse the check and finding declaration blobs and enumerate the EXACT
+    # expected leaf membership (declaration + every path it references).
+    expected = {assessment_relpath}
+    check_blobs: dict[str, dict] = {}
+    for path in check_paths:
+        if path not in leaf_map:
+            raise HSCValidationError(f"declared check path {path!r} absent from "
+                                     "the leaf")
+        blob = strict_json_bytes(leaf_map[path], f"check_declaration:{path}")
+        if not isinstance(blob, dict) or set(blob) != _CHECK_DECL_KEYS:
+            raise HSCValidationError(f"check declaration {path!r} has bad keys")
+        require_literal(blob["status"], ("pass", "fail", "error"),
+                        f"check {path} status")
+        check_blobs[path] = blob
+        expected.add(path)
+        expected.add(validate_path(blob["evidence_output_relpath"],
+                                   "check evidence path"))
+    finding_blobs: dict[str, dict] = {}
+    for path in finding_paths:
+        if path not in leaf_map:
+            raise HSCValidationError(f"declared finding path {path!r} absent "
+                                     "from the leaf")
+        blob = validate_finding_declaration(
+            strict_json_bytes(leaf_map[path], f"finding_declaration:{path}"))
+        finding_blobs[path] = blob
+        expected.add(path)
+        expected.add(validate_path(blob["evidence_output_relpath"],
+                                   "finding evidence path"))
+        expected.add(validate_path(blob["reproduction_output_relpath"],
+                                   "finding reproduction path"))
+        if blob["resolution_output_relpath"] is not None:
+            expected.add(validate_path(blob["resolution_output_relpath"],
+                                       "finding resolution path"))
+    # Every-and-only: the leaf contains exactly the referenced membership.
+    if set(leaf_map) != expected:
+        raise HSCValidationError("assessor leaf membership differs from its "
+                                 "declared references (omission or extra file)")
+
+    # Wrap every leaf member once with its exact typed artifact + worker path.
+    kinds = {assessment_relpath: "assessment_declaration"}
+    for path, blob in check_blobs.items():
+        kinds[path] = "check_declaration"
+        kinds[blob["evidence_output_relpath"]] = "check_evidence"
+    for path, blob in finding_blobs.items():
+        kinds[path] = "finding_declaration"
+        kinds[blob["evidence_output_relpath"]] = "finding_evidence"
+        kinds[blob["reproduction_output_relpath"]] = "reproduction"
+        if blob["resolution_output_relpath"] is not None:
+            kinds[blob["resolution_output_relpath"]] = "resolution"
+    contents: dict[str, dict] = {}
+    for path in sorted(leaf_map):
+        media = "application/json" if kinds[path] in (
+            "assessment_declaration", "check_declaration",
+            "finding_declaration") else "text/plain"
+        contents[path] = emitter.wrap(
+            program_ref, kinds[path], leaf_map[path], worker_relpath=path,
+            producer_assignment_ref=assessor_assignment_ref, media_type=media)
+
+    # Recompute check results and findings, resolving declared paths to refs.
+    check_results = [{
+        "check_id": blob["check_id"], "status": blob["status"],
+        "evidence_ref": record_ref(contents[blob["evidence_output_relpath"]]),
+    } for blob in check_blobs.values()]
+    findings = []
+    for path in sorted(finding_blobs):
+        blob = finding_blobs[path]
+        resolution = (record_ref(contents[blob["resolution_output_relpath"]])
+                      if blob["resolution_output_relpath"] is not None else None)
+        findings.append(build_finding(
+            program_ref=program_ref, contract_ref=contract_ref,
+            assessor_assignment_ref=assessor_assignment_ref,
+            affected_proposal_ref=proposal_ref,
+            finding_declaration_ref=record_ref(contents[path]),
+            evidence_ref=record_ref(contents[blob["evidence_output_relpath"]]),
+            reproduction_ref=record_ref(
+                contents[blob["reproduction_output_relpath"]]),
+            resolution_evidence_ref=resolution, declaration=blob))
+    finding_slots = {rec["section_finding_id"]:
+                     f"{records_prefix}finding-{i:04d}.json"
+                     for i, rec in enumerate(findings)}
+
+    # The exhaustive output inventory covers every wrapped leaf blob (never
+    # itself); wrap it as the assessor read-inventory.
+    inv_bytes = output_inventory_bytes(list(contents.values()))
+    inventory = emitter.wrap(program_ref, "read_inventory", inv_bytes,
+                             worker_relpath="assessor-output-inventory.json",
+                             producer_assignment_ref=assessor_assignment_ref)
+
+    # Derive the disposition once and require the sealed declaration to agree.
+    finding_view = [{"status": b["status"],
+                     "blocks_local_pass": b["blocks_local_pass"]}
+                    for b in finding_blobs.values()]
+    disposition = derive_disposition(
+        required_check_ids=required_check_ids, check_results=check_results,
+        findings=finding_view, error_reason=decl["error_reason"])
+    if decl["declared_disposition"] != disposition:
+        raise HSCValidationError("sealed declared_disposition differs from the "
+                                 "derived local assessment")
+
+    manifest = build_assessment_manifest(
+        program_ref=program_ref, contract_ref=contract_ref,
+        work_item_id=work_item_id,
+        assessor_assignment_ref=assessor_assignment_ref,
+        assessor_context_ref=assessor_context_ref, proposal_ref=proposal_ref,
+        assessment_declaration_ref=record_ref(contents[assessment_relpath]),
+        assessor_output_inventory_ref=record_ref(inventory),
+        check_declaration_refs=[record_ref(contents[p]) for p in check_blobs],
+        check_results=check_results, finding_records=findings,
+        finding_record_relpaths=finding_slots,
+        required_check_ids=required_check_ids, error_reason=decl["error_reason"],
+        predecessor_assessment_ref=decl["predecessor_assessment_ref"])
+    return {"manifest": manifest, "findings": findings,
+            "contents": list(contents.values()) + [inventory],
+            "finding_slots": finding_slots}
