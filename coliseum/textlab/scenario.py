@@ -91,6 +91,15 @@ def build_scenario(raw: dict, where: str) -> Scenario:
     variants = _req(raw, "variants", where)
     if len(variants) < 2:
         raise SchemaError(f"{where}: needs >=2 paraphrase variants, got {len(variants)}")
+    # variant_ids must be UNIQUE: pick_variant selects by LIST POSITION
+    # (variants[seed % len]), so a colliding id makes slot identity ambiguous —
+    # two positions could carry the same id while delivering different text,
+    # hiding a content swap behind an unchanged-looking id sequence.
+    vids = [v.get("variant_id") for v in variants]
+    if len(set(vids)) != len(vids):
+        raise SchemaError(f"{where}: duplicate variant_id in {vids} — "
+                          "variant selection is positional, so ids must "
+                          "uniquely identify their slot")
     for v in variants:
         vid = _req(v, "variant_id", f"{where}.variants")
         lint_agent_facing(v.get("intro", ""), f"{where}.{vid}.intro")
@@ -179,6 +188,313 @@ def lint_twin_pair(primary: Scenario, twin: Scenario) -> list:
 def structural_issues(issues: list) -> list:
     """The lint failures that invalidate whole-run twin deltas (notes excluded)."""
     return [i for i in issues if not i.startswith("note:")]
+
+
+# --------------------------------- scrambled-history gate invariants (m7)
+#
+# The admission-gate conditions are only interpretable if they are matched-
+# except-order: A and B must carry the IDENTICAL multiset of world events merely
+# reordered, and C must be semantically identical to A (wording/formatting only).
+# lint_twin_pair checks per-step structure; these functions close the gap it
+# leaves (it never compares the reordered event multiset). Run as a preflight
+# assertion before any gate run — never in the hot loop.
+
+_VAL_POS_RE = re.compile(r"^val_pos(\d+)$")
+
+
+def _walked_dps(s: Scenario) -> list:
+    """Decision points in DELIVERY order — the runner's next-chain walk from
+    decision_points[0], not the authored list order (audit 001664 hardening:
+    a scenario could list one order and chain another). Requires every action
+    at a dp to share ONE successor (delivery is choice-independent for the
+    gate contract) and the walk to visit every dp exactly once, ending at
+    "end"."""
+    by_id = {dp.dp_id: dp for dp in s.decision_points}
+    walk, seen = [], set()
+    dp_id = s.decision_points[0].dp_id
+    while dp_id != "end":
+        if dp_id in seen:
+            raise SchemaError(f"{s.scenario_id}: delivery walk revisits "
+                              f"{dp_id!r} — the gate contract needs an "
+                              "acyclic single-pass chain")
+        dp = by_id[dp_id]
+        seen.add(dp_id)
+        walk.append(dp)
+        successors = {s.outcome_rules[f"{dp_id}/{aid}"].get(
+            "next", dp.next_default) for aid in dp.available_actions}
+        if len(successors) != 1:
+            raise SchemaError(f"{s.scenario_id}.{dp_id}: successor is "
+                              "choice-DEPENDENT (every action at a gate dp "
+                              "must share one `next`)")
+        (dp_id,) = successors
+    if len(walk) != len(s.decision_points):
+        missing = sorted(by_id.keys() - seen)
+        raise SchemaError(f"{s.scenario_id}: decision points {missing} are "
+                          "unreachable from the delivery walk")
+    return walk
+
+
+def _event_dps(s: Scenario) -> list:
+    return [dp for dp in _walked_dps(s) if "event" in dp.facts]
+
+
+def experience_sequence(s: Scenario) -> list:
+    """Ordered (event_label, valence) pairs as DELIVERED by this scenario
+    (next-chain walk order, not authored list order).
+
+    Enforces the positional-delta contract in full (audit 001664 finding 2):
+    every action at an event dp must carry the IDENTICAL COMPLETE state_delta
+    (the event is world-driven, choice-independent — no per-action side
+    channel of any kind), and that complete delta must be exactly ONE op,
+    `val_pos<K> add <valence>` where K is the event's 1-based delivery
+    position. Any additional operation on an event dp, valence-named or not,
+    is refused."""
+    seq = []
+    for pos, dp in enumerate(_event_dps(s), start=1):
+        event, valence = dp.facts.get("event"), dp.facts.get("valence")
+        if event is None or valence is None:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event dp needs "
+                              "facts.event and facts.valence")
+        deltas = set()
+        for aid in dp.available_actions:
+            ops = s.outcome_rules[f"{dp.dp_id}/{aid}"].get("state_delta", [])
+            deltas.add(tuple(
+                (o.get("field"), o.get("op"), o.get("value")) for o in ops))
+        if len(deltas) != 1:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event delta is "
+                              "choice-DEPENDENT (the complete state_delta "
+                              "must be identical for every action at an "
+                              "event dp)")
+        (all_ops,) = deltas
+        want = ((f"val_pos{pos}", "add", valence),)
+        if all_ops != want:
+            raise SchemaError(f"{s.scenario_id}.{dp.dp_id}: event delta "
+                              f"{all_ops} != expected {want} (exactly one "
+                              "positional valence op; val_pos index must "
+                              "equal the event's delivery position; no "
+                              "extra state channels on event dps)")
+        seq.append((event, valence))
+    return seq
+
+
+def experience_multiset(s: Scenario) -> dict:
+    """Position-agnostic multiset of (event_label, valence) — the content that
+    must be IDENTICAL across matched-except-order conditions."""
+    counts: dict = {}
+    for pair in experience_sequence(s):
+        counts[pair] = counts.get(pair, 0) + 1
+    return counts
+
+
+
+
+def _registry_binding_issues(scenarios, registry_path: str) -> list:
+    """Each gate scenario must match its REGISTERED behavioral_hash — the
+    independent, out-of-file authority binding content (including the ordered
+    variant payloads) to its declared identity."""
+    issues = []
+    try:
+        registered = {e.get("scenario_id"): e
+                      for e in load_registry(registry_path)["scenarios"]}
+    except (SchemaError, OSError, yaml.YAMLError) as exc:
+        return [f"gate preflight cannot read the scenario registry at "
+                f"{registry_path!r}: {exc}"]
+    for s in scenarios:
+        entry = registered.get(s.scenario_id)
+        if entry is None:
+            issues.append(f"{s.scenario_id}: not in the scenario registry — "
+                          "an unregistered scenario has no independent "
+                          "identity authority")
+            continue
+        if entry.get("behavioral_hash") != s.behavioral_hash():
+            issues.append(
+                f"{s.scenario_id}: behavioral_hash "
+                f"{s.behavioral_hash()[:12]}… != registered "
+                f"{str(entry.get('behavioral_hash'))[:12]}… — the scenario's "
+                "content (including the ordered variant payloads) is not the "
+                "content bound to this identity")
+    return issues
+
+
+def variant_payload_hash(variant: dict) -> str:
+    """sha256 over a variant's agent-facing payload (intro + decision_texts).
+
+    Used to commit a sham-control payload to its positional slot: selection is
+    positional, so identifiers alone cannot prove which text a seed receives."""
+    import hashlib
+    from .schema import canonical_json
+    body = {"intro": variant.get("intro", ""),
+            "decision_texts": variant.get("decision_texts")}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+
+
+def _dp_raw(dp) -> dict:
+    return {"dp_id": dp.dp_id, "available_actions": list(dp.available_actions),
+            "authority_pressure": dp.authority_pressure,
+            "risk_level": dp.risk_level, "time_pressure": dp.time_pressure,
+            "facts": dict(dp.facts)}
+
+
+def _renumber_val_pos(ops: list, mapping: dict) -> list:
+    out = []
+    for op in ops:
+        op = dict(op)
+        m = _VAL_POS_RE.match(str(op.get("field", "")))
+        if m and int(m.group(1)) in mapping:
+            op["field"] = f"val_pos{mapping[int(m.group(1))]}"
+        out.append(op)
+    return out
+
+
+def _b_equivalence_issues(a: Scenario, b: Scenario) -> list:
+    """B must equal A modulo ONLY the declared event permutation and the
+    positional val_pos renumbering it induces (audit 001664 finding 2): same
+    actions, dials, facts, narratives, variant texts, terminal probe, and
+    complete state deltas — order is the sole manipulated variable."""
+    issues = []
+    a_events, b_events = _event_dps(a), _event_dps(b)
+    a_labels = [dp.facts["event"] for dp in a_events]
+    b_labels = [dp.facts["event"] for dp in b_events]
+    if len(set(a_labels)) != len(a_labels) or len(set(b_labels)) != len(b_labels):
+        issues.append("A/B: duplicate event labels make the permutation "
+                      "ambiguous — canonical B-equivalence cannot be proven")
+        return issues
+    if set(a_labels) != set(b_labels):
+        return issues        # multiset check already reports this
+    # position mapping induced by the permutation: A-position -> B-position
+    b_pos = {label: i for i, label in enumerate(b_labels, start=1)}
+    pos_map = {i: b_pos[label] for i, label in enumerate(a_labels, start=1)}
+
+    # event dps: identical raw content per event label (position-independent)
+    a_by_label = {dp.facts["event"]: dp for dp in a_events}
+    b_by_label = {dp.facts["event"]: dp for dp in b_events}
+    for label in a_labels:
+        if _dp_raw(a_by_label[label]) != _dp_raw(b_by_label[label]):
+            issues.append(f"B: event dp {label!r} differs from A beyond "
+                          "position (actions/dials/facts must be identical)")
+    # non-event dps (the terminal probe): identical raw content and identical
+    # relative order
+    a_rest = [_dp_raw(dp) for dp in _walked_dps(a) if "event" not in dp.facts]
+    b_rest = [_dp_raw(dp) for dp in _walked_dps(b) if "event" not in dp.facts]
+    if a_rest != b_rest:
+        issues.append("B: non-event decision points differ from A — the "
+                      "terminal probe must be identical")
+    # whole-scenario behavioral surfaces that must be byte-equal
+    for key in ("initial_state", "actions"):
+        if a.raw.get(key) != b.raw.get(key):
+            issues.append(f"B differs from A in behavioral key {key!r} — "
+                          "order is the only permitted difference")
+    # ORDERED comparison (audit 001678): pick_variant selects by LIST POSITION
+    # (variants[seed % len]), so the variant LIST — ids, order, and content —
+    # must be identical, not merely equal as an unordered mapping. A reordered
+    # but otherwise unchanged list would silently deliver different wording
+    # for the same seed.
+    a_vars = [(v["variant_id"], v.get("intro", ""), v.get("decision_texts"))
+              for v in a.variants]
+    b_vars = [(v["variant_id"], v.get("intro", ""), v.get("decision_texts"))
+              for v in b.variants]
+    if a_vars != b_vars:
+        issues.append("B: variant list differs from A in order or content — "
+                      "seed-to-variant selection is positional, so list "
+                      "drift changes the delivered wording (content "
+                      "confound, not an order manipulation)")
+    # outcome rules: narratives, deferred consequences, and COMPLETE deltas
+    # must match A's modulo val_pos renumbering; successors must follow each
+    # scenario's own declared chain (validated by _walked_dps)
+    for dp in a_events + [dp for dp in _walked_dps(a) if "event" not in dp.facts]:
+        for aid in dp.available_actions:
+            key = f"{dp.dp_id}/{aid}"
+            ra = dict(a.outcome_rules[key])
+            rb = dict(b.outcome_rules.get(key, {}))
+            for r in (ra, rb):
+                r.pop("next", None)      # chain topology is checked by walks
+            ra["state_delta"] = _renumber_val_pos(
+                ra.get("state_delta", []), pos_map)
+            rb["state_delta"] = list(rb.get("state_delta", []))
+            if ra != rb:
+                issues.append(f"B: outcome rule {key!r} differs from A "
+                              "beyond val_pos renumbering (narrative/delta/"
+                              "consequence drift)")
+    return issues
+
+
+def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario,
+                         registry_path: str) -> list:
+    """Guard that the gate's conditions are matched-except-order.
+
+    A = developmental order, B = same multiset permuted, C = sham reorder
+    (semantically identical to A; agent-facing wording/formatting only).
+    Returns issue strings (empty = clean); raises SchemaError if a scenario
+    violates the positional-delta contract itself.
+
+    `registry_path` is REQUIRED and supplies the INDEPENDENT authority for
+    content-to-slot binding (audit 001709): a payload commitment stored beside
+    its own payload can simply be moved with it, so integrity alone proves
+    nothing about which slot a text belongs to. The scenario registry lives
+    outside the scenario file and pins each scenario's behavioral_hash, which
+    covers the ORDERED variants list — exchanging payloads (with or without
+    their adjacent hashes) changes that hash and is refused here."""
+    issues = []
+    issues.extend(_registry_binding_issues((a, b, c), registry_path))
+    if experience_multiset(a) != experience_multiset(b):
+        issues.append("A/B carry DIFFERENT experience multisets — B is not a "
+                      "permutation of A")
+    if experience_sequence(a) == experience_sequence(b):
+        issues.append("A/B deliver the identical order — B is not scrambled")
+    issues.extend(_b_equivalence_issues(a, b))
+    if experience_sequence(a) != experience_sequence(c):
+        issues.append("C differs from A in semantic event order — not a "
+                      "sham (formatting-only) control")
+    # C must be A everywhere EXCEPT agent-facing variant text: same state,
+    # actions, decision structure, and outcome rules.
+    for key in ("initial_state", "actions", "decision_points", "outcome_rules"):
+        if a.raw.get(key) != c.raw.get(key):
+            issues.append(f"C differs from A in behavioral key {key!r} — the "
+                          "sham control may vary wording only")
+    a_texts = [(v.get("intro", ""), v.get("decision_texts")) for v in a.variants]
+    c_texts = [(v.get("intro", ""), v.get("decision_texts")) for v in c.variants]
+    if a_texts == c_texts:
+        issues.append("C's variant text is byte-identical to A — a sham "
+                      "control must actually change the surface form")
+    # positional alignment (audit 001678): C rewords each SLOT, but the slot
+    # sequence must match A's — pick_variant is positional, so a reordered
+    # variant_id list would compare different paraphrase slots per seed
+    if [v["variant_id"] for v in a.variants] != \
+            [v["variant_id"] for v in c.variants]:
+        issues.append("C: variant_id list order differs from A — seed-to-"
+                      "variant selection is positional, so slot order must "
+                      "match for A|C to be a same-seed wording comparison")
+    # payload-to-slot binding (audit 001700): matching ids in matching order
+    # are NOT sufficient — C's two payloads can be exchanged while the ids
+    # stay put, so a seed records one slot identity while receiving the other
+    # slot's text. Each C variant must therefore DECLARE which A slot it
+    # rewords and COMMIT its own payload by hash. Exchanging payloads breaks
+    # the committed hash; recomputing the hash changes scramble_sham's
+    # behavioral_hash, which the scenario registry pins (revision-bound
+    # identity), so both routes are refused.
+    for pos, cv in enumerate(c.variants):
+        where = f"C slot {pos} ({cv.get('variant_id')!r})"
+        declared = cv.get("rewords")
+        expected = a.variants[pos]["variant_id"] if pos < len(a.variants) else None
+        if declared is None:
+            issues.append(f"{where}: missing 'rewords' — each sham slot must "
+                          "declare which A slot it rewords")
+        elif declared != expected:
+            issues.append(f"{where}: rewords {declared!r} but occupies the "
+                          f"slot of A's {expected!r}")
+        committed = cv.get("payload_sha256")
+        actual = variant_payload_hash(cv)
+        if committed is None:
+            issues.append(f"{where}: missing 'payload_sha256' — the sham "
+                          "payload must be committed to its slot")
+        elif committed != actual:
+            issues.append(f"{where}: payload_sha256 {str(committed)[:12]}… != "
+                          f"recomputed {actual[:12]}… — the agent-facing "
+                          "payload is not the one committed to this slot")
+    for twin, name in ((b, "B"), (c, "C")):
+        if twin.control_of != a.scenario_id:
+            issues.append(f"{name}: control_of != {a.scenario_id!r}")
+    return issues
 
 
 # ----------------------------------------------------- scenario registry (M3)

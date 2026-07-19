@@ -73,7 +73,14 @@ def verify_run_replay(run_dir: str, config_dir: str) -> tuple[bool, str]:
         result = run_scenario(
             path, run["agent_id"], run["seed"], out_root=tmp,
             arbitration=run.get("arbitration", "planner_priority"),
-            replay_from=replay_from)
+            replay_from=replay_from,
+            # scripted re-execution must replicate the RECORDED regime — the
+            # interaction mode lives in the hashed behavioral_config, so
+            # omitting it made every scripted sequential_history run drift
+            # against itself (LLM runs were unaffected: replay_from pulls the
+            # mode from the manifest and overrides this argument)
+            interaction_mode=run.get("interaction_mode",
+                                     "independent_vignettes"))
         if result.run_id != run["run_id"]:
             return (False, f"config drift: replay produced run_id "
                     f"{result.run_id} != {run['run_id']} (scenario file or "

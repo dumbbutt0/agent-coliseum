@@ -48,8 +48,12 @@ def test_all_three_m6_batches_complete_and_frozen():
         e = by[eid]
         assert e["status"] == "complete" and e["validation"] == "full"
         assert e["frozen"] is True and e.get("entry_hash")
+    # scoped to the docstring's intent: no *M6* design remains merely
+    # pre-registered (later programs — e.g. the m7 admission gate — use the
+    # pre-registered status exactly as designed and must not trip this)
     assert [e["experiment_id"] for e in raw["experiments"]
-            if e["status"] == "pre-registered"] == []
+            if e["status"] == "pre-registered"
+            and e["experiment_id"].startswith("m6-")] == []
     # a pre-registered design still binds its hash to its planned_design
     s = _synth_prereg()
     assert s["design_hash"] == design_hash(s["planned_design"])

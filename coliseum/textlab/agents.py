@@ -168,6 +168,108 @@ class ScriptedAgent(AgentInterface):
                 "persona_role": self.persona_role}
 
 
+# ---------------------------------------------------- history-sensitive deciders
+#
+# The scrambled-history admission gate (m7). These are NOT models of anything and
+# NOT moral personas — they are a pre-declared family of deciders with KNOWN
+# order-sensitivity, used to CALIBRATE the scenario+runner+metric pipeline: the
+# gate passes only if the pipeline recovers each rule's declared prediction AND
+# the sham-reorder control stays null. See docs/first-gladiator/
+# preregistrations/m7-scrambled-history-gate.md and COLISEUM-SCIENTIFIC-CHARTER.md.
+#
+# They read ONLY scenario ground truth (positional event valences threaded through
+# state via outcome_rules.state_delta, surfaced in state_before at runner.py:304) —
+# never a derived label, metric, or aggregator output (measure-never-reward). No
+# agent-internal accumulator memory: order is read from on-record positional state,
+# so no unrecorded state path exists.
+HIST_DECIDER_VERSION = "1"        # lineage input; bump on ANY rule/param/band change
+VALENCE_PREFIX = "val_pos"        # scenario contract: val_pos1..val_posN, 1-based fire order
+
+# FROZEN parameter/prediction table. Params are hashed via spec_dict(), so a silent
+# edit becomes a new regime rather than a same-cell comparison. The predictions are
+# asserted in the prereg and VERIFIED by calibration; they are not tuned to a result.
+HIST_RULES = {
+    #             kind         floor   band lo / hi     PRE-DECLARED prediction (A vs B)
+    "linear":     {"kind": "sum",      "floor": None, "lo": -1.0, "hi": 1.0},   # A == B (null)
+    "recency":    {"kind": "weighted", "floor": None, "lo": -1.0, "hi": 1.0},   # A != B (order)
+    "hysteresis": {"kind": "latch",    "floor": 2.0,  "lo": -1.0, "hi": 1.0},   # A != B + path-dep
+}
+HIST_PREDICTIONS = {"linear": "A==B (null)", "recency": "A!=B (order effect)",
+                    "hysteresis": "A!=B (order effect + path dependence)"}
+# ALL three additionally predict C == A (sham reorder is formatting-only). A decider
+# tuned to always diverge fails calibration by diverging on C or on the linear rule.
+
+
+class HistoryDecider(AgentInterface):
+    """Deterministic, order-sensitive-by-a-declared-rule decider. reflex = myopic
+    (last event only); plan = the full rule over the ordered valence vector. The two
+    passes genuinely diverge, resolved by the UNCHANGED arbitration."""
+
+    def __init__(self, rule: str):
+        if rule not in HIST_RULES:
+            raise SchemaError(f"unknown hist rule {rule!r} (have {tuple(HIST_RULES)})")
+        self.rule = rule
+        self.params = dict(HIST_RULES[rule])
+        self.kind = "scripted"
+        self.agent_id = f"scripted:hist:{rule}"
+        self.constitution = f"history-sensitive decider ({rule}); predicts {HIST_PREDICTIONS[rule]}"
+
+    def _valence_vector(self, state: dict) -> list:
+        """Ordered positional valences already threaded into state (1-based)."""
+        out, idx = [], 1
+        while f"{VALENCE_PREFIX}{idx}" in state:
+            out.append(float(state[f"{VALENCE_PREFIX}{idx}"]))
+            idx += 1
+        return out
+
+    def _trust(self, vec: list, full: bool) -> float:
+        if not full:                                 # reflex: myopic, last event only
+            return vec[-1] if vec else 0.0
+        kind = self.params["kind"]
+        if kind == "sum":                            # order-INVARIANT by construction
+            return sum(vec)
+        if kind == "weighted":                       # later positions weighted more
+            return sum((i + 1) * v for i, v in enumerate(vec))
+        run, latched = 0.0, None                     # latch: irreversible once crossed
+        for v in vec:
+            run += v
+            if latched is None and run >= self.params["floor"]:
+                latched = 1
+            elif latched is None and run <= -self.params["floor"]:
+                latched = -1
+        return self.params["floor"] * latched if latched is not None else run
+
+    def _decide(self, state, actions, deliberate) -> Choice:
+        vec = self._valence_vector(state)
+        T = self._trust(vec, full=deliberate)
+        lo, hi = self.params["lo"], self.params["hi"]
+        if T >= hi:
+            tag = "cooperate"                        # share-resource
+        elif T < lo:
+            tag = "defect"
+        elif abs(T - lo) < 0.5 or abs(T - hi) < 0.5:
+            tag = "evidence"                         # request-evidence (near a band edge)
+        else:
+            tag = "verify"                           # verify-before-trust
+        pick = _first_tagged(actions, tag) or actions[0]
+        margin = min(abs(T - lo), abs(T - hi))       # report-uncertainty via confidence
+        conf = max(0.0, min(1.0, 0.5 + margin / (2 * (hi - lo) + 1e-9)))
+        why = "reflex_last_event" if not deliberate else f"{self.params['kind']}"
+        return Choice(pick.action_id, round(conf, 4),
+                      f"{self.rule}:{why} T={T:.2f}", pick.visible_reward)
+
+    def reflex(self, state: dict, actions: list) -> Choice:
+        return self._decide(state, actions, deliberate=False)
+
+    def plan(self, state: dict, actions: list) -> Choice:
+        return self._decide(state, actions, deliberate=True)
+
+    def spec_dict(self) -> dict:
+        # params embedded so the regime hashes the ACTUAL rule/weights/floor/bands
+        return {**super().spec_dict(), "rule": self.rule, "params": self.params,
+                "hist_decider_version": HIST_DECIDER_VERSION}
+
+
 # ------------------------------------------------------------------ LLM agents
 #
 # Day-3 rulings (owner, 2026-07-10):
@@ -753,9 +855,12 @@ def agent_from_manifest(run_manifest: dict) -> ReplayLLMAgent:
 
 
 def make_agent(agent_spec: str) -> AgentInterface:
-    """Agent specs: 'scripted:<persona>' | 'llm:mock:<fixture>' | 'llm:ollama:<model>'."""
+    """Agent specs: 'scripted:<persona>' | 'scripted:hist:<rule>' |
+    'llm:mock:<fixture>' | 'llm:ollama:<model>'."""
     kind, _, arg = agent_spec.partition(":")
     if kind == "scripted":
+        if arg.startswith("hist:"):
+            return HistoryDecider(arg.split(":", 1)[1])
         return ScriptedAgent(arg or "obedient")
     if kind == "llm":
         backend, _, model = arg.partition(":")
