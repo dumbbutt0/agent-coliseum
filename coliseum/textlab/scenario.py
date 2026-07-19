@@ -286,6 +286,53 @@ def experience_multiset(s: Scenario) -> dict:
     return counts
 
 
+def imposed_history_issues(s: Scenario) -> list:
+    """The history this scenario delivers must be IMPOSED, not authored.
+
+    `experience_sequence` already proves the world EFFECT of an event is
+    choice-independent (identical complete state_delta, one shared successor
+    for every action). That is not sufficient for a live model. The runner
+    appends the chosen `action_id` and `action_label` to the agent-visible
+    history, so a two-action event point lets the model write its OWN text
+    into that history: it may acknowledge the betrayal in condition A and
+    reflect on it in condition B, and the terminal prompts then differ in
+    CONTENT, not merely in order. That silently voids "matched except
+    order", and it breaks downstream of every other static check in this
+    module — which is exactly why it needs its own guard.
+
+    An event point is therefore required to be a `kind: exposure` carrying
+    EXACTLY ONE available action, making the delivered history a function of
+    the scenario alone. The terminal probe must conversely remain a real
+    decision (>= 2 actions): if nothing is free there is no measured outcome
+    left, and an entirely imposed scenario would satisfy a naive
+    single-action check while measuring nothing at all.
+
+    Returns issue strings (empty = clean).
+    """
+    issues = []
+    for dp in _event_dps(s):
+        if not dp.is_exposure():
+            issues.append(
+                f"{s.scenario_id}.{dp.dp_id}: event point is kind "
+                f"{dp.kind!r}, not 'exposure' — an event that admits a "
+                "choice lets the agent author its own history text")
+        if len(dp.available_actions) != 1:
+            issues.append(
+                f"{s.scenario_id}.{dp.dp_id}: event point offers "
+                f"{len(dp.available_actions)} actions, not 1 — the recorded "
+                "action_id/action_label would vary with the agent's choice, "
+                "so the history is authored rather than imposed")
+    probes = [dp for dp in _walked_dps(s) if "event" not in dp.facts]
+    if not probes:
+        issues.append(f"{s.scenario_id}: no non-event decision point — an "
+                      "entirely imposed scenario measures nothing")
+    for dp in probes:
+        if len(dp.available_actions) < 2:
+            issues.append(
+                f"{s.scenario_id}.{dp.dp_id}: terminal probe offers "
+                f"{len(dp.available_actions)} actions — the measured outcome "
+                "must remain a free choice")
+    return issues
 
 
 def _registry_binding_issues(scenarios, registry_path: str) -> list:
@@ -419,7 +466,8 @@ def _b_equivalence_issues(a: Scenario, b: Scenario) -> list:
 
 
 def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario,
-                         registry_path: str) -> list:
+                         registry_path: str,
+                         imposed_history: bool = False) -> list:
     """Guard that the gate's conditions are matched-except-order.
 
     A = developmental order, B = same multiset permuted, C = sham reorder
@@ -433,9 +481,21 @@ def lint_scramble_triplet(a: Scenario, b: Scenario, c: Scenario,
     nothing about which slot a text belongs to. The scenario registry lives
     outside the scenario file and pins each scenario's behavioral_hash, which
     covers the ORDERED variants list — exchanging payloads (with or without
-    their adjacent hashes) changes that hash and is refused here."""
+    their adjacent hashes) changes that hash and is refused here.
+
+    `imposed_history` is OPT-IN and defaults to the Phase-1 behavior. The m7
+    Phase-1 triplet legitimately carries two-action event points: its deciders
+    are scripted and deterministic, so the realized path is a function of the
+    events and the histories differ only by order. That guarantee dies the
+    moment a live model does the choosing, so the m8 Phase-2 triplet must be
+    linted with `imposed_history=True`. Passing True ADDS
+    `imposed_history_issues` for all three conditions; it never relaxes or
+    skips any other check."""
     issues = []
     issues.extend(_registry_binding_issues((a, b, c), registry_path))
+    if imposed_history:
+        for s in (a, b, c):
+            issues.extend(imposed_history_issues(s))
     if experience_multiset(a) != experience_multiset(b):
         issues.append("A/B carry DIFFERENT experience multisets — B is not a "
                       "permutation of A")

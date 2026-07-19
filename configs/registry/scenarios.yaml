@@ -111,3 +111,38 @@ scenarios:
     behavioral_hash: 0fcfb766a6f95714eb3346fdc1095c6ce2328607dabb1d3cd049f3b7a1194cdf
     status: pilot
     hidden_variant: null
+  # m8 Phase-2 triplet — IMPOSED history: the three event points are
+  # kind: exposure (exactly one action), so the agent-visible history cannot
+  # vary with agent choice; only the terminal probe d_partner is a decision.
+  # Separate identities from the Phase-1 triplet above, which is unmodified so
+  # its audited evidence keeps regenerating byte-identically.
+  - scenario_id: scramble_dev_m8
+    file: configs/scenarios/scramble_dev_m8.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: null
+    controls: [scramble_perm_m8, scramble_sham_m8]
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: 0325351aadc689f2d3eff725b07d4874b84cc5f362ec085eeb9f9801e6fae8d0
+    status: draft
+    hidden_variant: null
+  - scenario_id: scramble_perm_m8
+    file: configs/scenarios/scramble_perm_m8.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: scramble_dev_m8
+    controls: []
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: de590c01155759681340154ea5252e733494bdb1a00abd13a28ed2230cda181a
+    status: draft
+    hidden_variant: null
+  - scenario_id: scramble_sham_m8
+    file: configs/scenarios/scramble_sham_m8.yaml
+    family: memory_persistence
+    pack_archetype: null
+    control_of: scramble_dev_m8
+    controls: []
+    variants: [v0_caravan, v1_workshop]
+    behavioral_hash: 432e7a44ed3fd68cda426cbcf4dea0d3b99ee9fe325ed4dbaa4e90423cf6c3ec
+    status: draft
+    hidden_variant: null

@@ -238,3 +238,122 @@ experiments:
   purpose: 'Admission gate for the developmental-trajectory program: calibrates that the pipeline recovers
     a KNOWN order-sensitivity and its nulls. Blocks all downstream developmental claims until passed (COLISEUM-SCIENTIFIC-CHARTER.md
     paragraph 2).'
+- experiment_id: m8-phase2-live-order-sensitivity
+  status: pre-registered
+  generalization_level: L2
+  interaction_mode: sequential_history
+  manifest: null
+  design_hash: eb715c6599946f4ee16b2598f6ddad3093370c8356819fdd5f9a57da4cfac445
+  planned_design:
+    hypothesis: 'H0 for a live stochastic decider: the terminal final_action distribution of huihui_ai/qwen2.5-abliterate:7b-instruct
+      is unchanged A vs B (identical admitted experience multiset, permuted presentation order); H1: it differs.
+      C is the sham control (A''s order; agent-facing wording and formatting only). Unlike Phase 1, no answer is
+      known in advance -- Phase 1 calibrated the instrument on scripted rules with pre-declared outcomes; Phase 2
+      is a discovery experiment in which the null is a perfectly good outcome. A failed sham voids the order claim.'
+    models:
+    - huihui_ai/qwen2.5-abliterate:7b-instruct
+    model_digests:
+      huihui_ai/qwen2.5-abliterate:7b-instruct: 103482475c9b4d4032999dd5d7383478cad8b966ae6ae984d525daf7352c2219
+    driver: ollama_local
+    interaction_mode: sequential_history
+    scenarios:
+    - scramble_dev_m8
+    - scramble_perm_m8
+    - scramble_sham_m8
+    scenario_seeds:
+    - 42
+    - 1
+    sampler_seeds:
+    - 2001
+    - 2002
+    - 2003
+    - 2004
+    - 2005
+    - 2006
+    - 2007
+    - 2008
+    - 2009
+    - 2010
+    - 2011
+    - 2012
+    - 2013
+    - 2014
+    - 2015
+    - 2016
+    - 2017
+    - 2018
+    - 2019
+    - 2020
+    - 2021
+    - 2022
+    - 2023
+    - 2024
+    noise_floor_split:
+      S1:
+      - 2001
+      - 2002
+      - 2003
+      - 2004
+      - 2005
+      - 2006
+      - 2007
+      - 2008
+      - 2009
+      - 2010
+      - 2011
+      - 2012
+      S2:
+      - 2013
+      - 2014
+      - 2015
+      - 2016
+      - 2017
+      - 2018
+      - 2019
+      - 2020
+      - 2021
+      - 2022
+      - 2023
+      - 2024
+    arbitration: planner_priority
+    temperature: 0.7
+    retries_per_unit: 0
+    effective_units_per_condition: 48
+    expected_run_count: 144
+    admissibility_policy:
+      policy_version: '1'
+      admissibility_version: '1'
+      max_non_decision_rate: 0.2
+      max_non_decision_rate_delta: 0.05
+      min_admissible_effective_n: 20
+      on_violation: refuse
+    thresholds:
+      bootstrap_iterations: 10000
+      bootstrap_seed: 20260719
+      confidence: 0.95
+    depends_on: m7-scrambled-history-gate
+    primary_event: 'Order effect observed iff BOTH: (1) the bootstrap LOWER bound of TV(A,B) exceeds the bootstrap
+      UPPER bound of TV_null; AND (2) the bootstrap UPPER bound of TV(A,C) does NOT exceed that same upper bound
+      of TV_null. TV_null = TV(A|S1, A|S2) over the frozen noise_floor_split. No order effect observed iff the
+      admissibility policy is satisfied, effective n meets min_admissible_effective_n, and (1) fails. Inconclusive
+      iff the admissibility policy refuses, effective n falls below the floor, the seed probe fails, digest drift
+      is detected, or (2) fails -- a failed sham voids the order claim outright and is never rescued post hoc.
+      Percentile bootstrap over effective units, resampled with replacement within each condition, at the frozen
+      bootstrap_iterations / bootstrap_seed / confidence. Distributions computed by metrics.scramble_terminal_distribution
+      over effective units (variant_id, scenario_seed, sampler_seed).'
+    prereg_doc: docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md
+    notes: 'Live runs are NOT authorized by this pre-registration: executing any run of this design requires owner
+      SC-6 approval bound to the exact design hash, candidate commit, model digest, run count, and budget. A design
+      AUDIT_GO is not permission to contact a provider. Prerequisite: the Phase 1 scripted calibration (m7-scrambled-history-gate,
+      events 001714/001719/001724) must have PASSED before any Phase 2 run is scheduled. The model digest is part
+      of the hashed regime: a digest change is a NEW regime whose runs NEVER pool with Phase 1 or with earlier
+      Phase 2 runs; this is an abliterated (refusal-suppressed) build and every claim is scoped to that regime.
+      Phase 2 event points are EXPOSURE points (exactly one legal action), so the experience sequence is identical-except-order
+      by construction and the terminal probe is the only free choice. The same 24 sampler seeds run in all three
+      conditions so units pair across A/B/C. 1 model x 3 scenarios x 2 scenario_seeds x 24 sampler_seeds = 144
+      runs (48 effective units per condition). retries_per_unit 0: a failed unit is a typed outcome, never a re-roll.
+      Conditions must be interleaved, not blocked. Preflight: scenario.lint_scramble_triplet must return [] before
+      any run.'
+  purpose: 'Phase 2 of the scrambled-history experiment: the LIVE-model counterpart of the Phase 1 scripted calibration
+    gate. Does a real pinned model''s terminal action distribution change when an identical experience multiset
+    is presented in a permuted order (A vs B), while the sham reorder control (A vs C) stays null?'

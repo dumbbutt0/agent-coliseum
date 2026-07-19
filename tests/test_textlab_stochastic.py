@@ -106,15 +106,32 @@ def test_unverified_backend_seed_excludes(tmp_path, monkeypatch):
     assert agg["excluded"][0]["reasons"] == ["backend_seed_unverified"]
 
 
-def test_ollama_seed_probe_is_scoped_record(tmp_path, monkeypatch):
-    """Amendment 3: the probe stores a scoped verification record, not a universal claim."""
-    responses = iter(["ready", "ready"])          # same seed -> byte-equal -> verified
+def _stub_digest(monkeypatch):
     monkeypatch.setattr(OllamaAgent, "_fetch_digest",
                         lambda self: (setattr(self, "model_digest", "sha256:beef"),
                                       setattr(self, "digest_status", "ok")))
-    monkeypatch.setattr(OllamaAgent, "_post",
-                        lambda self, p, n, t, options_override=None: {"response": next(responses)})
     monkeypatch.setattr(OllamaAgent, "_backend_version", lambda self: "0.9.9")
+
+
+def test_ollama_seed_probe_is_scoped_record(tmp_path, monkeypatch):
+    """Amendment 3: the probe stores a scoped verification record, not a universal claim.
+
+    M8 correction: this test previously drove the probe with a CONSTANT backend
+    (`iter(["ready", "ready"])`) and asserted it verified. That fixture is a
+    backend which ignores `options.seed` entirely, so asserting True for it
+    pinned the exact false pass the two-arm probe now exists to reject — the old
+    probe compared same-seed calls only, and "ready" satisfied it trivially. The
+    scoped-record intent above is unchanged and every original assertion is
+    retained; only the fixture is corrected to a backend that HONORS the seed,
+    which is what the probe is entitled to call verified. The rejection case the
+    old fixture masked is pinned in the companion test below. No assertion was
+    removed or loosened.
+    """
+    _stub_digest(monkeypatch)
+    # honors the seed: same seed -> same text, different seed -> different text
+    monkeypatch.setattr(OllamaAgent, "_post",
+                        lambda self, p, n, t, options_override=None:
+                        {"response": f"nonsense-{(options_override or {}).get('seed')}"})
     agent = OllamaAgent("fake:1b")
     agent.configure_sampling(STOCH, 3)
     assert agent.verify_seeded_sampling() is True
@@ -123,6 +140,24 @@ def test_ollama_seed_probe_is_scoped_record(tmp_path, monkeypatch):
     assert probe["backend_name"] == "ollama" and probe["backend_version"] == "0.9.9"
     assert probe["model_digest"] == "sha256:beef"
     assert probe["seed_probe_prompt_hash"] and probe["seed_probe_timestamp"]
+
+
+def test_ollama_seed_probe_rejects_seed_ignoring_backend(tmp_path, monkeypatch):
+    """The false pass the previous fixture encoded: a backend returning constant
+    text regardless of seed cannot support seeded replication, so it must FAIL
+    the divergence arm rather than be recorded as verified. sampler_seed enters
+    both the effective-unit key and run_hash, so a silently-ignored seed would
+    dress anonymous randomness as identified replicates."""
+    _stub_digest(monkeypatch)
+    monkeypatch.setattr(OllamaAgent, "_post",
+                        lambda self, p, n, t, options_override=None: {"response": "ready"})
+    agent = OllamaAgent("fake:1b")
+    agent.configure_sampling(STOCH, 3)
+    assert agent.verify_seeded_sampling() is False
+    assert agent.backend_seed_supported is False
+    arms = {a["arm"]: a["outcome"] for a in agent.seed_probe["seed_probe_arms"]}
+    assert arms["same_seed_reproducibility"] == "pass"   # constant text IS reproducible
+    assert arms["different_seed_divergence"] == "fail"   # ...but never diverges
 
 
 # ------------------------------------------------- counting (tests 4, 8)

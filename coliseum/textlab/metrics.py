@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 
+from .admissibility import (DECISION_ADMISSIBILITY_VERSION,
+                            decision_admissibility, load_decision_nodes)
 from .schema import (INTERACTION_MODES, SchemaError, TWIN_MAPPING_VERSION,
                      canonical_json, config_hash, regime_hashes)
 
@@ -673,3 +676,438 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
                                       # bound to (enforced at admission)
                                       "agent_regime_id": regime_by_agent[agent_id][0]}
     return out
+
+
+# ------------------- order-sensitivity report (m8 Phase 2) -------------------
+#
+# WHY THIS FILE CHANGED WITHOUT A METRICS_VERSION BUMP.
+# METRICS_VERSION freezes the METRICS-v1 *definitions* (docs/metrics/METRICS-v1.md).
+# Nothing above this line is touched: `scramble_terminal_distribution` keeps its
+# exact behavior, signature and output bytes, so the Phase-1 gate evidence and its
+# three GO verdicts (events 001714/001719/001724 @ ac693b53) continue to regenerate
+# byte-identically. What follows is a NEW, SEPARATELY VERSIONED artifact that
+# carries its own version line (ORDER_REPORT_VERSION) and its own admissibility
+# version. A new metric is an addition, not a redefinition — bumping METRICS_VERSION
+# here would falsely signal that an existing frozen definition moved.
+#
+# WHY A SUCCESSOR RATHER THAN A PATCH.
+# `scramble_terminal_distribution` is an EXACT-EQUALITY comparator written for
+# deterministic scripted deciders: one draw per unit, thresholds of exactly zero,
+# no admissibility predicate on the terminal probe, no stochastic admission, no
+# replicate support, and no inferential machinery. Every one of those is correct
+# for Phase-1 calibration and wrong for a stochastic live model. Repairing it in
+# place would retroactively reinterpret already-audited evidence; the frozen
+# instrument therefore stays frozen and Phase 2 gets its own instrument.
+
+ORDER_REPORT_VERSION = "1"
+
+# Required keys. Both argument dicts are validated up front and fail closed:
+# an order-sensitivity statistic computed without declared bounds is exactly the
+# artifact this whole module exists to prevent.
+_POLICY_KEYS = ("policy_version", "admissibility_version", "max_non_decision_rate",
+                "max_non_decision_rate_delta", "min_admissible_effective_n",
+                "on_violation")
+_THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
+                   "noise_floor_split")
+
+# The three condition cells plus the two within-condition null half-cells. The
+# null halves ARE compared cells (TV_null compares them), so they are charged
+# against the same policy bounds as A/B/C — a noise floor estimated from a cell
+# the policy would have refused is not a noise floor.
+_NULL_A1, _NULL_A2 = "A|S1", "A|S2"
+_COMPARED_PAIRS = (("A", "B"), ("A", "C"), (_NULL_A1, _NULL_A2))
+
+
+def _order_validate(admissibility_policy: dict, thresholds: dict) -> None:
+    """Fail-closed validation of the two declared-bounds arguments."""
+    for name, obj, keys in (("admissibility_policy", admissibility_policy, _POLICY_KEYS),
+                            ("thresholds", thresholds, _THRESHOLD_KEYS)):
+        if not isinstance(obj, dict):
+            raise SchemaError(f"{name} must be a dict, got {type(obj).__name__}")
+        missing = [k for k in keys if k not in obj]
+        if missing:
+            raise SchemaError(f"{name} is missing required keys {missing} — the "
+                              "bounds of an order-sensitivity claim are part of "
+                              "the claim and may not be defaulted")
+    # A v2 predicate must never retroactively reinterpret a frozen v1 experiment:
+    # the non-decision rates the policy bounds are only comparable within one
+    # definition of "is this a decision".
+    declared = admissibility_policy["admissibility_version"]
+    if declared != DECISION_ADMISSIBILITY_VERSION:
+        raise SchemaError(
+            f"admissibility_policy declares admissibility_version {declared!r} but "
+            f"this build implements {DECISION_ADMISSIBILITY_VERSION!r} — refusing "
+            "to reinterpret a frozen experiment under a different admissibility "
+            "definition")
+    if admissibility_policy["on_violation"] != "refuse":
+        raise SchemaError(
+            f"on_violation={admissibility_policy['on_violation']!r} is not "
+            "supported — the preregistered policy is 'refuse'; there is no "
+            "'warn and report a number anyway' mode")
+    split = thresholds["noise_floor_split"]
+    if not isinstance(split, dict) or set(split) != {"S1", "S2"}:
+        raise SchemaError("thresholds.noise_floor_split must be {'S1': [...], 'S2': [...]}")
+    s1, s2 = set(split["S1"]), set(split["S2"])
+    if not s1 or not s2:
+        raise SchemaError("noise_floor_split halves must both be non-empty")
+    if s1 & s2:
+        raise SchemaError(f"noise_floor_split halves overlap on {sorted(s1 & s2, key=str)} "
+                          "— the within-condition null must compare DISJOINT samples")
+    if not isinstance(thresholds["bootstrap_iterations"], int) or \
+            thresholds["bootstrap_iterations"] < 1:
+        raise SchemaError("thresholds.bootstrap_iterations must be a positive int")
+    conf = thresholds["confidence"]
+    if not isinstance(conf, (int, float)) or not 0.0 < conf < 1.0:
+        raise SchemaError("thresholds.confidence must lie strictly in (0, 1)")
+
+
+def _order_admit(run: dict, rd: str) -> list:
+    """Exclusion reasons for one run, or [] if it enters the analysis.
+
+    Mirrors `_admit`'s stochastic branch (the defect being closed: the Phase-1
+    comparator claimed 'same admission rule as aggregate()' in its docstring but
+    read only `reportable`, so a stochastic run whose seed probe FAILED — i.e. a
+    backend that silently ignored `options.seed` — was silently admitted).
+    """
+    reasons = []
+    if not run.get("reportable", False):
+        reasons.append("non_reportable")
+    if not run.get("stochastic_reportable", False):
+        # identical fallback shape to compute_run_metrics(): a run predating the
+        # sampling block is unverified, not clean.
+        why = run.get("stochastic_exclusion_reasons",
+                      ["legacy_no_sampling_metadata"] if "sampling" not in run else [])
+        reasons.extend(why or ["not_stochastic_reportable"])
+    return reasons
+
+
+def _order_cell() -> dict:
+    return {"units": {}, "non_decision_n": 0, "non_decision_reasons": {},
+            "non_decision_unit_keys": []}
+
+
+def _order_distribution(units: dict) -> tuple:
+    """(normalized distribution, raw counts, admissible draw count) over a cell.
+
+    The distribution is over admissible DRAWS pooled across effective units; the
+    unit is the independent resampling entity (see the bootstrap), the draw is
+    the observation. This is why replicates aggregate instead of collapsing or
+    hard-erroring the way `cell["units"]`'s dict-keyed-by-unit did.
+    """
+    counts: dict = {}
+    total = 0
+    for draws in units.values():
+        for action in draws:
+            counts[action] = counts.get(action, 0) + 1
+            total += 1
+    dist = {a: round(counts[a] / total, 6) for a in sorted(counts)} if total else {}
+    return dist, {a: counts[a] for a in sorted(counts)}, total
+
+
+def _order_cell_body(cell: dict) -> dict:
+    """The per-cell census. Always emitted — including on the refusal path,
+    which is the whole point: an auditor must be able to see WHY the aggregator
+    refused without being handed a distance that does not mean anything."""
+    dist, counts, draw_n = _order_distribution(cell["units"])
+    admissible_units = sum(1 for d in cell["units"].values() if d)
+    total_draws = draw_n + cell["non_decision_n"]
+    return {
+        "distribution": dist,
+        "counts": counts,
+        # the policy's `min_admissible_effective_n` is charged against EFFECTIVE
+        # UNITS with at least one admissible draw, not against raw draws: repeated
+        # sampling of one unit is not new independent evidence (prereg §Sampling).
+        "admissible_effective_n": admissible_units,
+        "admissible_draw_n": draw_n,
+        "non_decision_n": cell["non_decision_n"],
+        "total_draw_n": total_draws,
+        # None, not 0.0, on an empty cell — mirrors run_decision_census: an empty
+        # census has no rate, and 0.0 would read as "measured, clean".
+        "non_decision_rate": (round(cell["non_decision_n"] / total_draws, 6)
+                              if total_draws else None),
+        "non_decision_reasons": {k: cell["non_decision_reasons"][k]
+                                 for k in sorted(cell["non_decision_reasons"])},
+        "effective_unit_n": len(cell["units"]),
+    }
+
+
+def _order_percentile(values: list, q: float) -> float:
+    """Nearest-rank percentile on the sorted bootstrap replicates. Stdlib only,
+    integer index — no interpolation rule to drift and no numpy dependency, so
+    the interval is byte-reproducible across environments."""
+    ordered = sorted(values)
+    idx = int(round(q * (len(ordered) - 1)))
+    return ordered[max(0, min(len(ordered) - 1, idx))]
+
+
+def _order_bootstrap(rng, unit_draws_x: list, unit_draws_y: list,
+                     iterations: int, confidence: float) -> dict:
+    """Percentile bootstrap of TV(X, Y) over EFFECTIVE UNITS, resampled with
+    replacement WITHIN each condition (prereg §Analysis rule 4).
+
+    Only units carrying at least one admissible draw are resampled. That makes
+    the estimand explicitly CONDITIONAL ON PARSEABILITY, exactly as the
+    preregistration requires it to be reported; the non-decision census, not the
+    interval, is what bounds the excluded mass.
+
+    `rng` is a caller-owned random.Random seeded from the frozen bootstrap seed:
+    deterministic, reproducible, and never the global RNG (which any other import
+    could perturb) and never numpy (a second RNG implementation to pin).
+    """
+    def resample(units):
+        counts: dict = {}
+        total = 0
+        for _ in range(len(units)):
+            for action in units[rng.randrange(len(units))]:
+                counts[action] = counts.get(action, 0) + 1
+                total += 1
+        return {a: c / total for a, c in counts.items()} if total else {}
+
+    reps = []
+    for _ in range(iterations):
+        # both conditions resampled in a FIXED order every iteration, so the RNG
+        # draw sequence — and therefore the interval — is byte-stable
+        px = resample(unit_draws_x)
+        py = resample(unit_draws_y)
+        reps.append(_tv_distance(px, py))
+    alpha = (1.0 - confidence) / 2.0
+    return {"lower": round(_order_percentile(reps, alpha), 6),
+            "upper": round(_order_percentile(reps, 1.0 - alpha), 6),
+            "median": round(_order_percentile(reps, 0.5), 6),
+            "iterations": iterations}
+
+
+def order_sensitivity_report(run_dirs: list, conditions: dict, *,
+                             admissibility_policy: dict, thresholds: dict) -> dict:
+    """Distributional order-sensitivity report for the m8 Phase-2 live experiment.
+
+    Versioned successor to `scramble_terminal_distribution` (which is UNCHANGED
+    and still serves Phase-1 evidence). `conditions` maps condition labels to
+    scenario_ids, e.g. {"A": "scramble_dev_m8", "B": "scramble_perm_m8",
+    "C": "scramble_sham_m8"}.
+
+    `admissibility_policy` and `thresholds` are KEYWORD-ONLY WITH NO DEFAULT.
+    That is the fail-closed core of this function: it must not be possible to
+    compute this statistic without declaring the bounds it will be judged
+    against, because a bound chosen after seeing the number is not a bound.
+
+    Semantics (all frozen in the preregistration
+    docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md):
+
+    1. ADMISSION — a run enters only if it is `reportable`, stochastically
+       admitted, and regime-bound (same non-empty agent_regime_id and
+       agent_config across ALL conditions for a logical agent; mixed or missing
+       identities are REFUSED, never pooled).
+    2. TERMINAL ADMISSIBILITY — the probe is the LAST decision_node. If it is not
+       admissible under `admissibility.decision_admissibility`, the draw counts
+       toward `non_decision_n` and contributes NOTHING to the distribution. It is
+       never re-pointed at an earlier decision node: silently substituting an
+       earlier decision would be a second fabrication on top of the first.
+    3. REPLICATES — many draws per effective unit (variant, scenario_seed,
+       sampler_seed) are supported and aggregate into the cell distribution.
+    4. DISTANCES — TV(A,B), TV(A,C), and the within-condition null
+       TV_null = TV(A|S1, A|S2) over the frozen sampler-seed partition.
+    5. UNCERTAINTY — percentile bootstrap over effective units at the frozen
+       iteration count and seed.
+    6. VERDICT — see below; a failed sham VOIDS the order claim outright.
+
+    REFUSAL (SchemaError). Raised if any compared cell's non-decision rate
+    exceeds `max_non_decision_rate`; if any compared PAIR's rates differ by more
+    than `max_non_decision_rate_delta`; or if any compared cell has fewer than
+    `min_admissible_effective_n` admissible effective units. The full report body
+    — including every per-cell census — is built FIRST and attached to the
+    exception as `exc.report`, but `tv_distances`, `bootstrap` and `verdict` are
+    NEVER computed or emitted on that path. A refusal is an inconclusive result,
+    not a number to be interpreted.
+
+    The differential (delta) bound is the scientifically load-bearing one: a parse
+    fallback resolves to `actions[0]`, identical across all three conditions, so a
+    condition whose rendered history provokes more malformed output piles mass on
+    one specific terminal action and manufactures TV(A,B) > 0 out of formatting.
+    """
+    _AV = DECISION_ADMISSIBILITY_VERSION
+    _order_validate(admissibility_policy, thresholds)
+    split = thresholds["noise_floor_split"]
+    s1, s2 = set(split["S1"]), set(split["S2"])
+    scen_to_cond = {sid: label for label, sid in conditions.items()}
+
+    per_agent: dict = {}
+    regime_by_agent: dict = {}
+    excluded: list = []
+    for rd in sorted(run_dirs):
+        report_id = os.path.basename(os.path.normpath(rd))
+        with open(os.path.join(rd, "run.json"), encoding="utf-8") as fh:
+            run = json.load(fh)
+        cond = scen_to_cond.get(run["scenario_id"])
+        if cond is None:
+            continue                      # not a named condition: not our evidence
+        reasons = _order_admit(run, rd)
+        if reasons:
+            excluded.append({"report_id": report_id, "reasons": sorted(set(reasons))})
+            continue
+
+        # --- regime binding (carried forward verbatim from the Phase-1 gate,
+        # audit 001664 finding 1): an order-effect comparison is only meaningful
+        # over ONE frozen decider regime, so parameter or model drift between
+        # conditions can never masquerade as an order effect.
+        regime = run.get("agent_regime_id") or ""
+        agent_cfg = canonical_json(run.get("agent_config") or {})
+        if not regime or not run.get("agent_config"):
+            raise SchemaError(f"{rd}: run lacks agent_regime_id/agent_config — "
+                              "regime-unbound evidence cannot enter an "
+                              "order-effect comparison")
+        agent_id = run["agent_id"]
+        known = regime_by_agent.setdefault(agent_id, (regime, agent_cfg, rd))
+        if (regime, agent_cfg) != known[:2]:
+            raise SchemaError(
+                f"agent {agent_id!r}: MIXED decider regimes across conditions "
+                f"({known[0][:16]}… in {known[2]} vs {regime[:16]}… in {rd}) — "
+                "cross-regime cells can fake an order effect and are refused")
+
+        nodes = load_decision_nodes(rd)
+        if not nodes:
+            raise SchemaError(f"{rd}: no decision_node records")
+        terminal = nodes[-1]              # the terminal probe, and ONLY it
+        verdict = decision_admissibility(terminal)
+        unit = (run["variant_id"], run.get("scenario_seed"), run.get("sampler_seed"))
+
+        cells = per_agent.setdefault(agent_id, {})
+        targets = [cond]
+        if cond == "A":
+            # the within-condition null: condition A split along the FROZEN
+            # sampler-seed partition, declared before execution and never redrawn
+            if unit[2] in s1:
+                targets.append(_NULL_A1)
+            elif unit[2] in s2:
+                targets.append(_NULL_A2)
+        for label in targets:
+            cell = cells.setdefault(label, _order_cell())
+            if verdict["admissible"]:
+                cell["units"].setdefault(unit, []).append(terminal["final_action"])
+            else:
+                cell["units"].setdefault(unit, [])
+                cell["non_decision_n"] += 1
+                r = verdict["reason"]
+                cell["non_decision_reasons"][r] = cell["non_decision_reasons"].get(r, 0) + 1
+
+    # ---- report BODY first (census included), gate second. ------------------
+    body = {
+        "report_id": "order_sensitivity",
+        "order_report_version": ORDER_REPORT_VERSION,
+        # echoed, deliberately NOT bumped — see the header comment on this block
+        "metrics_version": METRICS_VERSION,
+        "admissibility_version": _AV,
+        "policy_version": admissibility_policy["policy_version"],
+        "conditions": dict(conditions),
+        "admissibility_policy": dict(admissibility_policy),
+        "thresholds": dict(thresholds),
+        # content-addressed: a report can be joined back to the exact bounds it
+        # was judged under, even if the surrounding document is edited
+        "policy_hash": config_hash(admissibility_policy),
+        "thresholds_hash": config_hash(thresholds),
+        "excluded": sorted(excluded, key=lambda e: e["report_id"]),
+        "per_agent": {},
+    }
+    for agent_id in sorted(per_agent):
+        cells = per_agent[agent_id]
+        body["per_agent"][agent_id] = {
+            "agent_regime_id": regime_by_agent[agent_id][0],
+            "cells": {label: _order_cell_body(cells[label]) for label in sorted(cells)},
+        }
+
+    max_rate = admissibility_policy["max_non_decision_rate"]
+    max_delta = admissibility_policy["max_non_decision_rate_delta"]
+    min_n = admissibility_policy["min_admissible_effective_n"]
+    required = ("A", "B", "C", _NULL_A1, _NULL_A2)
+    violations: list = []
+    for agent_id in sorted(per_agent):
+        agent_cells = body["per_agent"][agent_id]["cells"]
+        for label in required:
+            c = agent_cells.get(label)
+            if c is None:
+                violations.append(f"{agent_id}|{label}: no admissible evidence "
+                                  f"(admissible_effective_n=0 < {min_n})")
+                continue
+            if c["admissible_effective_n"] < min_n:
+                violations.append(
+                    f"{agent_id}|{label}: admissible_effective_n="
+                    f"{c['admissible_effective_n']} < min_admissible_effective_n={min_n}")
+            rate = c["non_decision_rate"]
+            if rate is not None and rate > max_rate:
+                violations.append(
+                    f"{agent_id}|{label}: non_decision_rate={rate} > "
+                    f"max_non_decision_rate={max_rate}")
+        for x, y in _COMPARED_PAIRS:
+            cx, cy = agent_cells.get(x), agent_cells.get(y)
+            if cx is None or cy is None:
+                continue                  # already reported as a missing cell
+            rx, ry = cx["non_decision_rate"], cy["non_decision_rate"]
+            if rx is None or ry is None:
+                continue                  # already reported as an empty cell
+            if round(abs(rx - ry), 6) > max_delta:
+                violations.append(
+                    f"{agent_id}|{x}-vs-{y}: non_decision_rate {rx} vs {ry} "
+                    f"(delta={round(abs(rx - ry), 6)}) > "
+                    f"max_non_decision_rate_delta={max_delta}")
+    if violations:
+        # tv_distances / bootstrap / verdict are absent from `body` here and are
+        # never computed on this path.
+        exc = SchemaError(
+            "order-sensitivity aggregator REFUSES under admissibility policy "
+            f"{admissibility_policy['policy_version']!r} "
+            f"(admissibility_version {_AV}): " + "; ".join(violations) +
+            " — a refusal is an inconclusive result, not a number to interpret")
+        exc.report = body
+        raise exc
+
+    # ---- distances, uncertainty, verdict — reached ONLY past the gate -------
+    rng = random.Random(thresholds["bootstrap_seed"])
+    iterations = thresholds["bootstrap_iterations"]
+    confidence = thresholds["confidence"]
+    for agent_id in sorted(per_agent):
+        cells = per_agent[agent_id]
+        out = body["per_agent"][agent_id]
+        drawn = {label: [d for d in cells[label]["units"].values() if d]
+                 for label in cells}
+        dists = {label: out["cells"][label]["distribution"] for label in cells}
+        pairs = (("A|B", "A", "B"), ("A|C", "A", "C"),
+                 ("null", _NULL_A1, _NULL_A2))
+        out["tv_distances"] = {name: round(_tv_distance(dists[x], dists[y]), 6)
+                               for name, x, y in pairs}
+        # fixed statistic order => fixed RNG consumption order => byte-identical
+        # intervals on repeated calls with identical inputs
+        out["bootstrap"] = {name: _order_bootstrap(rng, drawn[x], drawn[y],
+                                                   iterations, confidence)
+                            for name, x, y in pairs}
+        null_upper = out["bootstrap"]["null"]["upper"]
+        ab_lower = out["bootstrap"]["A|B"]["lower"]
+        ac_upper = out["bootstrap"]["A|C"]["upper"]
+        out["decision_inputs"] = {"tv_ab_lower": ab_lower,
+                                  "tv_ac_upper": ac_upper,
+                                  "tv_null_upper": null_upper,
+                                  "confidence": confidence}
+        # Preregistered decision rule, verbatim. The SHAM is evaluated FIRST:
+        # a failed sham voids the order claim outright, so a positive result can
+        # never be emitted alongside one. C is A's own order with only agent-facing
+        # wording changed — if that alone moves the distribution, the instrument or
+        # the surface is what moved, and TV(A,B) is not attributable to order.
+        sham_null = ac_upper <= null_upper
+        if not sham_null:
+            out["verdict"] = "inconclusive"
+            out["verdict_reason"] = (
+                f"sham not null: bootstrap upper bound of TV(A,C)={ac_upper} "
+                f"exceeds upper bound of TV_null={null_upper} — reported as "
+                "instrument or surface sensitivity; the order claim is void")
+        elif ab_lower > null_upper:
+            out["verdict"] = "order_effect_observed"
+            out["verdict_reason"] = (
+                f"bootstrap lower bound of TV(A,B)={ab_lower} exceeds upper bound "
+                f"of TV_null={null_upper}, and the sham is null "
+                f"(TV(A,C) upper={ac_upper} <= {null_upper})")
+        else:
+            out["verdict"] = "no_order_effect_observed"
+            out["verdict_reason"] = (
+                f"admissibility policy satisfied and effective n met, but the "
+                f"bootstrap lower bound of TV(A,B)={ab_lower} does not exceed the "
+                f"upper bound of TV_null={null_upper}")
+    return body

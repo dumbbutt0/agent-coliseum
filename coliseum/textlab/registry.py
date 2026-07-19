@@ -57,6 +57,179 @@ def design_hash(planned_design: dict) -> str:
         canonical_json(planned_design).encode("utf-8")).hexdigest()
 
 
+# --------------------------------------------------- frozen-policy accessors
+#
+# Admissibility bounds and analysis thresholds live INSIDE planned_design, so
+# they are covered by design_hash and cannot be moved after outcomes are seen
+# without breaking the pre-registration lint. These loaders are the ONLY
+# supported read path; nothing may re-derive a bound from run evidence.
+
+ADMISSIBILITY_POLICY_KEYS = (
+    "policy_version", "admissibility_version", "max_non_decision_rate",
+    "max_non_decision_rate_delta", "min_admissible_effective_n",
+    "on_violation")
+THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence")
+_RATE_KEYS = ("max_non_decision_rate", "max_non_decision_rate_delta")
+
+# experiments whose frozen design MUST carry a policy + thresholds + a
+# noise-floor split (a stochastic live design cannot be analysed without them)
+POLICY_REQUIRED_EXPERIMENTS = ("m8-phase2-live-order-sensitivity",)
+
+
+def _find_entry(registry_path: str, experiment_id: str) -> dict:
+    raw = load_experiments_registry(registry_path)
+    entry = next((e for e in raw["experiments"]
+                  if e.get("experiment_id") == experiment_id), None)
+    if entry is None:
+        raise SchemaError(f"experiment {experiment_id!r} is not registered")
+    return entry
+
+
+def _frozen_design(registry_path: str, experiment_id: str) -> dict:
+    """planned_design, refusing to serve it if the entry's design_hash does
+    not reconstruct — a tampered pre-registration must not load quietly."""
+    entry = _find_entry(registry_path, experiment_id)
+    pd = entry.get("planned_design")
+    if not isinstance(pd, dict):
+        raise SchemaError(f"{experiment_id}: no planned_design mapping")
+    want = design_hash(pd)
+    if entry.get("design_hash") != want:
+        raise SchemaError(
+            f"{experiment_id}: design_hash {str(entry.get('design_hash'))[:16]}"
+            f"… != recomputed {want[:16]}… — the frozen design was mutated")
+    return pd
+
+
+def load_admissibility_policy(registry_path: str, experiment_id: str) -> dict:
+    """The frozen admissibility bounds from planned_design.admissibility_policy."""
+    pd = _frozen_design(registry_path, experiment_id)
+    pol = pd.get("admissibility_policy")
+    if not isinstance(pol, dict):
+        raise SchemaError(f"{experiment_id}: planned_design has no "
+                          "admissibility_policy mapping")
+    return dict(pol)
+
+
+def load_thresholds(registry_path: str, experiment_id: str) -> dict:
+    """The frozen analysis thresholds, as ONE bundle the analysis can consume.
+
+    Composition note (Director assembly, M8): the bundle is assembled from two
+    places in planned_design, deliberately. `thresholds` holds the inferential
+    parameters (bootstrap iterations/seed/confidence); `noise_floor_split` sits
+    at planned_design top level because it is a property of the SAMPLING design
+    — it partitions the declared sampler_seeds — and belongs beside them rather
+    than inside a block about bootstrapping. The analysis needs both to evaluate
+    the decision rule, so the loader returns them joined. Both live under
+    planned_design and are therefore equally covered by design_hash, so neither
+    can be moved after seeing outcomes; the split is a presentation choice,
+    never a difference in what is frozen.
+    """
+    pd = _frozen_design(registry_path, experiment_id)
+    th = pd.get("thresholds")
+    if not isinstance(th, dict):
+        raise SchemaError(f"{experiment_id}: planned_design has no "
+                          "thresholds mapping")
+    bundle = dict(th)
+    split = pd.get("noise_floor_split")
+    if split is not None:
+        bundle["noise_floor_split"] = split
+    return bundle
+
+
+def _lint_frozen_policy(eid: str, pd: dict) -> list:
+    """Policy/threshold/noise-floor checks for a stochastic pre-registration.
+    Returns issue strings. Self-contradiction must fail, not load quietly."""
+    issues = []
+
+    pol = pd.get("admissibility_policy")
+    if not isinstance(pol, dict):
+        issues.append(f"{eid}: planned_design missing 'admissibility_policy' "
+                      "(a stochastic live design must freeze its bounds)")
+    else:
+        for k in ADMISSIBILITY_POLICY_KEYS:
+            if k not in pol:
+                issues.append(f"{eid}: admissibility_policy missing {k!r}")
+        if "on_violation" in pol and pol["on_violation"] != "refuse":
+            issues.append(f"{eid}: admissibility_policy on_violation "
+                          f"{pol['on_violation']!r} != 'refuse' — a violated "
+                          "bound refuses, it never degrades to a number")
+        for k in _RATE_KEYS:
+            if k in pol:
+                v = pol[k]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not (0 <= v <= 1):
+                    issues.append(f"{eid}: admissibility_policy {k} {v!r} is "
+                                  "not a rate in [0, 1]")
+        n = pol.get("min_admissible_effective_n")
+        if "min_admissible_effective_n" in pol and (
+                isinstance(n, bool) or not isinstance(n, int) or n <= 0):
+            issues.append(f"{eid}: admissibility_policy "
+                          f"min_admissible_effective_n {n!r} must be a "
+                          "positive int")
+
+    th = pd.get("thresholds")
+    if not isinstance(th, dict):
+        issues.append(f"{eid}: planned_design missing 'thresholds' (bootstrap "
+                      "parameters must be frozen before any outcome is seen)")
+    else:
+        for k in THRESHOLD_KEYS:
+            if k not in th:
+                issues.append(f"{eid}: thresholds missing {k!r}")
+        it = th.get("bootstrap_iterations")
+        if "bootstrap_iterations" in th and (
+                isinstance(it, bool) or not isinstance(it, int) or it <= 0):
+            issues.append(f"{eid}: thresholds bootstrap_iterations {it!r} "
+                          "must be a positive int")
+        bs = th.get("bootstrap_seed")
+        if "bootstrap_seed" in th and (
+                isinstance(bs, bool) or not isinstance(bs, int)):
+            issues.append(f"{eid}: thresholds bootstrap_seed {bs!r} must be "
+                          "an int")
+        cf = th.get("confidence")
+        if "confidence" in th and (
+                isinstance(cf, bool) or not isinstance(cf, (int, float))
+                or not (0 < cf < 1)):
+            issues.append(f"{eid}: thresholds confidence {cf!r} must be in "
+                          "(0, 1)")
+
+    # noise-floor split: TV_null = TV(A|S1, A|S2), so the split must partition
+    # the DECLARED sampler seeds exactly — declared before execution and never
+    # re-drawn after seeing outcomes.
+    split = pd.get("noise_floor_split")
+    if not isinstance(split, dict):
+        issues.append(f"{eid}: planned_design missing 'noise_floor_split' "
+                      "(the within-condition null must be frozen, not chosen "
+                      "after the fact)")
+    else:
+        declared = pd.get("sampler_seeds") or []
+        halves = {}
+        for half in ("S1", "S2"):
+            vals = split.get(half)
+            if not isinstance(vals, list) or not vals:
+                issues.append(f"{eid}: noise_floor_split {half} must be a "
+                              "non-empty list of sampler seeds")
+                halves[half] = None
+                continue
+            if len(vals) != len(set(vals)):
+                issues.append(f"{eid}: noise_floor_split {half} contains "
+                              "duplicate seeds")
+            halves[half] = set(vals)
+        if halves.get("S1") is not None and halves.get("S2") is not None:
+            s1, s2 = halves["S1"], halves["S2"]
+            overlap = sorted(s1 & s2)
+            if overlap:
+                issues.append(f"{eid}: noise_floor_split halves overlap on "
+                              f"{overlap} — S1 and S2 must be disjoint")
+            union, full = s1 | s2, set(declared)
+            if union != full:
+                missing = sorted(full - union)
+                extra = sorted(union - full)
+                issues.append(
+                    f"{eid}: noise_floor_split does not partition the declared "
+                    f"sampler_seeds (missing {missing}, unknown {extra})")
+    return issues
+
+
 def load_experiments_registry(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
@@ -144,6 +317,8 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
                         "prereg_doc"):
                 if not pd.get(req):
                     issues.append(f"{eid}: planned_design missing {req!r}")
+            if eid in POLICY_REQUIRED_EXPERIMENTS:
+                issues.extend(_lint_frozen_policy(eid, pd))
             if pd.get("interaction_mode") and pd["interaction_mode"] not in \
                     ("independent_vignettes", "sequential_history"):
                 issues.append(f"{eid}: planned interaction_mode "

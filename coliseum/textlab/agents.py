@@ -345,6 +345,26 @@ def _finite(value, default: float):
 REFLEX_BUDGET = {"num_predict": 80, "timeout_s": 30}
 PLANNER_BUDGET = {"num_predict": 350, "timeout_s": 120}
 
+# -- seed probe (M8 Phase-2 prereg, "Sampling and effective units") -----------
+# A probe is only evidence if it can FAIL for the reason it claims to test. The
+# continuation here is genuinely underdetermined: there is no argmax answer a
+# backend would reproduce whether or not it honors `options.seed`, so identical
+# text across calls is informative rather than inevitable. Deliberately neutral —
+# it shares no vocabulary, entity, or framing with any scenario, so it cannot
+# contaminate a run. Probed at the REAL planner budget, not a token-sized one.
+SEED_PROBE_PROMPT = ("Invent twelve unrelated nonsense words and list them one "
+                     "per line. No explanation, no numbering.")
+# Deterministic, recorded offset used to derive the divergence arm's second seed.
+SEED_PROBE_ALT_SEED_OFFSET = 104729
+
+
+def _probe_arm(arm: str, seeds: list, response_hashes: list,
+               expectation: str, outcome: str) -> dict:
+    """One falsifiable arm of the seed probe, recorded so an auditor can see what
+    was actually tested instead of trusting a boolean."""
+    return {"arm": arm, "seeds": list(seeds), "response_hashes": list(response_hashes),
+            "expectation": expectation, "outcome": outcome}
+
 _MODE_PLAN = "Take the time you need to weigh consequences, then answer."
 _MODE_REFLEX = ("Answer IMMEDIATELY with your first instinct. Do not deliberate, do not "
                 "think out loud, do not use <think> tags or any reasoning text.")
@@ -770,21 +790,77 @@ class OllamaAgent(LLMAgent):
             return "unknown"
 
     def verify_seeded_sampling(self) -> bool:
-        """SCOPED verification (owner amendment 3): 'seeded sampling verified for this
-        backend/model/config'. Same prompt + same options.seed twice at the requested
-        temperature must be byte-equal (required). Different-seed difference is not
-        required — short outputs can coincide by chance. Probe is warmup-adjacent:
-        never captured, never latency-measured."""
-        probe_prompt = "Reply with one word: ready"
-        opts = self._options(num_predict=8)
-        a = self._post(probe_prompt, 8, 60, options_override=opts).get("response", "")
-        b = self._post(probe_prompt, 8, 60, options_override=opts).get("response", "")
-        verified = (a == b) and self.sampler_seed is not None
+        """SCOPED verification (owner amendment 3): 'seeded sampling verified for THIS
+        backend/model/config' — never a universal claim.
+
+        TWO arms, both required, both at the real planner budget on a high-entropy
+        prompt (M8 Phase-2 prereg, "Sampling and effective units"):
+
+          same_seed_reproducibility — the same seed twice must be byte-equal;
+          different_seed_divergence — a different seed must produce different text.
+
+        The divergence arm is what makes the probe falsifiable. The previous probe
+        asked for one deterministic word in 8 tokens and compared same-seed calls
+        only, so a backend that silently DROPS `options.seed` passed it trivially —
+        "ready" is the argmax continuation at any temperature this sweep uses. That
+        matters because `sampler_seed` enters both the effective-unit key and
+        `run_hash`: an ignored seed turns distinct-seed runs into anonymous
+        randomness wearing identified-replicate labels, exactly what schema.py's
+        "no anonymous randomness" rule exists to prevent.
+
+        A seed-dropping backend now fails reproducibility; a backend that is
+        degenerate regardless of seed fails divergence — and that IS the correct
+        verdict, since such a backend cannot support seeded replication either.
+
+        Divergence is only meaningful under stochastic decoding: at temperature 0 a
+        correct backend SHOULD return the same text for any seed, so the arm is
+        recorded "not_applicable" rather than failed. Probe is warmup-adjacent:
+        never captured, never latency-measured.
+        """
+        prompt = SEED_PROBE_PROMPT
+        n_predict = PLANNER_BUDGET["num_predict"]
+        timeout_s = PLANNER_BUDGET["timeout_s"]
+        seed = self.sampler_seed
+        arms: list = []
+
+        if seed is None:
+            # nothing to verify — the runner still emits no_sampler_seed and
+            # backend_seed_unverified under their existing machine-readable names
+            arms.append(_probe_arm("same_seed_reproducibility", [], [],
+                                   "identical", "not_run"))
+            arms.append(_probe_arm("different_seed_divergence", [], [],
+                                   "different", "not_run"))
+        else:
+            same = self._options(num_predict=n_predict)      # carries seed
+            a = self._post(prompt, n_predict, timeout_s,
+                           options_override=same).get("response", "")
+            b = self._post(prompt, n_predict, timeout_s,
+                           options_override=same).get("response", "")
+            arms.append(_probe_arm("same_seed_reproducibility", [seed, seed],
+                                   [config_hash(a), config_hash(b)], "identical",
+                                   "pass" if a == b else "fail"))
+            if self.sampling.get("mode") != "stochastic":
+                arms.append(_probe_arm("different_seed_divergence", [], [],
+                                       "different", "not_applicable"))
+            else:
+                alt_seed = seed + SEED_PROBE_ALT_SEED_OFFSET
+                alt = dict(same, seed=alt_seed)
+                c = self._post(prompt, n_predict, timeout_s,
+                               options_override=alt).get("response", "")
+                arms.append(_probe_arm("different_seed_divergence", [seed, alt_seed],
+                                       [config_hash(a), config_hash(c)], "different",
+                                       "pass" if c != a else "fail"))
+
+        verified = seed is not None and all(
+            arm["outcome"] in ("pass", "not_applicable") for arm in arms)
         self.backend_seed_supported = verified
         self.seed_probe = {"backend_name": self.backend,
                            "backend_version": self._backend_version(),
                            "model_digest": self.model_digest,
-                           "seed_probe_prompt_hash": config_hash(probe_prompt),
+                           "seed_probe_prompt_hash": config_hash(prompt),
+                           "seed_probe_num_predict": n_predict,
+                           "seed_probe_arms": arms,
+                           "seed_probe_scope": "this backend/model/sampling config only",
                            "seed_probe_result": "verified" if verified else "failed",
                            "seed_probe_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         self._warm = True                 # the probe warmed the model

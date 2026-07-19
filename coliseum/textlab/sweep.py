@@ -45,6 +45,48 @@ class SweepAborted(Exception):
     the wall-clock deadline. Recorded and surfaced, never worked around."""
 
 
+class SweepUnbalanced(SweepAborted):
+    """Per-condition surviving counts differ by more than the caller's bound.
+    Differential dropout is observationally identical to a real effect (the
+    survivors of the lossy condition are a biased subsample), so an unbalanced
+    pack is refused as unanalyzable rather than reported with a caveat."""
+
+
+# Typed failure kinds for per-condition dropout accounting (m8 Phase 2, F6).
+# Live-specific failure is a MEASUREMENT, not noise: a condition whose history
+# makes the model deliberate longer times out more often, and its survivors are
+# the runs that finished fast. Classification is STRUCTURAL — exception type and
+# the __cause__/__context__ chain only. Error text is never parsed: a provider
+# is free to reword its messages, and a classifier that reads prose silently
+# reclassifies real dropout as "other" the day it does.
+FAILURE_KINDS = ("timeout", "connection", "http_error", "other")
+
+
+def classify_failure(exc: BaseException) -> str:
+    """One of FAILURE_KINDS, derived from the exception's type and its cause
+    chain. urllib raises HTTPError (a URLError subclass) for a 500, a bare
+    URLError wrapping the socket error for a reset, and TimeoutError for a
+    budget overrun — all three arrive here wrapped by whatever the agent layer
+    re-raised, so the whole chain is walked, nearest cause first."""
+    import urllib.error
+
+    seen = []
+    cur: BaseException | None = exc
+    while cur is not None and len(seen) < 32:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    for e in seen:
+        # order matters: HTTPError IS a URLError, and a socket timeout is both
+        # an OSError and (3.10+) TimeoutError, so the most specific wins
+        if isinstance(e, TimeoutError):
+            return "timeout"
+        if isinstance(e, urllib.error.HTTPError):
+            return "http_error"
+        if isinstance(e, (ConnectionError, urllib.error.URLError)):
+            return "connection"
+    return "other"
+
+
 def norm_digest(d: str) -> str:
     """Canonical digest hex for EQUALITY only: drop an optional 'sha256:'
     prefix so a frozen bare-hex config and a served 'sha256:'-prefixed digest
@@ -198,10 +240,93 @@ class SweepResult:
         self.digests = {}           # model -> pinned digest actually served
         self.skipped_resumed = 0    # rows already present in the manifest
         self.errors = []            # (scenario, seed, sampler_seed, message)
+        # ---- m8 Phase 2 additions. A condition key is (model, scenario): the
+        # A/B/C conditions of the frozen design are scenarios, but two models in
+        # one sweep are two separate comparisons and must never be pooled.
+        self.execution_order = "blocked"
+        self.execution_log = []     # per ATTEMPTED cell, in realized order
+        self.attempted = {}         # condition -> cells attempted this call
+        self.surviving = {}         # condition -> cells that produced a row
+        self.dropouts = {}          # condition -> {failure kind -> count}
+        self.resumed = {}           # condition -> cells already in the manifest
+
+    def _condition(self, key):
+        """Register a condition so a zero-loss condition still appears in the
+        accounting — an absent key and a zero count are not the same claim."""
+        self.attempted.setdefault(key, 0)
+        self.surviving.setdefault(key, 0)
+        self.resumed.setdefault(key, 0)
+        self.dropouts.setdefault(key, {k: 0 for k in FAILURE_KINDS})
+        return key
+
+    def dropout_total(self, key) -> int:
+        return sum(self.dropouts.get(key, {}).values())
+
+    def check_condition_balance(self, max_surviving_delta: int):
+        """Fail-closed balance gate (m8 Phase 2, F6). Refuse when any two
+        conditions of the SAME model differ in surviving-run count by more than
+        `max_surviving_delta`. The bound is the caller's — it comes from the
+        frozen design, never from a default baked in here.
+
+        Returns None when balanced; raises SweepUnbalanced naming the offending
+        conditions, their counts and their dropouts, and the bound."""
+        if max_surviving_delta is None:
+            raise ValueError("max_surviving_delta is required — the balance "
+                             "bound comes from the frozen design")
+        if max_surviving_delta < 0:
+            raise ValueError(f"max_surviving_delta must be >= 0, "
+                             f"got {max_surviving_delta}")
+        by_model = {}
+        for (model, scenario) in sorted(self.surviving):
+            by_model.setdefault(model, []).append((model, scenario))
+        for model, keys in sorted(by_model.items()):
+            counts = {k: self.surviving[k] for k in keys}
+            lo_key = min(counts, key=lambda k: (counts[k], k))
+            hi_key = max(counts, key=lambda k: (counts[k], k))
+            delta = counts[hi_key] - counts[lo_key]
+            if delta > max_surviving_delta:
+                detail = "; ".join(
+                    f"{k[1]}: {counts[k]} surviving of {self.attempted[k]} "
+                    f"attempted, dropouts {self.dropouts[k]}"
+                    for k in keys)
+                raise SweepUnbalanced(
+                    f"{model}: per-condition surviving counts differ by "
+                    f"{delta} > bound {max_surviving_delta} — "
+                    f"{lo_key[1]} ({counts[lo_key]}) vs {hi_key[1]} "
+                    f"({counts[hi_key]}); differential dropout is "
+                    f"indistinguishable from an order effect, so this pack is "
+                    f"NOT analyzable. Per condition: {detail}")
+        return None
+
+
+def cell_order(scenarios, seeds, sampler_seeds, execution_order="blocked"):
+    """The (scenario, scenario_seed, sampler_seed) execution sequence.
+
+    "blocked" is the historical nesting scenario -> scenario_seed ->
+    sampler_seed: all of condition A, then all of B, then all of C. Provably
+    irrelevant for a scripted decider; for a live model it perfectly confounds
+    condition with backend state (thermal throttling, KV-cache/context-shift
+    state, another tenant forcing an unload/reload, a server restart) because
+    wall-clock position is 100% correlated with condition (m8 Phase 2, F7).
+
+    "interleaved" is the frozen Phase-2 discipline (scenario_seed, sampler_seed)
+    -> condition: A/B/C for one unit are drawn adjacently, so backend drift hits
+    all three conditions alike instead of loading onto whichever ran last."""
+    if execution_order == "blocked":
+        return [(sc, ss, ks) for sc in scenarios for ss in seeds
+                for ks in sampler_seeds]
+    if execution_order == "interleaved":
+        return [(sc, ss, ks) for ss in seeds for ks in sampler_seeds
+                for sc in scenarios]
+    raise SweepAborted(f"unknown execution_order {execution_order!r} — "
+                       "expected 'blocked' or 'interleaved'")
 
 
 def run_sweep(spec: dict, *, deadline: float | None = None,
-              expected_digests: dict | None = None, progress=None) -> SweepResult:
+              expected_digests: dict | None = None, progress=None,
+              execution_order: str = "blocked",
+              record_execution_index: bool | None = None,
+              max_surviving_delta: int | None = None) -> SweepResult:
     """Execute (models x scenarios x scenario-seeds x sampler-seeds), appending
     validated rows to spec['manifest'] and resuming past rows already present.
 
@@ -213,7 +338,22 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     SweepAborted before any compute — a served digest that differs from the
     frozen one is a new regime, never a silent substitution. `deadline` is a
     time.monotonic() bound; crossing it aborts (the killable child also caps
-    wall-clock, this is the in-driver courtesy check)."""
+    wall-clock, this is the in-driver courtesy check).
+
+    m8 Phase 2 options — all OPT-IN, so a sweep that does not request them
+    executes exactly as before and Phase-1 evidence regenerates byte-for-byte:
+
+    `execution_order` "blocked" (default, historical) or "interleaved" (see
+    cell_order). `record_execution_index` writes the monotonic per-run
+    execution index into the manifest row so the REALIZED order is auditable
+    from the evidence alone; it defaults to on under "interleaved" and off
+    under "blocked" (an explicit bool overrides either way). The index is
+    always available on `result.execution_log` regardless.
+
+    `max_surviving_delta` runs the fail-closed balance gate at the end of the
+    sweep (see SweepResult.check_condition_balance) and raises SweepUnbalanced
+    rather than returning a pack whose conditions lost unequal numbers of runs.
+    Failed runs are still recorded in `result.errors` and never erased."""
     say = progress or (lambda *_a, **_k: None)
     sampling, sampler_seeds, mode = resolve_sampling(
         spec.get("temperature", 0.0), spec.get("sampler_seeds"))
@@ -225,7 +365,12 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     scenarios = list(spec["scenarios"])
     seeds = list(spec["seeds"])
 
+    if record_execution_index is None:
+        record_execution_index = (execution_order == "interleaved")
+    order = cell_order(scenarios, seeds, sampler_seeds, execution_order)
+
     result = SweepResult()
+    result.execution_order = execution_order
 
     # defense in depth: run_sweep iterates the RAW lists, so a duplicated grid
     # dimension would launch unplanned/duplicate cells (and collide on the
@@ -287,69 +432,110 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
             say(f"== {model}  digest={probe.model_digest[:20]}  "
                 f"family={probe.model_family}  host={probe.host}  "
                 f"backend={probe.backend_version}  mode={mode}")
-            for scenario_name in scenarios:
-                path = os.path.join(config_dir, f"{scenario_name}.yaml")
-                scen = load_scenario(path)
-                bc = build_behavioral_config(
-                    scen.scenario_id, scen.behavioral_hash(), probe.spec_dict(),
-                    arbitration, ARBITRATION_VERSION,
-                    validate_sampling(sampling, sampler_seeds[0]),
-                    interaction_mode=interaction,
-                    history_template_version=HISTORY_TEMPLATE_VERSION,
-                    history_template_hash=HISTORY_TEMPLATE_HASH)
-                regime_id, _ = regime_hashes(bc)
-                for scenario_seed in seeds:
-                    for sampler_seed in sampler_seeds:
-                        if (regime_id, scenario_seed, sampler_seed) in done:
-                            result.skipped_resumed += 1
-                            continue
-                        if _deadline_hit():
-                            raise SweepAborted(
-                                "wall-clock deadline exceeded mid-sweep "
-                                f"({result.rows_written} rows written)")
-                        try:
-                            r = run_scenario(
-                                path, f"llm:ollama:{model}", scenario_seed,
-                                out_root=out_root, arbitration=arbitration,
-                                sampling=sampling, sampler_seed=sampler_seed,
-                                interaction_mode=interaction)
-                        except Exception as e:
-                            result.errors.append(
-                                (scenario_name, scenario_seed, sampler_seed,
-                                 f"{e.__class__.__name__}: {e}"))
-                            say(f"  !! {scenario_name} s{scenario_seed} "
-                                f"k{sampler_seed}: {e.__class__.__name__}: {e}")
-                            continue
-                        if r.run.comparison_regime_id != regime_id:
-                            raise SweepAborted(
-                                f"regime drift mid-sweep for "
-                                f"{model}/{scenario_name} — digest or config "
-                                "changed; the frozen regime is void")
-                        row = {"regime_id": r.run.comparison_regime_id,
-                               "model": model, "scenario": scenario_name,
-                               "scenario_seed": scenario_seed,
-                               "sampler_seed": sampler_seed,
-                               "variant_id": r.run.variant_id,
-                               "temperature": r.run.sampling.get("temperature", 0),
-                               "sampling_mode": r.run.sampling["mode"],
-                               "digest": r.run.agent_config.get("model_digest", ""),
-                               "scenario_hash": r.run.scenario_hash,
-                               "arbitration": arbitration,
-                               "run_id": r.run_id,
-                               "dir": os.path.basename(r.run_dir),
-                               "reportable": r.run.reportable,
-                               "stochastic_reportable": r.run.stochastic_reportable,
-                               "interaction_mode": r.run.interaction_mode,
-                               "path": r.final_actions}
-                        assert set(REQUIRED_ROW_FIELDS) <= set(row), \
-                            sorted(set(REQUIRED_ROW_FIELDS) - set(row))
-                        manifest.write(json.dumps(row) + "\n")
-                        manifest.flush()
-                        result.rows_written += 1
-                        result.run_dirs.append(r.run_dir)
-                        result.regime_ids.add(r.run.comparison_regime_id)
-                        k = f" k{sampler_seed}" if sampler_seed is not None else ""
-                        say(f"  [{result.rows_written + len(done)}/{total}] "
-                            f"{scenario_name} s{scenario_seed}{k}: "
-                            f"{' -> '.join(r.final_actions)}")
+            # per-scenario context is resolved LAZILY and cached: under
+            # "blocked" that reproduces exactly when each scenario file was
+            # first read today, and under "interleaved" the three conditions
+            # are each loaded once at the first unit that needs them
+            ctx = {}
+
+            def _ctx(scenario_name):
+                if scenario_name not in ctx:
+                    path = os.path.join(config_dir, f"{scenario_name}.yaml")
+                    scen = load_scenario(path)
+                    bc = build_behavioral_config(
+                        scen.scenario_id, scen.behavioral_hash(), probe.spec_dict(),
+                        arbitration, ARBITRATION_VERSION,
+                        validate_sampling(sampling, sampler_seeds[0]),
+                        interaction_mode=interaction,
+                        history_template_version=HISTORY_TEMPLATE_VERSION,
+                        history_template_hash=HISTORY_TEMPLATE_HASH)
+                    regime_id, _ = regime_hashes(bc)
+                    ctx[scenario_name] = (path, regime_id)
+                return ctx[scenario_name]
+
+            for scenario_name, scenario_seed, sampler_seed in order:
+                path, regime_id = _ctx(scenario_name)
+                cond = result._condition((model, scenario_name))
+                if (regime_id, scenario_seed, sampler_seed) in done:
+                    result.skipped_resumed += 1
+                    # already-recorded evidence still counts as a survivor of
+                    # its condition, otherwise a resumed pack looks unbalanced
+                    result.resumed[cond] += 1
+                    result.surviving[cond] += 1
+                    continue
+                if _deadline_hit():
+                    raise SweepAborted(
+                        "wall-clock deadline exceeded mid-sweep "
+                        f"({result.rows_written} rows written)")
+                execution_index = len(result.execution_log)
+                result.attempted[cond] += 1
+                try:
+                    r = run_scenario(
+                        path, f"llm:ollama:{model}", scenario_seed,
+                        out_root=out_root, arbitration=arbitration,
+                        sampling=sampling, sampler_seed=sampler_seed,
+                        interaction_mode=interaction)
+                except Exception as e:
+                    kind = classify_failure(e)
+                    result.dropouts[cond][kind] += 1
+                    result.execution_log.append(
+                        {"execution_index": execution_index, "model": model,
+                         "scenario": scenario_name,
+                         "scenario_seed": scenario_seed,
+                         "sampler_seed": sampler_seed,
+                         "status": "failed", "failure_kind": kind})
+                    result.errors.append(
+                        (scenario_name, scenario_seed, sampler_seed,
+                         f"{e.__class__.__name__}: {e}"))
+                    say(f"  !! {scenario_name} s{scenario_seed} "
+                        f"k{sampler_seed}: {e.__class__.__name__}: {e}")
+                    continue
+                if r.run.comparison_regime_id != regime_id:
+                    raise SweepAborted(
+                        f"regime drift mid-sweep for "
+                        f"{model}/{scenario_name} — digest or config "
+                        "changed; the frozen regime is void")
+                row = {"regime_id": r.run.comparison_regime_id,
+                       "model": model, "scenario": scenario_name,
+                       "scenario_seed": scenario_seed,
+                       "sampler_seed": sampler_seed,
+                       "variant_id": r.run.variant_id,
+                       "temperature": r.run.sampling.get("temperature", 0),
+                       "sampling_mode": r.run.sampling["mode"],
+                       "digest": r.run.agent_config.get("model_digest", ""),
+                       "scenario_hash": r.run.scenario_hash,
+                       "arbitration": arbitration,
+                       "run_id": r.run_id,
+                       "dir": os.path.basename(r.run_dir),
+                       "reportable": r.run.reportable,
+                       "stochastic_reportable": r.run.stochastic_reportable,
+                       "interaction_mode": r.run.interaction_mode,
+                       "path": r.final_actions}
+                if record_execution_index:
+                    # opt-in only: the row is otherwise byte-identical to what
+                    # every previous sweep wrote, so Phase-1 evidence and its
+                    # manifests regenerate unchanged
+                    row["execution_index"] = execution_index
+                    row["execution_order"] = execution_order
+                assert set(REQUIRED_ROW_FIELDS) <= set(row), \
+                    sorted(set(REQUIRED_ROW_FIELDS) - set(row))
+                manifest.write(json.dumps(row) + "\n")
+                manifest.flush()
+                result.rows_written += 1
+                result.surviving[cond] += 1
+                result.execution_log.append(
+                    {"execution_index": execution_index, "model": model,
+                     "scenario": scenario_name, "scenario_seed": scenario_seed,
+                     "sampler_seed": sampler_seed,
+                     "status": "ok", "run_id": r.run_id})
+                result.run_dirs.append(r.run_dir)
+                result.regime_ids.add(r.run.comparison_regime_id)
+                k = f" k{sampler_seed}" if sampler_seed is not None else ""
+                say(f"  [{result.rows_written + len(done)}/{total}] "
+                    f"{scenario_name} s{scenario_seed}{k}: "
+                    f"{' -> '.join(r.final_actions)}")
+    # fail-closed LAST, after every failure is recorded: the refusal is a
+    # verdict on an already-complete evidence set, never a reason to discard it
+    if max_surviving_delta is not None:
+        result.check_condition_balance(max_surviving_delta)
     return result

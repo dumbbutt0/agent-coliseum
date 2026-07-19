@@ -30,11 +30,24 @@ def test_registry_covers_whole_corpus_with_spec_families():
                      "water_bearer_saboteur", "hidden_objective",
                      "hidden_objective_aligned"}
     gate_triplet = {"scramble_dev", "scramble_perm", "scramble_sham"}
-    assert ids == frozen_corpus | gate_triplet
+    # M8 Phase-2 imposed-history triplet (draft; promotes to pilot only once its
+    # design audit passes, and to frozen only after a clean live pack). This is a
+    # revision-bound SIBLING of the m7 gate triplet — same `memory_persistence`
+    # family and same archetype — not a new scenario family, so SPEC Rule 8's
+    # anti-sprawl bar on unadmitted archetypes is not engaged. The enumeration
+    # stays explicit on purpose: growing the corpus must remain a deliberate edit
+    # here, never something a newly added YAML can accomplish on its own.
+    phase2_triplet = {"scramble_dev_m8", "scramble_perm_m8", "scramble_sham_m8"}
+    assert ids == frozen_corpus | gate_triplet | phase2_triplet
     for e in raw["scenarios"]:
         assert e["family"] in REGISTRY_FAMILIES
         assert len(e["variants"]) >= 2
-        want = "pilot" if e["scenario_id"] in gate_triplet else "frozen"
+        if e["scenario_id"] in phase2_triplet:
+            want = "draft"
+        elif e["scenario_id"] in gate_triplet:
+            want = "pilot"
+        else:
+            want = "frozen"
         assert e["status"] == want
 
 

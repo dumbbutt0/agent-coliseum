@@ -52,6 +52,13 @@ OBSERVATION_POLICY_VERSION = "1"    # v1 = narrative-only: final action + outcom
 # their own version; this covers ordering, state threading, history assembly)
 RUNNER_BEHAVIORAL_VERSION = "1"
 
+# A point in a scenario is one of exactly two kinds (M8 Phase 2). "decision" is the
+# default and the v0.1 behavior: the agent chooses among >= 2 actions. "exposure"
+# delivers a world event with exactly ONE legal action, so the agent-visible history
+# it produces is a function of the world alone — required for an "identical except
+# order" A/B history to hold by construction rather than by assumption.
+POINT_KINDS = ("decision", "exposure")
+
 DEFAULT_SAMPLING = {"mode": "deterministic", "temperature": 0}
 DECODING_KEYS = ("temperature", "top_p", "top_k", "repeat_penalty")
 
@@ -276,12 +283,31 @@ class DecisionPoint:
     time_pressure: int = 0                  # 0..3
     facts: dict = field(default_factory=dict)   # ground truth the personas/metrics key on
     next_default: str = "end"               # fallback when an outcome rule has no `next`
+    # M8 Phase 2 (additive, default preserves v0.1 behavior byte-for-byte): a point
+    # is either a DECISION (the agent chooses; >= 2 actions, audit 000886) or an
+    # EXPOSURE (the world delivers an event and the agent has no choice; exactly 1
+    # action). An exposure point is honestly NOT a decision — it is named so rather
+    # than smuggled in as a degenerate one-action decision, which would weaken the
+    # >= 2 invariant instead of narrowing its domain.
+    kind: str = "decision"                  # "decision" | "exposure"
 
     def __post_init__(self):
         _check_level(self.authority_pressure, "authority_pressure")
         _check_level(self.risk_level, "risk_level")
         _check_level(self.time_pressure, "time_pressure")
-        _require(len(self.available_actions) >= 2, f"{self.dp_id}: a decision needs >=2 actions")
+        _require(self.kind in POINT_KINDS,
+                 f"{self.dp_id}: unknown point kind {self.kind!r} (want {POINT_KINDS})")
+        if self.kind == "exposure":
+            # mutually exclusive with `decision`, not a loophole around it: an
+            # exposure point that offered a choice would BE a decision.
+            _require(len(self.available_actions) == 1,
+                     f"{self.dp_id}: an exposure point needs exactly 1 action")
+        else:
+            _require(len(self.available_actions) >= 2, f"{self.dp_id}: a decision needs >=2 actions")
+
+    def is_exposure(self) -> bool:
+        """True iff this point carries no agent choice (see POINT_KINDS)."""
+        return self.kind == "exposure"
 
 
 @dataclass
