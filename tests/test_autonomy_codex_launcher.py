@@ -62,9 +62,13 @@ def verdict_for(rid, commit, kind):
             "conclusion_scope": "fake evidence approved"}
 """
 
+# The LAUNCHER takes the claim before spawning the session (worker-pool
+# blocker A3), so a source-audit session finds its request already in
+# claimed/ and must NOT claim again — exactly what the prompt contract now
+# tells Codex.
 FAKE_GO = _VERDICT_BODY + """
-rid = codex_watch.list_ready(root)[0]
-codex_watch.claim(root, cfg, rid)
+claimed = os.path.join(root, "requests", "claimed")
+rid = [f[:-5] for f in os.listdir(claimed) if f.endswith(".json")][0]
 req = publish.read_request(root, rid)
 codex_watch.submit_verdict(root, cfg,
                            verdict_for(rid, req["target_commit"], "GO"))
@@ -81,14 +85,12 @@ codex_watch.submit_verdict(
     result_audit=True)
 """
 
+# the request is claimed (by the launcher) and the session then produces no
+# verdict at all — exiting 0, or crashing
 FAKE_CLAIM_ONLY = _VERDICT_BODY + """
-rid = codex_watch.list_ready(root)[0]
-codex_watch.claim(root, cfg, rid)
 """
 
 FAKE_CLAIM_THEN_CRASH = _VERDICT_BODY + """
-rid = codex_watch.list_ready(root)[0]
-codex_watch.claim(root, cfg, rid)
 sys.exit(1)
 """
 
@@ -102,7 +104,8 @@ codex_watch.submit_verdict(root, cfg,
 
 FAKE_WATCHER_ERROR_ONLY = _VERDICT_BODY + """
 from tools.council import events, publish
-rid = codex_watch.list_ready(root)[0]
+claimed = os.path.join(root, "requests", "claimed")
+rid = [f[:-5] for f in os.listdir(claimed) if f.endswith(".json")][0]
 req = publish.read_request(root, rid)
 events.append_event(root, cfg, "WATCHER_ERROR", "codex", rid,
                     req["repository"], req["target_commit"],
@@ -111,7 +114,8 @@ events.append_event(root, cfg, "WATCHER_ERROR", "codex", rid,
 
 FAKE_UNRELATED_STATE_CHANGE = _VERDICT_BODY + """
 from tools.council import events, publish
-rid = codex_watch.list_ready(root)[0]
+claimed = os.path.join(root, "requests", "claimed")
+rid = [f[:-5] for f in os.listdir(claimed) if f.endswith(".json")][0]
 req = publish.read_request(root, rid)
 events.append_event(root, cfg, "BUILD_STARTED", "claude",
                     "unrelated-req-001", req["repository"],
@@ -348,7 +352,11 @@ def test_failed_session_records_watcher_error(env, tmp_path, monkeypatch):
     assert last["event_type"] == "WATCHER_ERROR"
     assert last["payload"]["phase"] == "codex_launcher"
     assert last["sender"] == "codex"
-    assert _state(root) == "requested"  # untouched — retryable
+    # the launcher claims BEFORE spawning, so a failed session leaves the
+    # request in `claimed` with its claim lock cleared — still retryable,
+    # now through the resume path
+    assert _state(root) == "claimed"
+    assert locking.read_lock(root, RID) is None
 
 
 def test_exit_zero_without_advancing_is_a_failure(env, tmp_path, monkeypatch):
@@ -417,7 +425,7 @@ def test_watcher_error_only_session_is_failure(env, tmp_path, monkeypatch):
     _publish_requested(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     assert len(_failure_events(root)) == 1
-    assert _state(root) == "requested"
+    assert _state(root) == "claimed"  # launcher-claimed, verdict-free
 
 
 def test_unrelated_state_change_is_not_success(env, tmp_path, monkeypatch):
@@ -428,7 +436,7 @@ def test_unrelated_state_change_is_not_success(env, tmp_path, monkeypatch):
     _publish_requested(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0
     assert len(_failure_events(root)) == 1
-    assert _state(root) == "requested"
+    assert _state(root) == "claimed"  # launcher-claimed, verdict-free
 
 
 def test_resume_waits_for_young_foreign_lock(env, tmp_path, monkeypatch):
@@ -440,7 +448,7 @@ def test_resume_waits_for_young_foreign_lock(env, tmp_path, monkeypatch):
     marker = _install_fake_codex(tmp_path, monkeypatch, FAKE_RESUME_GO)
     _publish_requested(root, cfg, repo, head)
     codex_cfg = make_cfg(repo, root, role="codex")
-    codex_watch.claim(root, codex_cfg, RID)  # foreign session, lock fresh
+    codex_watch.claim(root, codex_cfg, RID)  # other session, lock fresh
     assert codex_launcher.main(["--once"]) == 0
     assert not os.path.exists(marker)  # waited: no launch
     assert locking.read_lock(root, RID) is not None
@@ -514,9 +522,10 @@ def test_missing_codex_binary_is_bounded_failure(env, tmp_path, monkeypatch):
     _publish_requested(root, cfg, repo, head)
     assert codex_launcher.main(["--once"]) == 0  # no uncaught exception
     assert len(_failure_events(root)) == 1
-    assert _state(root) == "requested"  # retryable, untouched
-    types = _types(root)
-    assert "AUDIT_CLAIMED" not in types and "AUDIT_GO" not in types
+    # retryable: claimed by this launcher, no verdict, claim lock cleared
+    assert _state(root) == "claimed"
+    assert locking.read_lock(root, RID) is None
+    assert "AUDIT_GO" not in _types(root)
     assert codex_launcher.main(["--once"]) == 0
     assert codex_launcher.main(["--once"]) == 1  # three strikes
     chain = events.read_chain(root)
@@ -537,7 +546,8 @@ def test_non_executable_codex_binary_is_bounded_failure(env, tmp_path,
     failures = _failure_events(root)
     assert len(failures) == 1
     assert "failed to launch child" in failures[0]["payload"]["reason"]
-    assert _state(root) == "requested"
+    assert _state(root) == "claimed"
+    assert locking.read_lock(root, RID) is None
 
 
 # ------------------------------------------------- argv/env fixity (security)

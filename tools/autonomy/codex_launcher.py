@@ -2,6 +2,15 @@
 
     python3 -m tools.autonomy.codex_launcher [--once] [--poll-seconds N]
         [--timeout-seconds N] [--audit-timeout-seconds N] [--max-launches N]
+        [--workers N]
+
+Admission is by WORKER SLOT: `--workers N` (default 1) offers N O_EXCL slot
+locks, a process takes the first free one, and startup is refused only when
+all N are held. `--workers 1` is exactly the historical singleton. Each
+worker still runs ONE bounded session at a time, and takes its claim (or its
+claim-resume lease) BEFORE spawning that session, so the loser of a claim
+race costs nothing: no session, no recorded failure — it just moves to the
+next work item.
 
 Stateless by design: every cycle re-derives actionable work from the
 hash-verified event chain, so crash recovery is simply a restart — nothing
@@ -43,7 +52,7 @@ import time
 
 from tools.autonomy.drivers import RunnerRefusal
 from tools.autonomy.runner import _execute_bounded, tree_size_mb
-from tools.council import (events, get_config, locking, publish,
+from tools.council import (codex_watch, events, get_config, locking, publish,
                            state_machine, storage, txn)
 from tools.council.schemas import (VERDICT_REQUIRED_FIELDS, CouncilError,
                                    LockHeld, canonical_json)
@@ -122,11 +131,37 @@ def launcher_failures(chain: list, rid: str) -> int:
     return count
 
 
-def _terminal_verdict_in(segment: list, rid: str, kind: str,
-                         commit: str) -> bool:
-    """True iff the post-launch chain segment contains the EXPECTED
-    codex-signed terminal verdict for rid at the pinned commit."""
-    for event in segment:
+def _terminal_verdict_in(chain: list, rid: str, kind: str, commit: str,
+                         anchor_index: int,
+                         claim_event_id: str | None = None) -> bool:
+    """True iff `chain` holds the EXPECTED codex-signed terminal verdict for
+    rid at the pinned commit AND that verdict is attributable to THIS
+    worker's own session.
+
+    Presence in a chain suffix is NOT attribution (worker-pool blocker A2):
+    with more than one launcher process a second worker could otherwise read
+    the FIRST worker's verdict and report its own dead session as a success.
+    The binding is the exclusive claim this worker actually holds:
+
+    * a source audit takes the claim itself (`codex_watch.claim`), so its own
+      AUDIT_CLAIMED event id anchors the search — a verdict at or before that
+      event belongs to some other session, and if our claim is not in the
+      chain at all we can prove nothing and fail closed;
+    * a resume/result session has no AUDIT_CLAIMED of its own, so the anchor
+      is the chain position at which it took the exclusive claim-resume
+      lease; while that lease is held no other session for rid can be
+      auditing the request, so a later verdict is ours.
+    """
+    start = anchor_index
+    if claim_event_id is not None:
+        start = None
+        for i, event in enumerate(chain):
+            if event["event_id"] == claim_event_id:
+                start = i + 1
+                break
+        if start is None:
+            return False  # our own claim is not on the chain — prove nothing
+    for event in chain[start:]:
         if event["request_id"] == rid \
                 and event["sender"] == "codex" \
                 and event["event_type"] in EXPECTED_TERMINAL[kind] \
@@ -352,14 +387,42 @@ def _stale_lock_gate(cfg, root: str, rid: str, repo: str, commit: str,
     return True
 
 
+def _release_if_owned(root: str, lock) -> bool:
+    """Release a lease THIS process still owns, and nothing else.
+
+    Idempotent by construction: a lock already gone (released by the child's
+    proven-ownership release, or by the logged stale-clearance above) or
+    replaced by another holder is not ours, so we leave it completely
+    untouched. That is what makes it safe to call on every exit path without
+    ever double-releasing or freeing another worker's claim."""
+    if lock is None:
+        return False
+    holder = locking.read_lock(root, lock.name)
+    if not isinstance(holder, dict) or \
+            holder.get("owner_token") != lock.owner_token:
+        return False
+    locking.release(lock)
+    return True
+
+
 def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
                 kind: str, audit_timeout: float) -> str:
     """Launch one bounded Codex session and verify success from the chain
     alone: ONLY the expected codex-signed terminal verdict at the pinned
-    commit, appearing after the pre-launch chain position, counts.
-    Returns 'ok', 'failed', 'paused', or 'waiting'."""
+    commit, attributable to THIS worker's own claim, counts.
+    Returns 'ok', 'failed', 'paused', or 'waiting'.
+
+    Worker-pool ordering (blocker A3): claimability is established BEFORE the
+    expensive session. Every worker derives the same global work list, so all
+    of them target the same oldest request; the loser of the O_EXCL claim race
+    must cost nothing, so the claim (or the resume lease) is taken FIRST and a
+    worker that loses simply returns 'waiting' — no Codex session is spawned
+    and no failure is recorded against the request."""
+    # A launcher-claimed source audit uses the already-claimed contract text:
+    # this worker holds the claim, so the session must not claim again.
+    prompt_kind = "source_audit_resume" if kind == "source_audit" else kind
     try:
-        prompt, repo, commit = build_audit_prompt(root, cfg, rid, kind)
+        prompt, repo, commit = build_audit_prompt(root, cfg, rid, prompt_kind)
     except RequestIntegrityError as exc:
         events.pause_autonomy(
             root, cfg, SENDER, rid, exc.repository, exc.target_commit,
@@ -374,12 +437,28 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
                                  audit_timeout):
         return "waiting"
 
-    # A resumed source audit (and a result audit over an already-claimed
-    # request) receives a fresh bounded claim lease before launch.  The child
-    # submit transaction releases it by name.  This prevents two recovery
-    # sessions from auditing/submitting the same claimed artifact at once.
+    claim_event = None
+    claim_lock = None
     resume_lock = None
-    if kind in ("source_audit_resume", "result_audit"):
+    if kind == "source_audit":
+        # The single claim authority (O_EXCL lock -> move -> AUDIT_CLAIMED)
+        # arbitrates the race, exactly as it always has — only now it runs
+        # BEFORE the session instead of inside it, so the losing worker pays
+        # nothing.  Any refusal (lock held, or the request already moved out
+        # of ready/ by the winner) means another worker owns this request.
+        try:
+            claim_event, claim_lock = codex_watch.claim(root, cfg, rid)
+        except CouncilError as exc:
+            print(f"codex_launcher: {rid} is being audited by another worker "
+                  f"({exc}) — taking the next work item")
+            return "waiting"
+    else:
+        # A resumed source audit (and a result audit over an already-claimed
+        # request) receives a fresh bounded claim lease before launch.  This
+        # prevents two recovery sessions from auditing/submitting the same
+        # claimed artifact at once.  Its token appears in no AUDIT_CLAIMED
+        # event, so the child cannot prove ownership of it — THIS process
+        # releases it on every path below.
         try:
             resume_lock = locking.acquire(
                 root, rid, SENDER, rid, kind="claim-resume",
@@ -387,8 +466,11 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
                                   audit_timeout + 300.0))
         except LockHeld:
             return "waiting"
+    session_lock = claim_lock or resume_lock
 
-    pre_length = len(chain)
+    # the anchor is taken AFTER this worker owns the request, so nothing a
+    # concurrent worker did earlier can be mistaken for this session's work
+    pre_length = len(events.read_chain(root))
     print(f"codex_launcher: launching {kind} session for {rid} at "
           f"{commit[:12]} (timeout {audit_timeout:.0f}s)")
     logs = ("", "")
@@ -410,42 +492,36 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
         refusal = f"session did not complete: {exc}"
 
     chain_after = events.read_chain(root)
-    segment = chain_after[pre_length:]
-    if _terminal_verdict_in(segment, rid, kind, commit):
+    if _terminal_verdict_in(chain_after, rid, kind, commit, pre_length,
+                            claim_event["event_id"] if claim_event else None):
+        # The claim lock of a source audit is released by the child's submit
+        # under proven ownership; the claim-resume lease can only be released
+        # HERE (its token is in no AUDIT_CLAIMED event), so a successful
+        # resume/result submit would otherwise strand it until lease expiry.
+        _release_if_owned(root, session_lock)
         state_now = state_machine.project(chain_after)[rid]["state"]
         print(f"codex_launcher: {rid} resolved -> {state_now!r} (expected "
               "codex-signed terminal verdict verified in the chain)")
         return "ok"
 
     state_now = state_machine.project(chain_after).get(rid, {}).get("state")
+    if state_now == "claimed":
+        # Clear only the lock this exact bounded session can prove it owns —
+        # this worker minted the token itself (the claim it took before the
+        # session, or its resume lease).  A worker that owns neither has no
+        # clearance power over another worker's live claim.
+        _clear_stale_claim_lock(
+            cfg, root, rid, repo, commit,
+            "launcher's own session ended after claiming, before any verdict",
+            expected_owner_token=session_lock.owner_token)
+    # backstop for any path the logged clearance did not cover (e.g. a state
+    # that is not `claimed`): never strand this process's own lease.  Already
+    # released above -> not ours -> no-op, so there is no double release.
+    _release_if_owned(root, session_lock)
     reason = refusal or (
         "session ended without the expected codex-signed terminal verdict "
         f"(state now {state_now!r})")
-    outcome = _record_failure(cfg, root, rid, kind, repo, commit, reason,
-                              logs)
-    if state_now == "claimed" and kind in (
-            "source_audit", "source_audit_resume", "result_audit"):
-        # Clear only the lock this exact bounded session can prove it owns.
-        # A source audit learns the token from the AUDIT_CLAIMED event in its
-        # own post-launch segment; resume/result sessions hold the token
-        # directly.  A duplicate that never claimed has no clearance power.
-        owner_token = resume_lock.owner_token if resume_lock else None
-        if owner_token is None:
-            own_claim = next((e for e in segment
-                              if e["request_id"] == rid and
-                              e["event_type"] == "AUDIT_CLAIMED" and
-                              e["sender"] == SENDER and
-                              e["target_commit"] == commit), None)
-            if own_claim is not None:
-                lock_holder = own_claim["payload"].get("lock_holder")
-                if isinstance(lock_holder, dict):
-                    owner_token = lock_holder.get("owner_token")
-        if owner_token:
-            _clear_stale_claim_lock(
-                cfg, root, rid, repo, commit,
-                "launcher's own session ended after claiming, before any "
-                "verdict", expected_owner_token=owner_token)
-    return outcome
+    return _record_failure(cfg, root, rid, kind, repo, commit, reason, logs)
 
 
 # -------------------------------------------------------------------- the loop
@@ -478,6 +554,30 @@ def _terminal_halt(root: str, requests: dict) -> bool:
     return bool(state_machine.global_flags(requests)["milestone_reached"])
 
 
+def _slot_name(index: int) -> str:
+    """Name of worker slot `index`. Slot 0 KEEPS the historical singleton
+    name, so a default `--workers 1` pool is byte-for-byte the old
+    single-launcher admission: a second process still collides on
+    `_codex_launcher` and is refused."""
+    return LAUNCHER_LOCK if index == 0 else f"{LAUNCHER_LOCK}_{index}"
+
+
+def _acquire_slot(root: str, workers: int, lease_seconds: float):
+    """Take the FIRST free worker slot, or (None, last_error) when all
+    `workers` slots are held. O_EXCL remains the admission authority — an
+    expired lease is recovery eligibility, never duplicate-launch
+    authority, so a held slot refuses admission regardless of its lease."""
+    last = None
+    for index in range(workers):
+        try:
+            return locking.acquire(root, _slot_name(index), SENDER,
+                                   "codex-launcher",
+                                   lease_seconds=lease_seconds), None
+        except LockHeld as exc:
+            last = exc
+    return None, last
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="codex_launcher")
     parser.add_argument("--once", action="store_true")
@@ -488,23 +588,29 @@ def main(argv=None) -> int:
                         default=AUDIT_TIMEOUT_SECONDS,
                         help="hard kill for one Codex session")
     parser.add_argument("--max-launches", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=1,
+                        help="number of concurrent launcher slots; this "
+                             "process takes the first free one and refuses "
+                             "to start only when all N are held")
     args = parser.parse_args(argv)
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
 
     cfg = get_config(role=SENDER)
     root = cfg.council_root
     storage.ensure_layout(root)
-    try:
-        lock = locking.acquire(
-            root, LAUNCHER_LOCK, SENDER, "codex-launcher",
-            # O_EXCL remains the admission authority.  The lease covers the
-            # longest bounded child plus recovery margin; active-control
-            # clear-lock cannot remove this singleton merely because a PID
-            # is hidden by a nested namespace.
-            lease_seconds=max(locking.DEFAULT_LEASE_SECONDS,
-                              args.audit_timeout_seconds + 300.0))
-    except LockHeld as exc:
-        print(f"codex_launcher: refusing to start — {exc}", file=sys.stderr)
+    # O_EXCL remains the admission authority.  The lease covers the longest
+    # bounded child plus recovery margin; active-control clear-lock cannot
+    # remove a slot merely because a PID is hidden by a nested namespace.
+    lock, refusal = _acquire_slot(
+        root, args.workers,
+        lease_seconds=max(locking.DEFAULT_LEASE_SECONDS,
+                          args.audit_timeout_seconds + 300.0))
+    if lock is None:
+        print(f"codex_launcher: refusing to start — all {args.workers} "
+              f"worker slot(s) are held; last: {refusal}", file=sys.stderr)
         return 1
+    print(f"codex_launcher: worker slot {lock.name!r} acquired")
     try:
         return _run(cfg, root, args)
     finally:
@@ -541,8 +647,8 @@ def _run(cfg, root: str, args) -> int:
                 print(f"codex_launcher: {reason} — stopping")
                 return 0
             # transient owner pause: idle and auto-resume when it clears (never
-            # a clean exit — that would strand the auditor). Hold the singleton
-            # lock; launch nothing until the pause lifts.
+            # a clean exit — that would strand the auditor). Hold the worker
+            # slot; launch nothing until the pause lifts.
             if reason != idle_reason:
                 print(f"codex_launcher: {reason} — idling until it clears")
                 idle_reason = reason

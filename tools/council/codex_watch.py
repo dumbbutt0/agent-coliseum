@@ -96,6 +96,66 @@ def _count_claimed(chain: list, request_id: str) -> int:
                and e["request_id"] == request_id)
 
 
+def proven_owner_token(root: str, request_id: str,
+                       chain: list | None = None) -> str | None:
+    """Recover THIS request's claim-lock owner token from AUTHENTICATED
+    evidence, or ``None`` when ownership cannot be proven.
+
+    `claim()` mints the token, journals it, acquires the lock with it, and
+    then pins the resulting lock body — token included — into the
+    codex-signed AUDIT_CLAIMED event's `lock_holder`. That hash-chained
+    event is therefore the authenticated record of who owns the claim lock
+    for the current audit cycle; the launcher already recovers the token
+    the same way (`codex_launcher.process_one`). We take the LAST such
+    event so a re-audit cycle proves the CURRENT claim, never a stale one,
+    and we additionally require the on-disk lock to still carry exactly
+    that token: if a different holder now owns the lock (a launcher resume
+    lease, or another worker's claim), the token proves nothing about the
+    lock sitting on disk and we must not touch it.
+    """
+    chain = events.read_chain(root) if chain is None else chain
+    claimed = None
+    for event in chain:
+        if event["request_id"] == request_id and \
+                event["event_type"] == "AUDIT_CLAIMED" and \
+                event["sender"] == SENDER:
+            claimed = event
+    if claimed is None:
+        return None
+    holder = claimed["payload"].get("lock_holder")
+    token = holder.get("owner_token") if isinstance(holder, dict) else None
+    if not isinstance(token, str) or not token:
+        return None
+    on_disk = locking.read_lock(root, request_id)
+    if not isinstance(on_disk, dict) or on_disk.get("owner_token") != token:
+        return None
+    return token
+
+
+def release_claim_lock(root: str, request_id: str,
+                       chain: list | None = None) -> tuple:
+    """Release the claim lock for `request_id` ONLY with proof of ownership.
+
+    Returns ``(released, reason)``. A blind, tokenless release would let
+    whichever concurrent worker finishes first delete another LIVE worker's
+    claim lock (the lock IS the single claim authority), so when ownership
+    cannot be proven we leave the lock completely untouched and report why.
+    The lock then remains eligible for the existing lease-expiry recovery
+    paths (`locking.lease_is_expired` + the launcher's logged
+    `_clear_stale_claim_lock` gate) — the sanctioned, logged clearances.
+    """
+    if locking.read_lock(root, request_id) is None:
+        return True, "no claim lock present"
+    token = proven_owner_token(root, request_id, chain=chain)
+    if token is None:
+        return False, ("no authenticated AUDIT_CLAIMED evidence binds this "
+                       "session to the on-disk claim lock")
+    locking.release(locking.Lock(path=storage.lock_path(root, request_id),
+                                 name=request_id, role=SENDER, root=root,
+                                 owner_token=token))
+    return True, "released by proven owner token"
+
+
 # The states a request occupies AFTER a terminal verdict for its current
 # cycle. In none of them may the request file still sit in claimed/ or a
 # claim lock survive — EXCEPT result_audit, where the runner legitimately
@@ -165,9 +225,16 @@ def finalize_incomplete(root: str, cfg) -> list:
             os.rename(claimed_path, complete_path)
             acted = True
         if locking.read_lock(root, rid) is not None:
-            locking.release(locking.Lock(path=storage.lock_path(root, rid),
-                                         name=rid, role=SENDER))
-            acted = True
+            released, why = release_claim_lock(root, rid, chain=chain)
+            if released:
+                acted = True
+            else:
+                # NEVER blind-unlink: the lock may be a live worker's claim.
+                # finalize_incomplete appends no events by contract, so its
+                # existing stderr channel is the record.
+                print(f"codex_watch: NOT clearing the claim lock for {rid} "
+                      f"— {why}; leaving it for the lease-expiry / logged "
+                      "stale-lock recovery path", file=sys.stderr)
         if acted:
             healed.append(rid)
     return healed
@@ -259,8 +326,12 @@ def submit_verdict(root: str, cfg, verdict: dict,
     # lock never permits one. Everything below is finalization — the claim
     # lock is ALWAYS released once the verdict is durable (finally), and
     # any artifact failure is recorded and recoverable WITHOUT a new
-    # verdict via finalize_incomplete (cycle-4 audit blocker).
+    # verdict via finalize_incomplete (cycle-4 audit blocker). The release
+    # is COMPARE-AND-DELETE under proven ownership — with more than one
+    # concurrent worker a tokenless release would delete whichever other
+    # worker's live claim lock happened to be on disk.
     finalize_error = None
+    lock_released, lock_reason = True, "not attempted"
     try:
         storage.atomic_write_json(storage.verdict_path(root, rid), verdict)
         os.rename(claimed_path,
@@ -268,8 +339,19 @@ def submit_verdict(root: str, cfg, verdict: dict,
     except OSError as exc:
         finalize_error = exc
     finally:
-        locking.release(locking.Lock(path=storage.lock_path(root, rid),
-                                     name=rid, role=SENDER))
+        lock_released, lock_reason = release_claim_lock(root, rid)
+    if not lock_released:
+        print(f"codex_watch: claim lock for {rid} NOT released — "
+              f"{lock_reason}; left for the lease-expiry / logged "
+              "stale-lock recovery path", file=sys.stderr)
+        try:
+            events.append_event(
+                root, cfg, "WATCHER_ERROR", SENDER, rid,
+                request["repository"], request["target_commit"],
+                {"phase": "claim_lock_release", "reason": lock_reason,
+                 "verdict_event_id": event["event_id"]})
+        except CouncilError:
+            pass
     if finalize_error is not None:
         try:
             events.append_event(
