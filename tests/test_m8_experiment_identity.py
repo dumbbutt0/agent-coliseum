@@ -149,15 +149,16 @@ def test_decision_rule_is_a_rule_not_a_vibe():
 def test_primary_event_freezes_the_successor_analysis_callable():
     pe = _entry()["planned_design"]["primary_event"]
     assert "order_sensitivity_report" in pe
-    # R6: the callable bumps to version 3 because the decision rule changed
-    # AGAIN (the sensitivity requirement became asymmetric)
-    assert "ORDER_REPORT_VERSION 3" in pe
+    # R7: the callable bumps to version 4 because the decision rule changed
+    # AGAIN (mandatory clause-0 evidence admission + sham-adequacy warrant)
+    assert "ORDER_REPORT_VERSION 4" in pe
     assert "ORDER_REPORT_VERSION 2" not in pe
+    assert "ORDER_REPORT_VERSION 3" not in pe
     # the Phase-1 comparator may not be the frozen path
     assert "scramble_terminal_distribution" not in pe
     # and the frozen bounds it consumes are named in the identity
     for k in ("min_detectable_effect", "max_surviving_delta",
-              "noise_floor_split", "bootstrap_seed",
+              "noise_floor_split", "bootstrap_seed", "sham_equivalence_margin",
               "permutation_iterations", "permutation_seed", "alpha"):
         assert k in pe, k
 
@@ -219,6 +220,7 @@ def test_new_bounds_load_through_the_single_thresholds_bundle():
     can omit — which is exactly how the balance gate got skipped."""
     bundle = load_thresholds(REGISTRY, EID)
     assert bundle["min_detectable_effect"] == 0.25
+    assert bundle["sham_equivalence_margin"] == 0.25
     assert bundle["max_surviving_delta"] == 2
     assert bundle["bootstrap_iterations"] == 10000
     assert bundle["bootstrap_seed"] == 20260719
@@ -226,6 +228,7 @@ def test_new_bounds_load_through_the_single_thresholds_bundle():
     assert bundle["noise_floor_split"] == {"S1": S1, "S2": S2}
     assert set(bundle) == {"bootstrap_iterations", "bootstrap_seed",
                            "confidence", "min_detectable_effect",
+                           "sham_equivalence_margin",
                            "permutation_iterations", "permutation_seed",
                            "alpha", "noise_floor_split", "max_surviving_delta"}
 
@@ -438,6 +441,7 @@ def test_load_thresholds_returns_frozen_values():
         "bootstrap_seed": 20260719,
         "confidence": 0.95,
         "min_detectable_effect": 0.25,
+        "sham_equivalence_margin": 0.25,
         "permutation_iterations": 10000,
         "permutation_seed": 20260719,
         "alpha": 0.05,
@@ -629,24 +633,135 @@ def test_missing_noise_floor_split_is_refused(tmp_path):
 # resolvable. Implemented symmetrically it discarded a decisive rejection:
 # TV(A,B)=1.0 against q_AB=0.2917 returned `inconclusive` because 0.2917 > 0.25.
 
-def test_primary_event_expresses_the_five_clause_ordered_rule():
+def test_primary_event_expresses_the_six_clause_ordered_rule():
+    """The frozen decision rule mirrors the prereg's clause 0-5 rule exactly
+    (ORDER_REPORT_VERSION 4): clause 0 evidence admission, clause 1 policy
+    refusal, clause 2 sham adequacy, clause 3 rejection, clause 4 warranted
+    null, clause 5 inconclusive."""
     pe = _entry()["planned_design"]["primary_event"]
     assert "ORDERED" in pe
     assert "the FIRST clause that matches decides" in pe
-    # clause 1: refusal / floor / dropout spread -> inconclusive
+    assert "NO distance, quantile, or verdict may be computed or emitted " \
+           "once any admission clause refuses" in pe
+    # clause 0: mandatory typed evidence admission
+    assert "(0) EVIDENCE ADMISSION (all mandatory; refusal is typed)" in pe
+    assert "provider-free replay attestation bound to that exact run " \
+           "identity" in pe
+    assert "reportable / stochastic_reportable booleans alone are never " \
+           "sufficient" in pe
+    assert "dp_id == d_partner" in pe
+    assert "refuses with missing_terminal_probe" in pe
+    assert "the terminal NEVER being inferred from list position" in pe
+    assert "matched_units == 48 for A|B and for A|C" in pe
+    assert "unmatched units are never silently held fixed" in pe
+    assert "max_surviving_delta is a REQUIRED threshold" in pe
+    assert "enforced before any statistic" in pe
+    assert "surviving counts spreading beyond it refuse" in pe
+    # clause 1: refusal / seed probe / digest drift / floor -> inconclusive
     assert "the admissibility policy refuses" in pe
-    assert "max_surviving_delta, the verdict is inconclusive" in pe
-    # clause 2: sham not null -> inconclusive
+    assert "effective n falls below min_admissible_effective_n, the verdict " \
+           "is inconclusive" in pe
+    # clause 2: the sham-adequacy warrant (both halves, strict margin)
+    assert "(2) SHAM-CONTROL ADEQUACY" in pe
+    assert "a sham non-rejection needs a warrant exactly as a null claim " \
+           "does" in pe
+    assert "BOTH that the observed TV(A,C) does NOT exceed q_AC AND that " \
+           "q_AC < sham_equivalence_margin" in pe
     assert "observed TV(A,C) exceeds q_AC the verdict is inconclusive" in pe
-    # clause 3: rejection -> positive
-    assert "observed TV(A,B) exceeds q_AB the verdict is ORDER EFFECT " \
-           "OBSERVED" in pe
+    assert "If q_AC >= sham_equivalence_margin the sham warrant is missing" \
+        in pe
+    assert "a positive verdict is unreachable" in pe
+    # the audit's pinned boundary case decides INCONCLUSIVE, never positive
+    assert "TV(A,C) = q_AC = sham_equivalence_margin is inconclusive under " \
+           "the strict inequality, never a positive" in pe
+    # clause 3: rejection + sham warrant -> positive
+    assert "the observed TV(A,B) exceeds q_AB AND the sham warrant of " \
+           "clause (2) holds, the verdict is ORDER EFFECT OBSERVED" in pe
     # clause 4: sensitivity warrants the null claim
     assert "q_AB is less than or equal to min_detectable_effect" in pe
     assert "NO ORDER EFFECT OBSERVED" in pe
     # clause 5: neither rejected nor entitled to assert absence
     assert "(5) else the verdict is inconclusive" in pe
     assert "NOT evidence of absence" in pe
+
+
+def test_sham_equivalence_margin_is_frozen_with_the_right_type():
+    th = _entry()["planned_design"]["thresholds"]
+    sem = th["sham_equivalence_margin"]
+    assert sem == 0.25
+    assert isinstance(sem, float) and not isinstance(sem, bool)
+    # equal to min_detectable_effect by design (the prereg freezes both at
+    # the same resolving power)
+    assert sem == th["min_detectable_effect"]
+
+
+@pytest.mark.parametrize("label,mutate,needle", [
+    ("sham margin omitted",
+     lambda e: e["planned_design"]["thresholds"].pop("sham_equivalence_margin"),
+     "sham_equivalence_margin"),
+    ("zero sham margin",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "sham_equivalence_margin", 0.0), "sham_equivalence_margin"),
+    ("sham margin above 1",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "sham_equivalence_margin", 1.5), "sham_equivalence_margin"),
+    ("non-numeric sham margin",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "sham_equivalence_margin", "wide"), "sham_equivalence_margin"),
+])
+def test_bad_sham_margin_is_refused(tmp_path, label, mutate, needle):
+    path = _rehashed(tmp_path, mutate)
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any(needle in i for i in issues), f"{label}: {issues}"
+
+
+@pytest.mark.parametrize("marker", [
+    "provider-free replay", "missing_terminal_probe", "matched_units == 48",
+    "before any statistic", "d_partner"])
+def test_dropping_a_clause0_admission_marker_fails_the_lint(tmp_path, marker):
+    """A rule that loses any clause-0 admission requirement can be read as
+    re-admitting the audited escapes; the lint refuses it independent of
+    design_hash."""
+    pe = _entry()["planned_design"]["primary_event"]
+    stripped = pe.replace(marker, "[redacted]")
+    assert marker not in stripped
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"].__setitem__(
+            "primary_event", stripped))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert not any("design_hash" in i for i in issues)
+    assert any(marker in i for i in issues), issues
+
+
+def test_dropping_the_sham_adequacy_warrant_fails_the_lint(tmp_path):
+    pe = _entry()["planned_design"]["primary_event"]
+    stripped = pe.replace("q_AC < sham_equivalence_margin",
+                          "q_AC compared to the margin")
+    assert "q_AC < sham_equivalence_margin" not in stripped
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"].__setitem__(
+            "primary_event", stripped))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert not any("design_hash" in i for i in issues)
+    assert any("sham-adequacy" in i or "sham_equivalence_margin" in i
+               for i in issues), issues
+
+
+def test_notes_state_the_sharp_null_not_the_false_exchangeability_claim():
+    """Audit a-003 finding 0: the registry note claiming the permutation
+    null's exchangeability is 'implied by H0' was FALSE (marginal equality
+    does not imply within-pair exchangeability) and is replaced by the
+    sharp-null statement mirroring the prereg."""
+    pd = _entry()["planned_design"]
+    assert "exchangeability implied by H0" not in pd["notes"]
+    assert "WITHIN-PAIR EXCHANGEABILITY" in pd["notes"]
+    assert "SHARP null" in pd["notes"]
+    assert "FALSE and is removed" in pd["notes"]
+    # a rejection licenses only the unit-level conclusion
+    assert "unit-level conclusion" in pd["notes"]
+    # the primary_event states the operative sharp null too
+    assert "SHARP" in pd["primary_event"]
+    assert "within-pair exchangeability" in pd["primary_event"]
 
 
 def test_the_sensitivity_requirement_is_declared_null_branch_only():
@@ -690,19 +805,20 @@ def test_dropping_the_asymmetry_statement_fails_the_lint(tmp_path):
 
 
 @pytest.mark.parametrize("stale", ["ORDER_REPORT_VERSION 1",
-                                   "ORDER_REPORT_VERSION 2"])
+                                   "ORDER_REPORT_VERSION 2",
+                                   "ORDER_REPORT_VERSION 3"])
 def test_a_stale_callable_version_fails_the_lint(tmp_path, stale):
     """A verdict emitted by an older callable implements a DIFFERENT decision
     rule and must not be able to claim this design."""
     pe = _entry()["planned_design"]["primary_event"]
-    rigged = pe.replace("ORDER_REPORT_VERSION 3", stale)
+    rigged = pe.replace("ORDER_REPORT_VERSION 4", stale)
     assert stale in rigged
     path = _rehashed(
         tmp_path, lambda e: e["planned_design"].__setitem__(
             "primary_event", rigged))
     issues = _m8_issues(lint_experiments_registry(path, ROOT))
     assert not any("design_hash" in i for i in issues)
-    assert any("ORDER_REPORT_VERSION 3" in i for i in issues), issues
+    assert any("ORDER_REPORT_VERSION 4" in i for i in issues), issues
 
 
 def test_the_asymmetry_correction_is_justified_in_the_design_hashed_notes():
@@ -741,11 +857,19 @@ def test_config_agrees_with_the_registry_entry():
     assert cfg["thresholds"]["permutation_iterations"] == 10000
     assert cfg["thresholds"]["permutation_seed"] == 20260719
     assert cfg["thresholds"]["alpha"] == 0.05
-    assert "ORDER_REPORT_VERSION 3" in cfg["primary_event"]
+    # R7: both files carry the sham-adequacy margin and the v4 rule
+    assert cfg["thresholds"]["sham_equivalence_margin"] == 0.25
+    assert "ORDER_REPORT_VERSION 4" in cfg["primary_event"]
     assert "ORDER_REPORT_VERSION 2" not in cfg["primary_event"]
+    assert "ORDER_REPORT_VERSION 3" not in cfg["primary_event"]
     assert "LOWER bound of TV(A,B)" not in cfg["primary_event"]
     # R6: and both files carry the corrected asymmetric sensitivity requirement
     assert "attaches ONLY to the null branch" in cfg["primary_event"]
+    # b-001 finding 2: the frozen arbitration regime is mirrored exactly
+    assert cfg["arbitration"] == pd["arbitration"] == "planner_priority"
+    # d-001 driver side: the config declares the preregistered interleaved
+    # execution order the driver forwards to run_sweep
+    assert cfg["execution_order"] == "interleaved"
     assert cfg["temperature"] == pd["temperature"] == 0.7
     assert cfg["retries_per_unit"] == pd["retries_per_unit"] == 0
     assert cfg["interaction"] == pd["interaction_mode"]
@@ -769,19 +893,238 @@ def test_config_drift_from_the_frozen_design_fails(tmp_path, field, value):
     assert lint_experiment_config(str(path), REGISTRY, ROOT) != []
 
 
-def test_config_digest_drift_fails(tmp_path):
-    """A model swap under the same tag is a NEW regime and must be caught."""
-    cfg = _config()
-    cfg["model_digests"] = {MODEL: "f" * 64}
-    cfg["design_hash"] = _entry()["design_hash"]
-    path = tmp_path / "digest.experiment.json"
+# ------------------- b-001 finding 1: the digest boundary is EXACT equality
+#
+# The live config provenance gate must compare config.model_digests to
+# planned_design.model_digests digest-for-digest. A same-tag 64-hex
+# substitution used to return no lint issues and became the live pin.
+
+def _lint_cfg(tmp_path, cfg, name="mutated.experiment.json"):
+    path = tmp_path / name
     path.write_text(json.dumps(cfg), encoding="utf-8")
-    issues = lint_experiment_config(str(path), REGISTRY, ROOT)
-    # the frozen model spec carries no @prefix, so the binding check that
-    # bites is the design_hash-covered registry digest disagreeing with the
-    # config's — assert the config no longer matches the frozen regime
-    assert cfg["model_digests"] != _entry()["planned_design"]["model_digests"]
-    assert isinstance(issues, list)
+    return lint_experiment_config(str(path), REGISTRY, ROOT)
+
+
+@pytest.mark.parametrize("label,digest", [
+    ("all-f substitution", "f" * 64),
+    ("all-e substitution", "e" * 64),
+    ("one-hex-char drift", DIGEST[:-1] + ("0" if DIGEST[-1] != "0" else "1")),
+])
+def test_same_tag_full_digest_substitution_is_refused(tmp_path, label, digest):
+    """A model swap under the same tag is a NEW regime: the lint must refuse
+    with a digest-specific error BEFORE the driver treats the substituted
+    mapping as the expected pin."""
+    cfg = _config()
+    cfg["model_digests"] = {MODEL: digest}
+    cfg["design_hash"] = _entry()["design_hash"]     # hash kept — no cover
+    issues = _lint_cfg(tmp_path, cfg)
+    assert issues, f"{label}: substitution passed the gate"
+    assert any("model_digests" in i and "frozen digest" in i
+               for i in issues), f"{label}: {issues}"
+
+
+def test_missing_and_extra_digest_mappings_are_refused(tmp_path):
+    cfg = _config()
+    cfg["model_digests"] = {}      # frozen model's digest dropped entirely
+    issues = _lint_cfg(tmp_path, cfg)
+    assert any("missing frozen models" in i for i in issues), issues
+
+    cfg = _config()
+    cfg["model_digests"]["phantom:latest"] = "a" * 64
+    issues = _lint_cfg(tmp_path, cfg)
+    assert any("extra models" in i for i in issues), issues
+
+
+def test_malformed_digest_shape_is_refused(tmp_path):
+    """A digest that is not a full immutable 64-hex value pins nothing."""
+    for bad in ("103482", "z" * 64, ""):
+        cfg = _config()
+        cfg["model_digests"] = {MODEL: bad}
+        issues = _lint_cfg(tmp_path, cfg)
+        assert any("64-hex" in i or "frozen digest" in i
+                   or "no pinned digest" in i for i in issues), (bad, issues)
+
+
+# --------------------- b-001 finding 2: arbitration is bound to the design
+#
+# The frozen planner_priority arbitration rule must be enforced at the
+# design-to-live-config boundary: a valid ALTERNATE rule used to pass the
+# lint and flow straight into run_sweep.
+
+def test_alternate_arbitration_rule_is_refused(tmp_path):
+    cfg = _config()
+    cfg["arbitration"] = "reflex_under_time_pressure"
+    issues = _lint_cfg(tmp_path, cfg)
+    assert any("arbitration" in i and "reflex_under_time_pressure" in i
+               for i in issues), issues
+
+
+def test_missing_arbitration_is_refused(tmp_path):
+    """arbitration is a REQUIRED config field — absence must refuse, not
+    fall through to a driver default."""
+    cfg = _config()
+    del cfg["arbitration"]
+    issues = _lint_cfg(tmp_path, cfg)
+    assert any("arbitration" in i for i in issues), issues
+
+
+def test_wrong_execution_order_is_refused(tmp_path):
+    """The prereg requires interleaved execution; a blocked pack perfectly
+    confounds condition with backend state drift."""
+    for bad in ("blocked", None):
+        cfg = _config()
+        if bad is None:
+            del cfg["execution_order"]
+        else:
+            cfg["execution_order"] = bad
+        issues = _lint_cfg(tmp_path, cfg)
+        assert any("execution_order" in i for i in issues), (bad, issues)
+
+
+# --------- b-001 finding 3: the REHASH ATTACK fails against the code profile
+#
+# design_hash is self-derived from planned_design, so mutate + recompute +
+# mirror-into-config defeats hash reconstruction entirely. The audited
+# code-level M8_FROZEN_PROFILE is the independent authority: BOTH lints must
+# refuse every weakened-but-type-valid load-bearing value with the hash
+# fully consistent.
+
+def _mirrored_attack(tmp_path, reg_mutate, cfg_mutate):
+    """Mutate the registry entry, recompute design_hash, and mirror the same
+    mutation + new hash into the config. Returns (registry_issues,
+    config_issues) — the attack succeeds only if BOTH are empty."""
+    new_hash = {}
+
+    def _m(e):
+        reg_mutate(e)
+        e["design_hash"] = design_hash(e["planned_design"])
+        new_hash["v"] = e["design_hash"]
+    reg_path = _write_mutated(tmp_path, _m)
+    cfg = _config()
+    cfg_mutate(cfg)
+    cfg["design_hash"] = new_hash["v"]
+    cfg_path = tmp_path / "mirrored.experiment.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    reg_issues = [i for i in lint_experiments_registry(reg_path, ROOT)
+                  if i.startswith(EID + ":")]
+    cfg_issues = lint_experiment_config(str(cfg_path), reg_path, ROOT)
+    return reg_issues, cfg_issues
+
+
+def _set_policy(key, val):
+    return lambda d: d["admissibility_policy"].__setitem__(key, val)
+
+
+def _set_thresh(key, val):
+    return lambda d: d["thresholds"].__setitem__(key, val)
+
+
+@pytest.mark.parametrize("label,reg_mutate,cfg_mutate,needle", [
+    # weakened admissibility rates (the audit's exact reproduction values)
+    ("max_non_decision_rate 0.20 -> 0.90",
+     lambda e: _set_policy("max_non_decision_rate", 0.9)(e["planned_design"]),
+     _set_policy("max_non_decision_rate", 0.9), "max_non_decision_rate"),
+    ("max_non_decision_rate_delta 0.05 -> 0.5",
+     lambda e: _set_policy("max_non_decision_rate_delta", 0.5)(
+         e["planned_design"]),
+     _set_policy("max_non_decision_rate_delta", 0.5),
+     "max_non_decision_rate_delta"),
+    ("effective-n floor 20 -> 2",
+     lambda e: _set_policy("min_admissible_effective_n", 2)(
+         e["planned_design"]),
+     _set_policy("min_admissible_effective_n", 2),
+     "min_admissible_effective_n"),
+    # weakened inferential parameters
+    ("bootstrap_iterations 10000 -> 100",
+     lambda e: _set_thresh("bootstrap_iterations", 100)(e["planned_design"]),
+     _set_thresh("bootstrap_iterations", 100), "bootstrap_iterations"),
+    ("bootstrap_seed re-drawn",
+     lambda e: _set_thresh("bootstrap_seed", 1)(e["planned_design"]),
+     _set_thresh("bootstrap_seed", 1), "bootstrap_seed"),
+    ("confidence 0.95 -> 0.5",
+     lambda e: _set_thresh("confidence", 0.5)(e["planned_design"]),
+     _set_thresh("confidence", 0.5), "confidence"),
+    ("permutation_iterations 10000 -> 100",
+     lambda e: _set_thresh("permutation_iterations", 100)(e["planned_design"]),
+     _set_thresh("permutation_iterations", 100), "permutation_iterations"),
+    ("permutation_seed re-drawn",
+     lambda e: _set_thresh("permutation_seed", 1)(e["planned_design"]),
+     _set_thresh("permutation_seed", 1), "permutation_seed"),
+    ("alpha 0.05 -> 0.2",
+     lambda e: _set_thresh("alpha", 0.2)(e["planned_design"]),
+     _set_thresh("alpha", 0.2), "alpha"),
+    ("min_detectable_effect 0.25 -> 0.9",
+     lambda e: _set_thresh("min_detectable_effect", 0.9)(e["planned_design"]),
+     _set_thresh("min_detectable_effect", 0.9), "min_detectable_effect"),
+    ("sham_equivalence_margin 0.25 -> 0.9",
+     lambda e: _set_thresh("sham_equivalence_margin", 0.9)(
+         e["planned_design"]),
+     _set_thresh("sham_equivalence_margin", 0.9), "sham_equivalence_margin"),
+    # the audit's exact dropout-bound weakening: 2 -> 40
+    ("max_surviving_delta 2 -> 40",
+     lambda e: e["planned_design"].__setitem__("max_surviving_delta", 40),
+     lambda c: c.__setitem__("max_surviving_delta", 40),
+     "max_surviving_delta"),
+    # sampled-unit identity
+    ("a sampler seed replaced",
+     lambda e: e["planned_design"]["sampler_seeds"].__setitem__(0, 9999),
+     lambda c: c["sampler_seeds"].__setitem__(0, 9999), "sampler_seeds"),
+    ("the noise-floor split re-drawn",
+     lambda e: e["planned_design"].__setitem__(
+         "noise_floor_split", {"S1": list(range(2001, 2011)),
+                               "S2": list(range(2011, 2025))}),
+     lambda c: c.__setitem__(
+         "noise_floor_split", {"S1": list(range(2001, 2011)),
+                               "S2": list(range(2011, 2025))}),
+     "noise_floor_split"),
+    ("a scenario seed replaced",
+     lambda e: e["planned_design"].__setitem__("scenario_seeds", [42, 2]),
+     lambda c: c.__setitem__("seeds", [42, 2]), "scenario_seeds"),
+    # regime identity
+    ("temperature 0.7 -> 0.0",
+     lambda e: e["planned_design"].__setitem__("temperature", 0.0),
+     lambda c: c.__setitem__("temperature", 0.0), "temperature"),
+    ("arbitration substituted",
+     lambda e: e["planned_design"].__setitem__(
+         "arbitration", "reflex_under_time_pressure"),
+     lambda c: c.__setitem__("arbitration", "reflex_under_time_pressure"),
+     "arbitration"),
+    ("model digest substituted",
+     lambda e: e["planned_design"]["model_digests"].__setitem__(
+         MODEL, "e" * 64),
+     lambda c: c["model_digests"].__setitem__(MODEL, "e" * 64),
+     "model_digests"),
+])
+def test_rehash_and_mirror_attack_fails_both_lints(tmp_path, label,
+                                                   reg_mutate, cfg_mutate,
+                                                   needle):
+    """For every load-bearing value: weaken it to a type-valid alternative,
+    recompute design_hash, mirror the config — and BOTH lints must refuse on
+    the audited code profile, independent of any hash mismatch."""
+    reg_issues, cfg_issues = _mirrored_attack(tmp_path, reg_mutate, cfg_mutate)
+    # the hash is fully consistent, so no refusal may rest on design_hash
+    assert not any("design_hash" in i for i in reg_issues), (label, reg_issues)
+    assert not any("design_hash" in i for i in cfg_issues), (label, cfg_issues)
+    assert any(needle in i for i in reg_issues), (label, reg_issues)
+    assert any(needle in i for i in cfg_issues), (label, cfg_issues)
+
+
+def test_profile_constant_matches_the_shipped_design():
+    """The audited code profile and the shipped registry/config agree — the
+    profile is an anchor, never a second source of drift."""
+    from coliseum.textlab.registry import (M8_FROZEN_PROFILE,
+                                           FROZEN_NUMERIC_PROFILES)
+    assert FROZEN_NUMERIC_PROFILES[EID] is M8_FROZEN_PROFILE
+    pd = _entry()["planned_design"]
+    for key in ("max_surviving_delta", "sampler_seeds", "noise_floor_split",
+                "scenario_seeds", "temperature", "arbitration",
+                "model_digests"):
+        assert pd[key] == M8_FROZEN_PROFILE[key], key
+    for k, v in M8_FROZEN_PROFILE["admissibility_policy"].items():
+        assert pd["admissibility_policy"][k] == v, k
+    for k, v in M8_FROZEN_PROFILE["thresholds"].items():
+        assert pd["thresholds"][k] == v, k
+    assert M8_FROZEN_PROFILE["model_digests"] == {MODEL: DIGEST}
 
 
 # ------------------------------------------------------ Phase-1 stays untouched

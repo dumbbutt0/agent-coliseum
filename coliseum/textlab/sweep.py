@@ -14,6 +14,7 @@ refusal instead of a silent new regime (the driver's integrity gate).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -132,6 +133,91 @@ def verify_run_replay(run_dir: str, config_dir: str) -> tuple[bool, str]:
             os.path.join(result.run_dir, "decisions.jsonl"), shallow=False)
     return (same, "byte-identical" if same
             else "decisions.jsonl differs between original and replay")
+
+
+def _file_sha256(path: str, *, absent_as_empty: bool = False) -> str:
+    """sha256 hex of the EXACT file bytes. With absent_as_empty a missing file
+    hashes as the empty file — the documented captures.jsonl convention for
+    scripted runs, which capture nothing by construction."""
+    if absent_as_empty and not os.path.exists(path):
+        return hashlib.sha256(b"").hexdigest()
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_pack_replay(manifest_path: str, out_root: str, config_dir: str) -> dict:
+    """Provider-free replay attestation for a WHOLE pack (M8 Phase-2 audit
+    c-001, finding 0 — generator side).
+
+    Runs verify_run_replay on EVERY manifest row and, only if every run
+    replays, writes <out_root>/replay_attestation.json binding each run's
+    exact evidence bytes (run.json / decisions.jsonl / captures.jsonl sha256)
+    and the manifest bytes to the replay result. The frozen analysis path
+    authenticates this receipt instead of trusting mutable admission booleans.
+
+    FAIL CLOSED: any replay failure (or a missing/empty manifest) raises and
+    writes NO attestation — not even a partial one — and a stale attestation
+    from a previous pass is removed before verification starts, so a failing
+    pack can never sit next to a valid-looking receipt. The attestation is
+    written atomically (temp file + rename) only after the last row verifies.
+
+    Returns the attestation dict exactly as written."""
+    if not os.path.exists(manifest_path):
+        raise SweepAborted(f"verify_pack_replay: no manifest at {manifest_path}")
+    attestation_path = os.path.join(out_root, "replay_attestation.json")
+    if os.path.exists(attestation_path):
+        os.remove(attestation_path)       # a receipt must postdate its verification
+    rows = manifest_load(manifest_path, out_root)
+    if not rows:
+        raise SweepAborted(f"verify_pack_replay: {manifest_path} has no rows — "
+                           "refusing to attest an empty pack")
+    runs = {}
+    for rec in rows.values():             # manifest file order (insertion order)
+        run_dir = os.path.join(out_root, rec["dir"])
+        ok, detail = verify_run_replay(run_dir, config_dir)
+        if not ok:
+            raise SweepAborted(
+                f"verify_pack_replay: {rec['run_id']} ({rec['dir']}) failed "
+                f"provider-free replay: {detail} — no attestation written")
+        runs[rec["run_id"]] = {
+            "run_dir": rec["dir"],
+            "replay_ok": True,
+            "run_json_sha256": _file_sha256(os.path.join(run_dir, "run.json")),
+            "decisions_sha256": _file_sha256(os.path.join(run_dir, "decisions.jsonl")),
+            "captures_sha256": _file_sha256(os.path.join(run_dir, "captures.jsonl"),
+                                            absent_as_empty=True),
+        }
+    attestation = {
+        "attestation_version": "1",
+        "verified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "manifest_sha256": _file_sha256(manifest_path),
+        "runs": runs,
+    }
+    tmp_path = attestation_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(attestation, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, attestation_path)
+    return attestation
+
+
+def surviving_counts_from_result(result: "SweepResult") -> dict:
+    """Per-condition surviving-run counts in the coordinate shape the analysis
+    consumes: a plain {scenario_id: int}. SweepResult keys conditions by
+    (model, scenario); two models in one sweep are two separate comparisons
+    and must never be pooled (see SweepResult), so a multi-model result is
+    refused — extract per model instead."""
+    models = {model for (model, _scenario) in result.surviving}
+    if len(models) > 1:
+        raise SweepAborted(
+            f"surviving_counts_from_result: result spans models "
+            f"{sorted(models)} — two models are two separate comparisons and "
+            "their counts must never be pooled")
+    return {scenario: n
+            for (_model, scenario), n in sorted(result.surviving.items())}
 
 
 def manifest_load(path: str, out_root: str) -> dict:

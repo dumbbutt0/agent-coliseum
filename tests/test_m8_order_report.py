@@ -17,10 +17,27 @@ stochastic live model, where four of its properties become defects:
 behavior and output bytes (Phase-1 evidence and its three GO verdicts depend on it),
 and the tests below prove both halves of that claim.
 
+AT ORDER_REPORT_VERSION 4 the successor additionally enforces the five audit
+repairs (001814 / 001820 / 001823):
+
+  a-003[0]  sharp-null claim discipline: `null_form: "sharp"`, the marginal-claim
+            limitation, and verdict language that states the unit-level
+            conclusion — never "the distribution changed";
+  a-003[1]  sham adequacy: a positive needs TV(A,C) <= q_AC AND
+            q_AC < sham_equivalence_margin (STRICT);
+  d-001[0]  `max_surviving_delta` REQUIRED and enforced pre-statistics, with the
+            execution census (`surviving_counts`) consumed when declared;
+  d-001[1]  the matched-unit grid: identical unit identities in every condition,
+            fully realizing the frozen sampler-seed set;
+  d-001[2]  the frozen terminal probe (`terminal_dp_id`), never `nodes[-1]`;
+  c-001[0]  the provider-free replay gate (`replay_attestation`, MANDATORY).
+
 No live model is contacted; every fixture is a synthetic run directory.
 """
+import hashlib
 import json
 import os
+import socket
 
 import pytest
 
@@ -33,33 +50,48 @@ from coliseum.textlab.schema import SchemaError, canonical_json
 CONDITIONS = {"A": "scramble_dev_m8", "B": "scramble_perm_m8", "C": "scramble_sham_m8"}
 REGIME = "r" * 64
 AGENT_CFG = {"driver": "ollama_local", "temperature": 0.7}
+TERMINAL = "d_partner"
+# the terminal probe's action menu (a DECISION: >= 2 actions); the exposure
+# points offer exactly one
+MENU = ["share", "verify", "decline", "defer"]
 
 
 # ------------------------------------------------------------------ fixtures
 
-def _node(final_action: str, winner: str | None = "planner", scripted: bool = False):
+def _node(final_action: str, winner: str | None = "planner", scripted: bool = False,
+          dp_id: str = TERMINAL, available_actions: list | None = None):
     """One decision_node record's `data`.
 
     `scripted=True` reproduces Phase-1 scripted shape: no `arbitration_winner`
     and no `meta` on either pass, i.e. no parser ran, so no parse failure is
     possible and the node must census as admissible.
     """
+    aa = list(MENU) if available_actions is None else list(available_actions)
     if scripted:
-        return {"dp_id": "d_partner", "final_action": final_action,
+        return {"dp_id": dp_id, "final_action": final_action,
+                "available_actions": aa,
                 "reflex_choice": {"action_id": final_action},
                 "planner_choice": {"action_id": final_action},
                 "moral_tags": [], "state_before": {"facts": {}}}
-    return {"dp_id": "d_partner", "final_action": final_action,
+    return {"dp_id": dp_id, "final_action": final_action,
+            "available_actions": aa,
             "arbitration_winner": winner,
             "reflex_choice": {"action_id": final_action, "meta": {"parse_status": "ok"}},
             "planner_choice": {"action_id": final_action, "meta": {"parse_status": "ok"}},
             "moral_tags": [], "state_before": {"facts": {}}}
 
 
+def _exposure(scripted: bool = False):
+    """An exposure point: exactly ONE legal action, and NOT the terminal dp_id.
+    The report must never let it stand in for the measured probe."""
+    return _node("expose", scripted=scripted, dp_id="e_event",
+                 available_actions=["expose"])
+
+
 def _mkrun(tmp_path, rid, scenario_id, variant, scen_seed, samp_seed, final_action,
            winner="planner", scripted=False, agent_id="live", regime=REGIME,
            agent_config=None, reportable=True, stochastic_reportable=True,
-           stochastic_exclusion_reasons=None):
+           stochastic_exclusion_reasons=None, nodes=None):
     d = tmp_path / rid
     d.mkdir()
     run = {
@@ -74,16 +106,48 @@ def _mkrun(tmp_path, rid, scenario_id, variant, scen_seed, samp_seed, final_acti
         "arbitration": "planner_priority", "interaction_mode": "sequential_history",
     }
     (d / "run.json").write_text(json.dumps(run), encoding="utf-8")
-    # an earlier (exposure) node plus the TERMINAL probe — the report must read the
-    # LAST node only and must never re-point at this earlier one
-    lines = [
-        {"kind": "decision_node", "data": _node("expose", scripted=scripted)},
-        {"kind": "decision_node",
-         "data": _node(final_action, winner=winner, scripted=scripted)},
-    ]
+    # an earlier (exposure) node plus the TERMINAL probe — the report must
+    # measure the frozen probe and must never re-point at the earlier one
+    if nodes is None:
+        lines = [
+            {"kind": "decision_node", "data": _exposure(scripted=scripted)},
+            {"kind": "decision_node",
+             "data": _node(final_action, winner=winner, scripted=scripted)},
+        ]
+    else:
+        lines = [{"kind": "decision_node", "data": n} for n in nodes]
     (d / "decisions.jsonl").write_text(
         "\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    # the replay substrate the attestation binds; synthetic but hashed for real
+    (d / "captures.jsonl").write_text(
+        json.dumps({"key": f"{TERMINAL}/plan", "raw_text": final_action}) + "\n",
+        encoding="utf-8")
     return str(d)
+
+
+def _attest(dirs, replay_ok=True):
+    """Generate the Director-defined replay attestation from the CURRENT bytes
+    of each run directory — the same contract the sweep-side generator emits."""
+    runs = {}
+    for d in dirs:
+        with open(os.path.join(d, "run.json"), encoding="utf-8") as fh:
+            run = json.load(fh)
+        entry = {"replay_ok": replay_ok}
+        for fname, key in (("run.json", "run_json_sha256"),
+                           ("decisions.jsonl", "decisions_sha256"),
+                           ("captures.jsonl", "captures_sha256")):
+            with open(os.path.join(d, fname), "rb") as fh:
+                entry[key] = hashlib.sha256(fh.read()).hexdigest()
+        runs[run["run_id"]] = entry
+    return {"attestation_version": "1", "runs": runs}
+
+
+def _report(dirs, policy, thresholds, attestation=None, terminal=TERMINAL,
+            surviving=None, conditions=CONDITIONS):
+    return order_sensitivity_report(
+        dirs, conditions, admissibility_policy=policy, thresholds=thresholds,
+        replay_attestation=_attest(dirs) if attestation is None else attestation,
+        terminal_dp_id=terminal, surviving_counts=surviving)
 
 
 def _build(tmp_path, plan, **kw):
@@ -109,15 +173,20 @@ def POLICY(**over):
 def THRESH(s1, s2, **over):
     t = {"bootstrap_iterations": 200, "bootstrap_seed": 20260719,
          "confidence": 0.95,
-         # DIAGNOSTIC ONLY at ORDER_REPORT_VERSION 3 — retained and reported as a
-         # within-condition stability measure, but it gates no verdict.
+         # DIAGNOSTIC ONLY — retained and reported as a within-condition
+         # stability measure, but it gates no verdict. It ALSO declares the
+         # frozen sampler-seed set (S1 ∪ S2) the matched-unit grid must realize.
          "noise_floor_split": {"S1": list(s1), "S2": list(s2)},
          # the frozen sensitivity ceiling; mandatory, see _THRESHOLD_KEYS
          "min_detectable_effect": 0.25,
          # the paired permutation null that REPLACED the split-half noise floor
          # as the calibrating null; these three are mandatory at v2
          "permutation_iterations": 200, "permutation_seed": 20260719,
-         "alpha": 0.05}
+         "alpha": 0.05,
+         # v4 REQUIRED: the sham non-rejection's equivalence warrant and the
+         # differential-dropout bound
+         "sham_equivalence_margin": 0.25,
+         "max_surviving_delta": 2}
     t.update(over)
     return t
 
@@ -150,9 +219,7 @@ def test_parse_fallback_inflates_old_tv_and_is_excluded_by_new_report(tmp_path):
                                          "verify": pytest.approx(1 / 3)}
     assert old["effective_n"]["B"] == 3          # the fallback counted as evidence
 
-    new = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=LOOSE,
-                                   thresholds=THRESH([1], [2, 3]))["per_agent"]["live"]
+    new = _report(dirs, LOOSE, THRESH([1], [2, 3]))["per_agent"]["live"]
     b = new["cells"]["B"]
     assert b["non_decision_n"] == 1
     assert b["non_decision_reasons"] == {"parse_fallback_winner": 1}
@@ -163,15 +230,14 @@ def test_parse_fallback_inflates_old_tv_and_is_excluded_by_new_report(tmp_path):
 
 
 def test_non_admissible_terminal_is_never_repointed_at_an_earlier_decision(tmp_path):
-    """The terminal probe is the LAST node, full stop. Substituting the earlier
+    """The terminal probe is the FROZEN probe, full stop. Substituting the earlier
     (admissible) node would be a second fabrication on top of the first."""
     dirs = _build(tmp_path, {
         "A": [(1, "share"), (2, "share")],
         "B": [(1, "share"), (2, "verify", "fallback")],
         "C": [(1, "share"), (2, "share")],
     })
-    rep = order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                   thresholds=THRESH([1], [2]))
+    rep = _report(dirs, LOOSE, THRESH([1], [2]))
     b = rep["per_agent"]["live"]["cells"]["B"]
     # "expose" is the earlier node's action; it must appear nowhere
     assert "expose" not in b["distribution"] and "expose" not in b["counts"]
@@ -180,15 +246,27 @@ def test_non_admissible_terminal_is_never_repointed_at_an_earlier_decision(tmp_p
 
 # --------------------------------------------- 2. declared bounds are mandatory
 
-def test_policy_and_thresholds_are_mandatory_keyword_arguments(tmp_path):
+def test_policy_thresholds_attestation_and_probe_are_mandatory_keywords(tmp_path):
     dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
                              "C": [(1, "share")]})
+    att = _attest(dirs)
     with pytest.raises(TypeError):
         order_sensitivity_report(dirs, CONDITIONS)
     with pytest.raises(TypeError):
         order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE)
     with pytest.raises(TypeError):
-        order_sensitivity_report(dirs, CONDITIONS, thresholds=THRESH([1], [1]))
+        order_sensitivity_report(dirs, CONDITIONS, thresholds=THRESH([1], [2]))
+    # v4: the replay attestation and the frozen probe identity are equally
+    # non-defaultable — a report without them is the artifact this module
+    # exists to prevent
+    with pytest.raises(TypeError):
+        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                 thresholds=THRESH([1], [2]),
+                                 terminal_dp_id=TERMINAL)
+    with pytest.raises(TypeError):
+        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                 thresholds=THRESH([1], [2]),
+                                 replay_attestation=att)
 
 
 def test_admissibility_version_mismatch_is_refused(tmp_path):
@@ -196,9 +274,7 @@ def test_admissibility_version_mismatch_is_refused(tmp_path):
     dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
                              "C": [(1, "share")]})
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS,
-                                 admissibility_policy=POLICY(admissibility_version="0"),
-                                 thresholds=THRESH([1], [1]))
+        _report(dirs, POLICY(admissibility_version="0"), THRESH([1], [2]))
     assert "admissibility_version" in str(exc.value)
 
 
@@ -208,12 +284,9 @@ def test_missing_policy_keys_and_non_refuse_mode_are_refused(tmp_path):
     bad = POLICY()
     del bad["max_non_decision_rate_delta"]
     with pytest.raises(SchemaError):
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=bad,
-                                 thresholds=THRESH([1], [1]))
+        _report(dirs, bad, THRESH([1], [2]))
     with pytest.raises(SchemaError):
-        order_sensitivity_report(dirs, CONDITIONS,
-                                 admissibility_policy=POLICY(on_violation="warn"),
-                                 thresholds=THRESH([1], [1]))
+        _report(dirs, POLICY(on_violation="warn"), THRESH([1], [2]))
 
 
 def test_min_detectable_effect_is_a_mandatory_threshold(tmp_path):
@@ -221,42 +294,58 @@ def test_min_detectable_effect_is_a_mandatory_threshold(tmp_path):
     would be able to state a null it has no entitlement to state."""
     dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
                              "C": [(1, "share")]})
-    bad = THRESH([1], [1])
+    bad = THRESH([1], [2])
     del bad["min_detectable_effect"]
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=bad)
+        _report(dirs, LOOSE, bad)
     assert "min_detectable_effect" in str(exc.value)
     for value in (0.0, -0.1, 1.5, "0.25", True):
         with pytest.raises(SchemaError):
-            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                     thresholds=THRESH([1], [1],
-                                                       min_detectable_effect=value))
+            _report(dirs, LOOSE, THRESH([1], [2], min_detectable_effect=value))
 
 
-def test_max_surviving_delta_is_accepted_and_echoed_not_dropped(tmp_path):
-    """A declared bound that vanishes from the artifact is a bound nobody can
-    audit, so an unknown-but-declared key must survive into the report."""
+def test_sham_equivalence_margin_is_a_mandatory_threshold(tmp_path):
+    """v4 (audit 001814 finding 1): the sham non-rejection's warrant is part of
+    the frozen bundle. Deleting it must refuse; malformed values must refuse."""
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    bad = THRESH([1], [2])
+    del bad["sham_equivalence_margin"]
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, bad)
+    assert "sham_equivalence_margin" in str(exc.value)
+    for value in (0.0, -0.1, 1.5, "0.25", True):
+        with pytest.raises(SchemaError):
+            _report(dirs, LOOSE, THRESH([1], [2], sham_equivalence_margin=value))
+
+
+def test_max_surviving_delta_is_a_mandatory_threshold_and_echoed(tmp_path):
+    """v4 (audit 001823 finding 0): the dropout bound was optional and never
+    enforced — a guard nobody is obliged to call. It is now REQUIRED: deleting
+    it from the frozen bundle refuses pre-statistics, and the declared value
+    survives into the artifact."""
     dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
                              for c in ("A", "B", "C")})
-    thresholds = THRESH([1, 2], [3, 4], max_surviving_delta=2)
-    rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
-                                   thresholds=thresholds)
+    bad = THRESH([1, 2], [3, 4])
+    del bad["max_surviving_delta"]
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, POLICY(min_admissible_effective_n=2), bad)
+    assert "max_surviving_delta" in str(exc.value)
+    for value in (-1, 0.5, "2", True):
+        with pytest.raises(SchemaError):
+            _report(dirs, LOOSE, THRESH([1, 2], [3, 4],
+                                        max_surviving_delta=value))
+    thresholds = THRESH([1, 2], [3, 4])
+    rep = _report(dirs, POLICY(min_admissible_effective_n=2), thresholds)
     assert rep["thresholds"]["max_surviving_delta"] == 2
     assert rep["thresholds"] == thresholds
-    with pytest.raises(SchemaError):
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=THRESH([1, 2], [3, 4],
-                                                   max_surviving_delta=-1))
 
 
 def test_overlapping_noise_floor_halves_are_refused(tmp_path):
     dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
                              "C": [(1, "share")]})
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=THRESH([1, 2], [2, 3]))
+        _report(dirs, LOOSE, THRESH([1, 2], [2, 3]))
     assert "overlap" in str(exc.value)
 
 
@@ -276,8 +365,7 @@ def test_refuses_on_differential_non_decision_rate_and_emits_no_distance(tmp_pat
     dirs = _differential_fallback_dirs(tmp_path)
     policy = POLICY(min_admissible_effective_n=1)     # only the delta bound bites
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=policy,
-                                 thresholds=THRESH(range(1, 6), range(6, 11)))
+        _report(dirs, policy, THRESH(range(1, 6), range(6, 11)))
     msg = str(exc.value)
     assert "A-vs-B" in msg                       # the offending compared pair
     assert "0.2" in msg                          # its rate
@@ -300,18 +388,17 @@ def test_refuses_on_differential_non_decision_rate_and_emits_no_distance(tmp_pat
         assert leaked not in canonical_json(body)
 
 
-def test_refuses_when_a_cell_is_below_the_effective_n_floor(tmp_path):
-    dirs = _build(tmp_path, {
-        "A": [(s, "share") for s in range(1, 5)],
-        "B": [(s, "share") for s in range(1, 5)],
-        "C": [(1, "share")],                     # only one unit
-    })
+def test_refuses_when_every_cell_is_below_the_effective_n_floor(tmp_path):
+    """The n floor refusal, on a pack whose grid and counts are otherwise clean
+    (equal 4-unit conditions against a floor of 8) — so the refusal is
+    attributable to the floor and nothing upstream."""
+    dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
+                             for c in ("A", "B", "C")})
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS,
-                                 admissibility_policy=POLICY(min_admissible_effective_n=4),
-                                 thresholds=THRESH([1, 2], [3, 4]))
+        _report(dirs, POLICY(min_admissible_effective_n=8),
+                THRESH([1, 2], [3, 4]))
     assert "live|C" in str(exc.value)
-    assert "min_admissible_effective_n=4" in str(exc.value)
+    assert "min_admissible_effective_n=8" in str(exc.value)
 
 
 def test_refuses_when_a_cell_has_zero_admissible_units(tmp_path):
@@ -322,22 +409,23 @@ def test_refuses_when_a_cell_has_zero_admissible_units(tmp_path):
         "C": [(s, "verify", "fallback") for s in range(1, 5)],
     })
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS,
-                                 admissibility_policy=POLICY(min_admissible_effective_n=1,
-                                                             max_non_decision_rate=1.0,
-                                                             max_non_decision_rate_delta=1.0),
-                                 thresholds=THRESH([1, 2], [3, 4]))
+        _report(dirs, POLICY(min_admissible_effective_n=1,
+                             max_non_decision_rate=1.0,
+                             max_non_decision_rate_delta=1.0),
+                THRESH([1, 2], [3, 4]))
     assert "live|C" in str(exc.value)
     assert exc.value.report["per_agent"]["live"]["cells"]["C"]["distribution"] == {}
 
 
 def test_refuses_when_a_whole_condition_is_missing(tmp_path):
+    """A missing condition is a matched-unit grid violation (v4): C realizes
+    none of the identities the other conditions carry."""
     dirs = _build(tmp_path, {"A": [(1, "share"), (2, "share")],
                              "B": [(1, "share"), (2, "share")]})
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=THRESH([1], [2]))
+        _report(dirs, LOOSE, THRESH([1], [2]))
     assert "live|C" in str(exc.value)
+    assert "matched_unit_grid" in str(exc.value)
 
 
 def test_refuses_when_a_cell_exceeds_the_absolute_non_decision_rate(tmp_path):
@@ -348,12 +436,10 @@ def test_refuses_when_a_cell_exceeds_the_absolute_non_decision_rate(tmp_path):
         "C": [(1, "share"), (2, "share"), (3, "share"), (4, "share")],
     })
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(
-            dirs, CONDITIONS,
-            admissibility_policy=POLICY(min_admissible_effective_n=1,
-                                        max_non_decision_rate=0.20,
-                                        max_non_decision_rate_delta=1.0),
-            thresholds=THRESH([1, 2], [3, 4]))
+        _report(dirs, POLICY(min_admissible_effective_n=1,
+                             max_non_decision_rate=0.20,
+                             max_non_decision_rate_delta=1.0),
+                THRESH([1, 2], [3, 4]))
     assert "max_non_decision_rate=0.2" in str(exc.value)
 
 
@@ -370,9 +456,8 @@ def test_seed_probe_failure_is_excluded_not_silently_admitted(tmp_path):
     bad = _mkrun(tmp_path, "B_bad", CONDITIONS["B"], "v0", 42, 9, "verify",
                  stochastic_reportable=False,
                  stochastic_exclusion_reasons=["backend_seed_unverified"])
-    rep = order_sensitivity_report(dirs + [bad], CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=1),
-                                   thresholds=THRESH([1, 2], [3, 4]))
+    rep = _report(dirs + [bad], POLICY(min_admissible_effective_n=1),
+                  THRESH([1, 2], [3, 4]))
     assert {"report_id": "B_bad", "reasons": ["backend_seed_unverified"]} in rep["excluded"]
     assert rep["per_agent"]["live"]["cells"]["B"]["distribution"] == {"share": 1.0}
     # and the OLD comparator would have admitted it — that is the defect
@@ -386,9 +471,7 @@ def test_non_reportable_run_is_excluded(tmp_path):
                              "C": [(1, "share"), (2, "share")]})
     bad = _mkrun(tmp_path, "A_bad", CONDITIONS["A"], "v0", 42, 9, "verify",
                  reportable=False)
-    rep = order_sensitivity_report(dirs + [bad], CONDITIONS,
-                                   admissibility_policy=LOOSE,
-                                   thresholds=THRESH([1], [2]))
+    rep = _report(dirs + [bad], LOOSE, THRESH([1], [2]))
     assert any(e["report_id"] == "A_bad" and "non_reportable" in e["reasons"]
                for e in rep["excluded"])
 
@@ -399,8 +482,7 @@ def test_mixed_decider_regimes_are_refused(tmp_path):
     dirs.append(_mkrun(tmp_path, "B_other", CONDITIONS["B"], "v0", 42, 1, "share",
                        regime="q" * 64))
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=THRESH([1], [2]))
+        _report(dirs, LOOSE, THRESH([1], [2]))
     assert "MIXED decider regimes" in str(exc.value)
 
 
@@ -408,12 +490,316 @@ def test_regime_unbound_evidence_is_refused(tmp_path):
     dirs = [_mkrun(tmp_path, "A_0", CONDITIONS["A"], "v0", 42, 1, "share",
                    agent_config={})]
     with pytest.raises(SchemaError) as exc:
-        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                 thresholds=THRESH([1], [2]))
+        _report(dirs, LOOSE, THRESH([1], [2]))
     assert "regime-unbound" in str(exc.value)
 
 
-# ------------------------------------------------------------- 5. replicates (F3)
+# ------------------------------------- 5. v4 replay gate (audit c-001 finding 0)
+
+def _full_grid(tmp_path, choose, conditions=("A", "B", "C"), skip=()):
+    """A production-shaped pack: 2 (variant, scenario_seed) groups x 24 frozen
+    sampler seeds x 3 conditions = 144 run dirs. `choose(cond, variant, samp)`.
+    `skip` removes (cond, variant, samp) triples to model dropout."""
+    s_all = list(range(2001, 2025))
+    dirs = []
+    for cond in conditions:
+        for variant, scen_seed in (("v0", 42), ("v1", 1)):
+            for samp in s_all:
+                if (cond, variant, samp) in skip:
+                    continue
+                dirs.append(_mkrun(tmp_path, f"{cond}_{variant}_{samp}",
+                                   CONDITIONS[cond], variant, scen_seed, samp,
+                                   choose(cond, variant, samp)))
+    return dirs
+
+
+_GRID_S1 = list(range(2001, 2013))
+_GRID_S2 = list(range(2013, 2025))
+_GRID_POLICY = POLICY(min_admissible_effective_n=20)
+
+
+def _grid_thresh(**over):
+    return THRESH(_GRID_S1, _GRID_S2, **over)
+
+
+def test_replay_attestation_is_mandatory_and_shape_checked(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    for bad in (None, [], "yes", {"runs": {}},
+                {"attestation_version": "2", "runs": {}},
+                {"attestation_version": "1", "runs": []}):
+        with pytest.raises((SchemaError, TypeError)):
+            _report(dirs, LOOSE, THRESH([1], [2]), attestation=bad)
+
+
+def test_missing_attestation_entry_refuses_before_any_distance(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    att = _attest(dirs)
+    del att["runs"]["B_0_1"]
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]), attestation=att)
+    assert "replay_attestation_missing" in str(exc.value)
+
+
+def test_failed_replay_refuses(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    att = _attest(dirs)
+    att["runs"]["A_0_1"]["replay_ok"] = False
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]), attestation=att)
+    assert "replay_attestation_failed" in str(exc.value)
+
+
+def test_144_run_pack_with_missing_corrupted_or_stale_captures_refuses(tmp_path):
+    """THE c-001 FINDING-0 REGRESSION at the frozen pack shape: a 144-run grid
+    whose captures are missing, corrupted, or stale refuses BEFORE any distance,
+    quantile or verdict exists."""
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share")
+    att = _attest(dirs)
+
+    # (a) missing: delete one run's captures after attestation
+    victim = os.path.join(dirs[7], "captures.jsonl")
+    os.rename(victim, victim + ".bak")
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh(), attestation=att)
+    assert "replay_attestation_stale" in str(exc.value)
+    assert not hasattr(exc.value, "report") or \
+        "tv_distances" not in canonical_json(getattr(exc.value, "report", {}))
+    os.rename(victim + ".bak", victim)
+
+    # (b) corrupted: tamper the bytes
+    with open(victim, "a", encoding="utf-8") as fh:
+        fh.write('{"key": "forged", "raw_text": "tampered"}\n')
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh(), attestation=att)
+    assert "replay_attestation_stale" in str(exc.value)
+
+    # (c) stale: the run evidence moved after attestation
+    att2 = _attest(dirs)          # fresh attestation over the tampered captures
+    dec = os.path.join(dirs[3], "decisions.jsonl")
+    with open(dec, "a", encoding="utf-8") as fh:
+        pass                       # touch is not enough — rewrite content
+    with open(dec, "r+", encoding="utf-8") as fh:
+        content = fh.read()
+        fh.seek(0)
+        fh.write(content.replace("share", "adopt"))
+        fh.truncate()
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh(), attestation=att2)
+    assert "replay_attestation_stale" in str(exc.value)
+
+
+def test_valid_attested_pack_passes_with_a_provider_call_trap(tmp_path, monkeypatch):
+    """THE POSITIVE HALF of the c-001 regression: a fully attested pack reaches a
+    verdict deterministically, and a socket trap proves the whole analysis is
+    provider-free — no network object is ever constructed."""
+    def trap(*a, **kw):
+        raise AssertionError("provider contact attempted during a frozen analysis")
+    monkeypatch.setattr(socket, "socket", trap)
+    monkeypatch.setattr(socket, "create_connection", trap)
+
+    dirs = _full_grid(tmp_path,
+                      lambda c, v, s: "share" if (c != "B" or s % 2) else "verify")
+    first = _report(dirs, _GRID_POLICY, _grid_thresh(),
+                    surviving={"A": 48, "B": 48, "C": 48})
+    second = _report(dirs, _GRID_POLICY, _grid_thresh(),
+                     surviving={"A": 48, "B": 48, "C": 48})
+    assert canonical_json(first) == canonical_json(second)
+    agent = first["per_agent"]["live"]
+    assert agent["verdict"] in ("order_effect_observed",
+                                "no_order_effect_observed", "inconclusive")
+    assert first["replay_verification"] == {"attestation_version": "1",
+                                            "verified_run_n": 144}
+
+
+# --------------------------------- 6. v4 terminal probe (audit d-001 finding 2)
+
+def test_missing_terminal_probe_refuses_and_never_falls_back_to_last_node(tmp_path):
+    """THE d-001 FINDING-2 REGRESSION: a completed run whose last node is an
+    admissible EXPOSURE but whose frozen terminal probe is absent must refuse
+    with the typed reason — the exposure must never enter any distribution."""
+    dirs = _build(tmp_path, {"A": [(1, "share"), (2, "share")],
+                             "C": [(1, "share"), (2, "share")]})
+    dirs.append(_mkrun(tmp_path, "B_1", CONDITIONS["B"], "v0", 42, 1, "share"))
+    # B unit 2: only exposure nodes — no d_partner record at all
+    dirs.append(_mkrun(tmp_path, "B_2", CONDITIONS["B"], "v0", 42, 2, "share",
+                       nodes=[_exposure(), _exposure()]))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "missing_terminal_probe" in str(exc.value)
+    assert "B_2" in str(exc.value)
+
+
+def test_wrong_terminal_id_refuses(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "C": [(1, "share")]})
+    dirs.append(_mkrun(tmp_path, "B_0", CONDITIONS["B"], "v0", 42, 1, "share",
+                       nodes=[_exposure(), _node("share", dp_id="d_other")]))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "missing_terminal_probe" in str(exc.value)
+
+
+def test_duplicate_terminal_probe_refuses(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "C": [(1, "share")]})
+    dirs.append(_mkrun(tmp_path, "B_0", CONDITIONS["B"], "v0", 42, 1, "share",
+                       nodes=[_node("share"), _node("verify")]))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "missing_terminal_probe" in str(exc.value)
+    assert "2 decision_node" in str(exc.value)
+
+
+def test_out_of_order_terminal_refuses(tmp_path):
+    """A record after the measured probe means the probe was not terminal."""
+    dirs = _build(tmp_path, {"A": [(1, "share")], "C": [(1, "share")]})
+    dirs.append(_mkrun(tmp_path, "B_0", CONDITIONS["B"], "v0", 42, 1, "share",
+                       nodes=[_node("share"), _exposure()]))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "missing_terminal_probe" in str(exc.value)
+    assert "out-of-order" in str(exc.value)
+
+
+def test_exposure_kind_terminal_refuses(tmp_path):
+    """A node carrying the terminal dp_id but offering a single action is an
+    exposure wearing the probe's name — refused, never measured."""
+    dirs = _build(tmp_path, {"A": [(1, "share")], "C": [(1, "share")]})
+    dirs.append(_mkrun(
+        tmp_path, "B_0", CONDITIONS["B"], "v0", 42, 1, "share",
+        nodes=[_exposure(),
+               _node("share", dp_id=TERMINAL, available_actions=["share"])]))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "missing_terminal_probe" in str(exc.value)
+    assert "exposure" in str(exc.value)
+
+
+def test_terminal_dp_id_must_be_a_nonempty_string(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    for bad in ("", None, 42):
+        with pytest.raises(SchemaError):
+            _report(dirs, LOOSE, THRESH([1], [2]), terminal=bad)
+
+
+# ------------------------------ 7. v4 surviving counts (audit d-001 finding 0)
+
+def test_48_45_48_pack_refuses_pre_statistics_naming_counts_delta_and_bound(tmp_path):
+    """THE d-001 FINDING-0 REGRESSION: a clean pack whose B condition lost 3
+    units refuses BEFORE any statistic, naming every count, the delta and the
+    bound — with no caller-declared census needed (the report charges its own
+    observed counts)."""
+    skip = {("B", "v0", s) for s in (2001, 2002, 2003)}
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share", skip=skip)
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh())
+    msg = str(exc.value)
+    assert "surviving_count_spread" in msg
+    assert "A=48" in msg and "B=45" in msg and "C=48" in msg
+    assert "delta=3" in msg and "max_surviving_delta=2" in msg
+    body = exc.value.report
+    for agent in body["per_agent"].values():
+        for key in ("tv_distances", "bootstrap", "permutation_null", "verdict",
+                    "decision_inputs"):
+            assert key not in agent
+    for leaked in ("tv_distances", "permutation_null", "q_ab", "verdict"):
+        assert leaked not in canonical_json(body)
+
+
+def test_declared_execution_census_is_charged_against_the_bound(tmp_path):
+    """The execution layer's own census refuses at spread 3 and passes at the
+    boundary spread 2 — production entrypoints MUST declare it, because a
+    dropped run is invisible in run_dirs."""
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share")
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh(),
+                surviving={"A": 48, "B": 45, "C": 48})
+    msg = str(exc.value)
+    assert "surviving_count_spread" in msg and "declared" in msg
+    assert "B=45" in msg and "delta=3" in msg and "max_surviving_delta=2" in msg
+
+    # boundary: spread exactly max_surviving_delta passes the dropout gate
+    rep = _report(dirs, _GRID_POLICY, _grid_thresh(),
+                  surviving={"A": 48, "B": 46, "C": 48})
+    assert rep["per_agent"]["live"]["verdict"] == "no_order_effect_observed"
+    assert rep["surviving_counts"] == {"A": 48, "B": 46, "C": 48}
+
+
+def test_malformed_surviving_counts_are_refused(tmp_path):
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    for bad in ([1, 2, 3], {"A": 1, "B": 1},          # missing C
+                {"A": 1, "B": 1, "C": -1},
+                {"A": 1, "B": 1, "C": "1"},
+                {"A": 1, "B": 1, "C": True}):
+        with pytest.raises(SchemaError):
+            _report(dirs, LOOSE, THRESH([1], [2]), surviving=bad)
+
+
+# ------------------------------ 8. v4 matched-unit grid (audit d-001 finding 1)
+
+def test_disjoint_unit_identities_refuse_despite_equal_counts(tmp_path):
+    """THE d-001 FINDING-1 REGRESSION: equal effective-n with DISJOINT B unit
+    identities must refuse before distances — the paired permutation null has
+    nothing to pair and must never decide."""
+    dirs = []
+    for cond, seeds in (("A", range(1, 5)), ("C", range(1, 5)),
+                        ("B", range(11, 15))):        # disjoint sampler seeds
+        for s in seeds:
+            dirs.append(_mkrun(tmp_path, f"{cond}_{s}", CONDITIONS[cond],
+                               "v0", 42, s, "share"))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, POLICY(min_admissible_effective_n=2),
+                THRESH([1, 2], [3, 4]))
+    assert "matched_unit_grid" in str(exc.value)
+    body = exc.value.report
+    for agent in body["per_agent"].values():
+        assert "tv_distances" not in agent and "verdict" not in agent
+
+
+def test_single_unit_dropout_refuses_never_held_fixed_silently(tmp_path):
+    """One B unit missing: spread 1 passes the dropout bound, but the identity
+    gate still refuses — an unmatched unit is never silently held fixed."""
+    skip = {("B", "v1", 2024)}
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share", skip=skip)
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh())
+    msg = str(exc.value)
+    assert "matched_unit_grid" in msg and "live|B" in msg
+    assert "never silently held fixed" in msg
+
+
+def test_partial_identity_replacement_refuses(tmp_path):
+    """B keeps the right COUNT by replacing one frozen unit with an alien one —
+    counts balance, identities do not, and the gate refuses."""
+    skip = {("B", "v1", 2024)}
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share", skip=skip)
+    dirs.append(_mkrun(tmp_path, "B_alien", CONDITIONS["B"], "v1", 1, 3001,
+                       "share"))
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, _GRID_POLICY, _grid_thresh())
+    assert "matched_unit_grid" in str(exc.value)
+
+
+def test_fully_matched_grid_reports_48_matched_units_for_both_comparisons(tmp_path):
+    """The positive pin: the full frozen grid reports matched_units == 48 for
+    A|B and A|C — derived as |S1 ∪ S2| x #(variant, scenario_seed) groups
+    = 24 x 2 — and the permutation null pairs all 48."""
+    dirs = _full_grid(tmp_path,
+                      lambda c, v, s: "share" if s % 2 else "verify")
+    rep = _report(dirs, _GRID_POLICY, _grid_thresh(),
+                  surviving={"A": 48, "B": 48, "C": 48})
+    agent = rep["per_agent"]["live"]
+    grid = agent["matched_unit_grid"]
+    assert grid["required_matched_units"] == 48
+    assert grid["matched_units"] == {"A|B": 48, "A|C": 48}
+    assert agent["permutation_null"]["A|B"]["matched_units"] == 48
+    assert agent["permutation_null"]["A|C"]["matched_units"] == 48
+
+
+# ------------------------------------------------------------- 9. replicates (F3)
 
 def test_replicates_aggregate_into_a_distribution(tmp_path):
     """F3: the old cell dict keyed by effective unit either collapsed a repeated
@@ -426,8 +812,7 @@ def test_replicates_aggregate_into_a_distribution(tmp_path):
     for i, act in enumerate(["share", "share", "verify", "verify"]):
         dirs.append(_mkrun(tmp_path, f"A_rep{i}", CONDITIONS["A"], "v0", 42, 1, act))
 
-    rep = order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                   thresholds=THRESH([1], [2]))
+    rep = _report(dirs, LOOSE, THRESH([1], [2]))
     a = rep["per_agent"]["live"]["cells"]["A"]
     assert a["effective_unit_n"] == 2            # units, not draws
     assert a["admissible_effective_n"] == 2
@@ -441,7 +826,7 @@ def test_replicates_aggregate_into_a_distribution(tmp_path):
     assert "duplicate effective unit" in str(exc.value)
 
 
-# -------------------------------------------------------- 6. bootstrap + verdict
+# -------------------------------------------------------- 10. bootstrap + verdict
 
 def _mixed_dirs(tmp_path, b_actions):
     """A and C mixed identically; B as given. Six sampler seeds, split 3/3."""
@@ -452,10 +837,10 @@ def _mixed_dirs(tmp_path, b_actions):
 def test_bootstrap_is_deterministic_across_identical_calls(tmp_path):
     dirs = _mixed_dirs(tmp_path, [(s, "share" if s % 2 else "verify")
                                   for s in range(1, 7)])
-    kw = dict(admissibility_policy=POLICY(min_admissible_effective_n=3),
+    kw = dict(policy=POLICY(min_admissible_effective_n=3),
               thresholds=THRESH([1, 2, 3], [4, 5, 6]))
-    first = order_sensitivity_report(dirs, CONDITIONS, **kw)
-    second = order_sensitivity_report(dirs, CONDITIONS, **kw)
+    first = _report(dirs, kw["policy"], kw["thresholds"])
+    second = _report(dirs, kw["policy"], kw["thresholds"])
     assert canonical_json(first) == canonical_json(second)
     boot = first["per_agent"]["live"]["bootstrap"]
     assert set(boot) == {"A|B", "A|C", "null"}
@@ -467,22 +852,18 @@ def test_bootstrap_is_deterministic_across_identical_calls(tmp_path):
 def test_verdict_no_order_effect(tmp_path):
     dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
                              for c in ("A", "B", "C")})
-    rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
-                                   thresholds=THRESH([1, 2], [3, 4]))
+    rep = _report(dirs, POLICY(min_admissible_effective_n=2),
+                  THRESH([1, 2], [3, 4]))
     agent = rep["per_agent"]["live"]
     assert agent["tv_distances"] == {"A|B": 0.0, "A|C": 0.0, "null": 0.0}
     assert agent["verdict"] == "no_order_effect_observed"
 
 
-# Realistic-n verdict fixtures. At ORDER_REPORT_VERSION 3 the decision quantile is
-# the paired permutation null, which is a function of the ACTUAL sample size — so a
-# 4-unit fixture has q_AB = 1.0 and correctly resolves to `inconclusive` whatever
-# the distances show. Exercising the substantive branches therefore requires the
-# frozen order of magnitude (48 matched units per condition), not a toy pack. This
-# is a fixture-size change, not a weakened assertion: every claim below is strictly
-# stronger than the v1 version it replaces, because it now also has to clear a null
-# calibrated on the real sample size.
+# Realistic-n verdict fixtures. The decision quantile is the paired permutation
+# null, which is a function of the ACTUAL sample size — so a 4-unit fixture has
+# q_AB = 1.0 and correctly resolves to `inconclusive` whatever the distances
+# show. Exercising the substantive branches therefore requires the frozen order
+# of magnitude (48 matched units per condition), not a toy pack.
 _N = 48
 _SEEDS = list(range(1, _N + 1))
 _HALF1, _HALF2 = _SEEDS[:24], _SEEDS[24:]
@@ -496,28 +877,33 @@ def _mixed(shift=0):
             for i, s in enumerate(_SEEDS)]
 
 
-def test_verdict_order_effect_observed(tmp_path):
+def test_verdict_order_effect_observed_states_the_sharp_null(tmp_path):
     dirs = _build(tmp_path, {
         "A": _mixed(0),
         "B": _mixed(16),      # TV(A,B) = 1/3, well above its permutation quantile
-        "C": _mixed(0),       # sham null
+        "C": _mixed(0),       # sham null, unit-identical to A -> q_AC = 0
     })
-    rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=_BIG_POLICY,
-                                   thresholds=THRESH(_HALF1, _HALF2))
+    rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
     agent = rep["per_agent"]["live"]
     di = agent["decision_inputs"]
     assert agent["tv_distances"]["A|B"] == pytest.approx(1 / 3, abs=1e-6)
-    # this pack clears the sensitivity warrant as well, so the positive here does
-    # not rely on the v3 asymmetry (that case is covered in the ops-characteristics
-    # module); clauses 2 and 3 are exercised directly
     assert di["q_ab"] <= di["min_detectable_effect"]
     assert di["tv_ab"] > di["q_ab"]                  # clause 3
-    assert di["tv_ac"] <= di["q_ac"]                 # clause 2
+    assert di["tv_ac"] <= di["q_ac"]                 # clause 2, first part
+    # v4: the sham warrant — q_AC strictly below the frozen equivalence margin
+    assert di["q_ac"] < di["sham_equivalence_margin"] == 0.25
     assert agent["verdict"] == "order_effect_observed"
     # the permutation null is what decided it, and it used the real matched n
     assert agent["permutation_null"]["A|B"]["matched_units"] == _N
     assert agent["permutation_null"]["A|B"]["iterations"] == 200
+    # a-003 finding 0: the claim is the SHARP unit-level conclusion, with the
+    # marginal limitation stated — never "the distribution changed"
+    reason = agent["verdict_reason"]
+    assert "SHARP" in reason and "unit" in reason
+    assert "does not establish that the marginal" in reason
+    assert "distribution changed" not in reason
+    assert rep["null_form"] == "sharp"
+    assert "marginal" in rep["marginal_claim_limitation"]
 
 
 def test_failed_sham_voids_a_large_ab_distance(tmp_path):
@@ -529,9 +915,7 @@ def test_failed_sham_voids_a_large_ab_distance(tmp_path):
         "B": _mixed(16),
         "C": _mixed(8),       # sham is NOT null
     })
-    rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=_BIG_POLICY,
-                                   thresholds=THRESH(_HALF1, _HALF2))
+    rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
     agent = rep["per_agent"]["live"]
     di = agent["decision_inputs"]
     assert di["q_ab"] <= di["min_detectable_effect"]  # warrant present, irrelevant
@@ -542,8 +926,73 @@ def test_failed_sham_voids_a_large_ab_distance(tmp_path):
     assert "sham not null" in agent["verdict_reason"]
 
 
+def test_sham_warrant_missing_boundary_is_inconclusive_never_positive(tmp_path):
+    """THE a-003 FINDING-1 PINNED REGRESSION, at the frozen production
+    parameters (10 000 bootstrap / 10 000 permutation iterations).
+
+    The audit's boundary pack: A is 0.5 share / 0.5 verify; C is 0.25 / 0.75
+    with every pair discordant where they differ, so TV(A,C) = 0.25 =
+    min_detectable_effect and the paired permutation quantile q_AC lands AT or
+    ABOVE the frozen sham_equivalence_margin = 0.25; B is decisively separated
+    (all decline). Under v3 this promoted (`order_effect_observed`) while an
+    observed sham shift equalled the design's own declared minimum detectable
+    effect. Under v4 the strict warrant `q_AC < sham_equivalence_margin` fails
+    and the verdict is `inconclusive` with the sham-warrant-missing reason —
+    NEVER a positive.
+    """
+    def choose(cond, variant, samp):
+        i = (_GRID_S1 + _GRID_S2).index(samp)
+        if cond == "B":
+            return "decline"
+        if cond == "A":
+            return "share" if i < 12 else "verify"
+        # C: A's share half flips to verify; 12 of A's verify half flip to share
+        # -> C is 0.25 share / 0.75 verify with 36 discordant pairs per variant
+        return "share" if 12 <= i < 18 else "verify"
+
+    dirs = _full_grid(tmp_path, choose)
+    rep = _report(dirs, _GRID_POLICY,
+                  _grid_thresh(bootstrap_iterations=10000,
+                               permutation_iterations=10000),
+                  surviving={"A": 48, "B": 48, "C": 48})
+    agent = rep["per_agent"]["live"]
+    di = agent["decision_inputs"]
+    assert di["tv_ac"] == pytest.approx(0.25, abs=1e-6)   # the sham shift AT the MDE
+    assert di["tv_ab"] > di["q_ab"]                       # decisive A/B separation
+    assert di["tv_ac"] <= di["q_ac"]                      # no A/C rejection...
+    assert di["q_ac"] >= di["sham_equivalence_margin"]    # ...and no warrant either
+    assert agent["verdict"] == "inconclusive"
+    assert agent["verdict"] != "order_effect_observed"
+    assert "sham warrant missing" in agent["verdict_reason"]
+
+
+def test_positive_verdict_always_carries_the_sham_warrant(tmp_path):
+    """Just BELOW the margin: a small unit-level sham perturbation keeps q_AC
+    strictly under the frozen margin, the warrant holds, and the decisive A/B
+    rejection promotes — with the warrant stated in the reason."""
+    def choose(cond, variant, samp):
+        i = (_GRID_S1 + _GRID_S2).index(samp)
+        if cond == "B":
+            return "decline"
+        if cond == "A":
+            return "share" if i < 12 else "verify"
+        # C: two discordant pairs only -> q_AC far below the margin
+        return "share" if i < 10 or i in (12, 13) else "verify"
+
+    dirs = _full_grid(tmp_path, choose)
+    rep = _report(dirs, _GRID_POLICY, _grid_thresh(),
+                  surviving={"A": 48, "B": 48, "C": 48})
+    agent = rep["per_agent"]["live"]
+    di = agent["decision_inputs"]
+    assert di["q_ac"] < di["sham_equivalence_margin"]
+    assert di["tv_ac"] <= di["q_ac"]
+    assert agent["verdict"] == "order_effect_observed"
+    assert "sham warrant holds" in agent["verdict_reason"].lower() or \
+        "q_AC < sham_equivalence_margin" in agent["verdict_reason"]
+
+
 def test_split_half_noise_floor_no_longer_gates_any_verdict(tmp_path):
-    """v1 -> v2 regression in the OTHER direction (still holds at v3).
+    """v1 -> v2 regression in the OTHER direction (still holds at v4).
 
     A|S1 is entirely `share` and A|S2 entirely `verify`, so the retained
     diagnostic TV_null is 1.0 — its maximum. Under the v1 rule that alone forced
@@ -555,9 +1004,7 @@ def test_split_half_noise_floor_no_longer_gates_any_verdict(tmp_path):
         "B": _mixed(16),
         "C": _mixed(0),
     })
-    rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=_BIG_POLICY,
-                                   thresholds=THRESH(_HALF1, _HALF2))
+    rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
     agent = rep["per_agent"]["live"]
     assert agent["tv_distances"]["null"] == 1.0
     assert agent["diagnostics"]["tv_null"] == 1.0
@@ -578,47 +1025,44 @@ def test_permutation_parameters_are_mandatory_and_validated(tmp_path):
         bad = THRESH([1, 2], [3, 4])
         del bad[key]
         with pytest.raises(SchemaError) as exc:
-            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                     thresholds=bad)
+            _report(dirs, LOOSE, bad)
         assert key in str(exc.value)
     for value in (0.0, 1.0, -0.1, "0.05", True):
         with pytest.raises(SchemaError):
-            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
-                                     thresholds=THRESH([1, 2], [3, 4], alpha=value))
+            _report(dirs, LOOSE, THRESH([1, 2], [3, 4], alpha=value))
     for value in (0, -1, 2.5, True):
         with pytest.raises(SchemaError):
-            order_sensitivity_report(
-                dirs, CONDITIONS, admissibility_policy=LOOSE,
-                thresholds=THRESH([1, 2], [3, 4], permutation_iterations=value))
+            _report(dirs, LOOSE, THRESH([1, 2], [3, 4],
+                                        permutation_iterations=value))
 
 
 def test_permutation_null_is_deterministic_under_the_frozen_seed(tmp_path):
     """`random.Random(permutation_seed)` only — no global RNG, no numpy — so the
     quantile that decided a verdict regenerates byte-identically."""
     dirs = _build(tmp_path, {"A": _mixed(0), "B": _mixed(16), "C": _mixed(0)})
-    kw = dict(admissibility_policy=_BIG_POLICY, thresholds=THRESH(_HALF1, _HALF2))
-    first = order_sensitivity_report(dirs, CONDITIONS, **kw)
-    second = order_sensitivity_report(dirs, CONDITIONS, **kw)
+    first = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
+    second = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
     assert canonical_json(first) == canonical_json(second)
     assert (first["per_agent"]["live"]["permutation_null"]
             == second["per_agent"]["live"]["permutation_null"])
 
 
-# -------------------------------------------------------- 7. self-description
+# -------------------------------------------------------- 11. self-description
 
 def test_report_is_self_describing(tmp_path):
     dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
                              for c in ("A", "B", "C")})
     policy = POLICY(min_admissible_effective_n=2)
     thresholds = THRESH([1, 2], [3, 4])
-    rep = order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=policy,
-                                   thresholds=thresholds)
-    # bumped 1 -> 2: the DECISION RULE changed (split-half noise floor replaced by
-    # a paired permutation null). Bumped 2 -> 3: it changed AGAIN — the
-    # sensitivity requirement moved from a precondition gating both branches to
-    # the null branch only. A consumer must be able to tell which rule produced a
-    # verdict; all three can disagree on identical evidence.
-    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "3"
+    rep = _report(dirs, policy, thresholds)
+    # bumped 1 -> 2: the split-half noise floor was replaced by a paired
+    # permutation null. 2 -> 3: the sensitivity requirement moved to the null
+    # branch only. 3 -> 4: sharp-null claim discipline, the strict sham
+    # equivalence warrant, and the clause-0 evidence-admission contract
+    # (replay attestation, frozen terminal probe, surviving-count bound,
+    # matched-unit grid). A consumer must be able to tell which rule produced a
+    # verdict; all four can disagree on identical evidence.
+    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "4"
     assert rep["admissibility_version"] == DECISION_ADMISSIBILITY_VERSION
     assert rep["policy_version"] == "1"
     assert rep["admissibility_policy"] == policy
@@ -626,9 +1070,18 @@ def test_report_is_self_describing(tmp_path):
     assert len(rep["policy_hash"]) == 64 and len(rep["thresholds_hash"]) == 64
     # METRICS-v1 definitions did not move: the new artifact carries its OWN version
     assert rep["metrics_version"] == METRICS_VERSION == "1"
+    # v4 self-description: the operative null, the marginal limitation, the
+    # frozen probe, and the recorded replay gate
+    assert rep["null_form"] == "sharp"
+    assert "sharp" in rep["marginal_claim_limitation"]
+    assert "P(Y|A)" in rep["marginal_claim_limitation"]
+    assert rep["terminal_dp_id"] == TERMINAL
+    assert rep["replay_verification"] == {"attestation_version": "1",
+                                          "verified_run_n": 12}
+    assert rep["surviving_counts"] is None       # not declared by this caller
 
 
-# ------------------------------------------- 8. Phase-1 no-op / frozen instrument
+# ------------------------------------------- 12. Phase-1 no-op / frozen instrument
 
 def test_phase1_scripted_evidence_agrees_with_the_frozen_comparator(tmp_path):
     """On clean deterministic evidence — scripted nodes, no parser, therefore zero
@@ -640,9 +1093,8 @@ def test_phase1_scripted_evidence_agrees_with_the_frozen_comparator(tmp_path):
     dirs = _build(tmp_path, plan, scripted=True)
 
     old = scramble_terminal_distribution(dirs, CONDITIONS)["per_agent"]["live"]
-    new = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
-                                   thresholds=THRESH([1, 2], [3, 4]))["per_agent"]["live"]
+    new = _report(dirs, POLICY(min_admissible_effective_n=2),
+                  THRESH([1, 2], [3, 4]))["per_agent"]["live"]
 
     for cond in ("A", "B", "C"):
         cell = new["cells"][cond]

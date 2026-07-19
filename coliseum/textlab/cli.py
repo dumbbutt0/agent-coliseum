@@ -181,6 +181,231 @@ def cmd_dataset_export(args):
     print(f"effective_units {desc['effective_unit_count']} commitment {desc['dataset_commitment'][:16]}")
 
 
+# --------------------------------------------------------------------------
+# M8 Phase-2 operator surface (replay-pack / order-report / smoke-pack /
+# result-package). Everything here is fail-closed: replay is MANDATORY before
+# analysis (prereg clause 0), a smoke pack is never claim-bearing, and a typed
+# SchemaError refusal exits nonzero WITHOUT writing a distances-bearing file.
+#
+# NOTE on imports: sweep.verify_pack_replay and the ORDER_REPORT_VERSION-4
+# signature of metrics.order_sensitivity_report are Director-defined contracts
+# implemented concurrently; they are imported LATE (inside the commands) so
+# this module always imports, and a missing contract symbol surfaces as a
+# typed refusal at invocation time, never as a broken CLI.
+
+SMOKE_MARKER_NAME = "SMOKE_MARKER.json"
+ATTESTATION_NAME = "replay_attestation.json"
+# Frozen m8 condition mapping (Director contract): labels A/B/C bind to the
+# planned_design scenario list IN ORDER — dev, perm, sham.
+_CONDITION_LABELS = ("A", "B", "C")
+
+
+def _conditions_from_design(planned_design: dict) -> dict:
+    scenarios = list(planned_design.get("scenarios") or [])
+    if len(scenarios) != len(_CONDITION_LABELS):
+        sys.exit(f"ORDER-REPORT REFUSED: planned_design.scenarios has "
+                 f"{len(scenarios)} entries, expected exactly "
+                 f"{len(_CONDITION_LABELS)} (A=dev, B=perm, C=sham)")
+    return dict(zip(_CONDITION_LABELS, scenarios))
+
+
+def cmd_replay_pack(args):
+    """Provider-free replay of a whole evidence pack -> replay_attestation.json.
+    Refuses (nonzero exit, no attestation) on ANY replay failure — a partially
+    replayed pack is not evidence."""
+    from . import sweep
+    verify = getattr(sweep, "verify_pack_replay", None)
+    if verify is None:
+        sys.exit("REPLAY-PACK REFUSED: sweep.verify_pack_replay is not "
+                 "available in this build (contract symbol missing)")
+    try:
+        verify(args.manifest, args.out_root, args.config_dir)
+    except Exception as e:  # any failure is a refusal, never a partial file
+        sys.exit(f"REPLAY-PACK REFUSED: {e.__class__.__name__}: {e}")
+    att_path = os.path.join(args.out_root, ATTESTATION_NAME)
+    if not os.path.isfile(att_path):
+        sys.exit("REPLAY-PACK REFUSED: verify_pack_replay returned without "
+                 f"writing {att_path}")
+    with open(att_path, encoding="utf-8") as fh:
+        att = json.load(fh)
+    print(f"attestation : {att_path}")
+    print(f"runs        : {len(att.get('runs', {}))} replay-verified")
+
+
+def cmd_order_report(args):
+    """Frozen ORDER_REPORT_VERSION-4 analysis over a completed pack.
+
+    Order of refusals (each exits nonzero and writes NOTHING):
+      1. smoke-marked out_root (a smoke pack is operational validation only);
+      2. missing replay attestation (replay is mandatory before analysis);
+      3. a typed SchemaError from the aggregator (admission / policy refusal)
+         — the refusal text is printed verbatim and no distances-bearing file
+         is ever written on that path."""
+    from . import metrics as metrics_mod
+    from . import sweep
+    from .registry import (_frozen_design, load_admissibility_policy,
+                           load_thresholds)
+    from .schema import SchemaError
+
+    marker = os.path.join(args.out_root, SMOKE_MARKER_NAME)
+    if os.path.exists(marker):
+        sys.exit(f"ORDER-REPORT REFUSED: {marker} present — this pack is a "
+                 "SMOKE pack (claim_bearing: false, operational validation "
+                 "only) and may never be analyzed for a verdict")
+    att_path = os.path.join(args.out_root, ATTESTATION_NAME)
+    if not os.path.isfile(att_path):
+        sys.exit(f"ORDER-REPORT REFUSED: no {ATTESTATION_NAME} under "
+                 f"{args.out_root} — a provider-free replay attestation is "
+                 "MANDATORY before analysis (prereg clause 0); run "
+                 "`replay-pack` first")
+    try:
+        with open(att_path, encoding="utf-8") as fh:
+            attestation = json.load(fh)
+    except ValueError as e:
+        sys.exit(f"ORDER-REPORT REFUSED: {att_path} is not valid JSON: {e}")
+
+    rows = sweep.manifest_load(args.manifest, args.out_root)
+    if not rows:
+        sys.exit(f"ORDER-REPORT REFUSED: manifest {args.manifest} resolves "
+                 "to zero validated rows")
+    run_dirs = sorted(os.path.join(args.out_root, rec["dir"])
+                      for rec in rows.values())
+    # Per-scenario surviving counts, derived from the validated manifest rows
+    # themselves: a dropped run is ABSENT from the manifest, so this is the
+    # census the max_surviving_delta bound is charged against.
+    surviving_counts: dict = {}
+    for rec in rows.values():
+        surviving_counts[rec["scenario"]] = \
+            surviving_counts.get(rec["scenario"], 0) + 1
+
+    policy = load_admissibility_policy(args.registry, args.experiment_id)
+    thresholds = load_thresholds(args.registry, args.experiment_id)
+    conditions = _conditions_from_design(
+        _frozen_design(args.registry, args.experiment_id))
+    # terminal_dp_id is SCENARIO-DESIGN identity, DERIVED — never a CLI knob.
+    # Under imposed history each m8 scenario carries exactly ONE decision-kind
+    # point (the terminal probe); it must be unique within every scenario and
+    # identical across the triplet, else the analysis refuses before running.
+    from .scenario import load_scenario as _load_scen
+    terminal_ids = set()
+    for scen_id in conditions.values():
+        scen = _load_scen(os.path.join(args.config_dir, f"{scen_id}.yaml"))
+        decisions = [dp.dp_id for dp in scen.decision_points
+                     if not dp.is_exposure()]
+        if len(decisions) != 1:
+            sys.exit(f"ORDER-REPORT REFUSED: {scen_id} has {len(decisions)} "
+                     "decision-kind points; the imposed-history design "
+                     "requires exactly one terminal probe")
+        terminal_ids.add(decisions[0])
+    if len(terminal_ids) != 1:
+        sys.exit("ORDER-REPORT REFUSED: triplet disagrees on the terminal "
+                 f"probe id {sorted(terminal_ids)}")
+    try:
+        report = metrics_mod.order_sensitivity_report(
+            run_dirs, conditions,
+            admissibility_policy=policy, thresholds=thresholds,
+            replay_attestation=attestation,
+            terminal_dp_id=terminal_ids.pop(),
+            surviving_counts=surviving_counts)
+    except SchemaError as e:
+        # typed refusal: NOTHING is written — a refusal is an inconclusive
+        # result, never a number (and never a file bearing distances)
+        sys.exit(f"ORDER-REPORT REFUSED (typed): {e}")
+    out_path = args.out or os.path.join(args.out_root, "order_report.json")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    from . import reports
+    print(reports.render_order_report(report), end="")
+    print("wrote", out_path)
+
+
+def cmd_smoke_pack(args):
+    """Scaled-down operational-validation pack: the frozen planned_design with
+    only the first --scale sampler seeds, run interleaved, marked NOT
+    claim-bearing. Never contacts a silently-defaulted local host."""
+    from . import sweep
+    from .registry import _frozen_design, load_thresholds
+
+    if not os.environ.get("OLLAMA_HOST"):
+        sys.exit("SMOKE-PACK REFUSED: OLLAMA_HOST is not set — a smoke pack "
+                 "never falls back to a silent local default; export "
+                 "OLLAMA_HOST to name the host explicitly")
+    if "smoke" not in os.path.basename(os.path.normpath(args.out_root)).lower():
+        sys.exit(f"SMOKE-PACK REFUSED: out_root {args.out_root!r} is not "
+                 "labeled 'smoke' — smoke evidence must be visibly "
+                 "segregated from claim-bearing packs")
+    pd = _frozen_design(args.registry, args.experiment_id)
+    models = list(pd["models"])
+    digests = dict(pd["model_digests"])
+    sampler_seeds = list(pd["sampler_seeds"])[:args.scale]
+    if args.scale < 1 or not sampler_seeds:
+        sys.exit("SMOKE-PACK REFUSED: --scale must select at least one "
+                 "frozen sampler seed")
+    print("smoke-pack will contact these digest-pinned models "
+          "(operational validation only, claim_bearing: false):")
+    for m in models:
+        print(f"  {m} @ {digests.get(m)}")
+    os.makedirs(args.out_root, exist_ok=True)
+    marker_path = os.path.join(args.out_root, SMOKE_MARKER_NAME)
+    # marker FIRST, before any run: even a crashed smoke pack stays marked
+    with open(marker_path, "w", encoding="utf-8") as fh:
+        json.dump({"claim_bearing": False,
+                   "purpose": "operational validation",
+                   "experiment_id": args.experiment_id,
+                   "scale": args.scale,
+                   "sampler_seeds": sampler_seeds}, fh, indent=2,
+                  sort_keys=True)
+        fh.write("\n")
+    manifest_path = os.path.join(args.out_root, "manifest.smoke.jsonl")
+    spec = {"models": models,
+            "scenarios": list(pd["scenarios"]),
+            "seeds": list(pd["scenario_seeds"]),
+            "sampler_seeds": sampler_seeds,
+            "temperature": pd["temperature"],
+            "arbitration": pd["arbitration"],
+            "interaction": pd["interaction_mode"],
+            "config_dir": args.config_dir,
+            "out_root": args.out_root,
+            "manifest": manifest_path}
+    # the frozen balance bound travels with the thresholds bundle; a smoke
+    # pack exercises the same gate the live pack will face
+    max_delta = load_thresholds(args.registry,
+                                args.experiment_id).get("max_surviving_delta")
+    try:
+        result = sweep.run_sweep(spec, execution_order="interleaved",
+                                 expected_digests=digests,
+                                 max_surviving_delta=max_delta,
+                                 progress=print)
+    except Exception as e:
+        sys.exit(f"SMOKE-PACK FAILED: {e.__class__.__name__}: {e} "
+                 f"(marker {marker_path} remains; evidence is NOT "
+                 "claim-bearing)")
+    print(f"smoke marker : {marker_path}")
+    print(f"manifest     : {manifest_path}")
+    print(f"rows written : {result.rows_written} "
+          f"(resumed {result.skipped_resumed}, errors {len(result.errors)})")
+
+
+def cmd_result_package(args):
+    """Close a completed, analyzed pack into a self-verifying result package."""
+    from .result_package import build_result_package
+    from .schema import SchemaError
+    extra = {}
+    if args.extra:
+        try:
+            extra = json.loads(args.extra)
+        except ValueError as e:
+            sys.exit(f"RESULT-PACKAGE REFUSED: --extra is not valid JSON: {e}")
+    try:
+        path = build_result_package(args.experiment_id, args.manifest,
+                                    args.out_root, args.registry,
+                                    args.report, extra)
+    except SchemaError as e:
+        sys.exit(f"RESULT-PACKAGE REFUSED: {e}")
+    print("wrote", path)
+
+
 def cmd_spatial_run(args):
     """S2D: build + schedule + verify + observe a scripted spatial scenario; the
     run dir is experiment evidence (deterministic, replayable, byte-identical)."""
@@ -285,6 +510,52 @@ def main(argv=None):
     s.add_argument("--full", action="store_true",
                    help="print each observation's full content")
     s.add_argument("--spatial-root", **spatial_root_kw)
+
+    # ---- M8 Phase-2 operator surface --------------------------------------
+    s = sub.add_parser("replay-pack", help="provider-free replay of a whole "
+                       "pack -> replay_attestation.json (refuses on any "
+                       "failure)")
+    s.set_defaults(fn=cmd_replay_pack)
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--out-root", required=True)
+    s.add_argument("--config-dir", default="configs/scenarios")
+
+    s = sub.add_parser("order-report", help="ORDER_REPORT_VERSION-4 analysis "
+                       "of a replay-attested pack (refuses smoke packs and "
+                       "unattested evidence)")
+    s.set_defaults(fn=cmd_order_report)
+    s.add_argument("--experiment-id", required=True)
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--out-root", required=True)
+    s.add_argument("--registry", default="configs/registry/experiments.yaml")
+    s.add_argument("--config-dir", default="configs/scenarios",
+                   help="scenario YAML dir; the terminal probe id is DERIVED "
+                        "from the triplet's unique decision-kind point")
+    s.add_argument("--out", default=None,
+                   help="report path (default <out-root>/order_report.json)")
+
+    s = sub.add_parser("smoke-pack", help="scaled-down operational-validation "
+                       "pack (never claim-bearing; requires OLLAMA_HOST)")
+    s.set_defaults(fn=cmd_smoke_pack)
+    s.add_argument("--experiment-id", required=True)
+    s.add_argument("--scale", type=int, required=True,
+                   help="use the first N frozen sampler seeds")
+    s.add_argument("--out-root", required=True,
+                   help="must be labeled 'smoke' (e.g. logs/runs/m8-smoke)")
+    s.add_argument("--registry", default="configs/registry/experiments.yaml")
+    s.add_argument("--config-dir", default="configs/scenarios")
+
+    s = sub.add_parser("result-package", help="close an analyzed pack into a "
+                       "self-verifying result_package.json")
+    s.set_defaults(fn=cmd_result_package)
+    s.add_argument("--experiment-id", required=True)
+    s.add_argument("--manifest", required=True)
+    s.add_argument("--out-root", required=True)
+    s.add_argument("--report", required=True,
+                   help="path to the order_report.json this package closes over")
+    s.add_argument("--registry", default="configs/registry/experiments.yaml")
+    s.add_argument("--extra", default=None,
+                   help="JSON object of extra fields (e.g. suite receipt)")
 
     s = sub.add_parser("dataset-export"); s.set_defaults(fn=cmd_dataset_export)
     s.add_argument("--manifest", default=None,

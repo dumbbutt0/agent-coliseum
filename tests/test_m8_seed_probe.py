@@ -13,8 +13,8 @@ contacted.
 import pytest
 
 from coliseum.textlab.agents import (PLANNER_BUDGET, SEED_PROBE_ALT_SEED_OFFSET,
-                                     SEED_PROBE_PROMPT, MockLLMAgent, OllamaAgent,
-                                     agent_config_hash)
+                                     SEED_PROBE_PROMPT, LLMAgent, MockLLMAgent,
+                                     OllamaAgent, agent_config_hash)
 from coliseum.textlab.schema import SchemaError, config_hash
 
 STOCH = {"mode": "stochastic", "temperature": 0.7}
@@ -166,14 +166,72 @@ def test_unseeded_probe_runs_nothing_and_stays_unverified(monkeypatch):
     assert arms["different_seed_divergence"]["outcome"] == "not_run"
 
 
-# -- invariants: nothing else moved -----------------------------------------
+# -- the generic (non-Ollama) path fails closed (audit c-001, finding 1) -----
 
-def test_mock_agent_remains_trivially_verified():
-    agent = MockLLMAgent("steward_obedient")
+def test_base_llm_agent_fails_closed_without_arm_evidence():
+    """The base class has no falsifiable arms to run, so it must record itself
+    UNVERIFIED with honest not_run arms — never a bare 'verified' stamp. This
+    is the path every backend without an override now inherits."""
+    agent = LLMAgent("anything")
+    agent.configure_sampling(STOCH, 2001)
+    assert agent.verify_seeded_sampling() is False
+    assert agent.backend_seed_supported is False
+    assert agent.seed_probe["seed_probe_result"] == "failed"
+    arms = _arms(agent)
+    assert arms["same_seed_reproducibility"]["outcome"] == "not_run"
+    assert arms["different_seed_divergence"]["outcome"] == "not_run"
+    assert "only" in agent.seed_probe["seed_probe_scope"]
+
+
+def test_seed_ignoring_mock_fails_divergence_arm():
+    """A mock whose fixture output genuinely ignores the seed must FAIL the
+    different-seed arm — previously it inherited an unconditional 'verified'
+    from the base class with zero arm evidence (the audited false pass)."""
+    agent = MockLLMAgent("steward_obedient")      # no seed_probe@seed keys
+    agent.configure_sampling(STOCH, 2001)
+    assert agent.verify_seeded_sampling() is False
+    assert agent.backend_seed_supported is False
+    assert agent.seed_probe["seed_probe_result"] == "failed"
+    assert agent.seed_probe["backend_name"] == "mock"
+    arms = _arms(agent)
+    assert arms["same_seed_reproducibility"]["outcome"] == "pass"   # deterministic lookup reproduces
+    assert arms["different_seed_divergence"]["outcome"] == "fail"   # ...but never diverges
+    assert arms["different_seed_divergence"]["seeds"] == \
+        [2001, 2001 + SEED_PROBE_ALT_SEED_OFFSET]
+    assert len(set(arms["different_seed_divergence"]["response_hashes"])) == 1
+
+
+def test_seed_honoring_mock_fixture_verifies_with_recorded_arms():
+    """Fixture-declared seed sensitivity (seed_probe@seed<k> keys) is the ONLY
+    way a mock verifies now — and the arms carry inspectable hash evidence."""
+    agent = MockLLMAgent("steward_obedient_seeded")
+    agent.configure_sampling(STOCH, 2001)
     assert agent.verify_seeded_sampling() is True
     assert agent.backend_seed_supported is True
     assert agent.seed_probe["seed_probe_result"] == "verified"
-    assert agent.seed_probe["backend_name"] == "mock"
+    arms = _arms(agent)
+    assert arms["same_seed_reproducibility"]["outcome"] == "pass"
+    assert arms["different_seed_divergence"]["outcome"] == "pass"
+    assert len(set(arms["different_seed_divergence"]["response_hashes"])) == 2
+    assert agent.seed_probe["seed_probe_prompt_hash"] == config_hash(SEED_PROBE_PROMPT)
+
+
+def test_mock_probe_never_touches_captures_and_unseeded_stays_unverified():
+    """Probe responses resolve directly from fixture data — never through the
+    capture path — and a seedless mock records not_run arms, unverified."""
+    agent = MockLLMAgent("steward_obedient_seeded")
+    agent.configure_sampling(STOCH, 2001)
+    agent.verify_seeded_sampling()
+    assert agent.captures == []
+    unseeded = MockLLMAgent("steward_obedient_seeded")
+    assert unseeded.verify_seeded_sampling() is False
+    arms = _arms(unseeded)
+    assert arms["same_seed_reproducibility"]["outcome"] == "not_run"
+    assert arms["different_seed_divergence"]["outcome"] == "not_run"
+    assert unseeded.captures == []
+
+
+# -- invariants: nothing else moved -----------------------------------------
 
 
 def test_mock_spec_dict_is_byte_identical_to_pre_change_baseline():

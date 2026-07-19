@@ -76,6 +76,70 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
     config_dir = os.path.join(repo, config.get("config_dir",
                                                "configs/scenarios"))
     expected_digests = config.get("model_digests")  # {model: pinned digest}
+
+    # ---- M8 Phase-2 executor fidelity (audit d-001 finding 1, driver side).
+    # For a policy-required experiment the frozen registry bundle is the ONLY
+    # source of the analysis-critical execution bounds: the driver must load
+    # it, must forward max_surviving_delta so run_sweep's balance gate cannot
+    # be silently skipped, must honor the preregistered interleaved execution
+    # order (recording the realized index), and must preflight the scramble
+    # triplet under the imposed-history contract. All of it fails closed —
+    # a config or registry that cannot supply a bound refuses before any run.
+    sweep_extra = {}
+    experiment_id = config.get("experiment_id")
+    from coliseum.textlab.registry import POLICY_REQUIRED_EXPERIMENTS
+    if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+        from coliseum.textlab.registry import load_thresholds
+        from coliseum.textlab.scenario import (lint_scramble_triplet,
+                                               load_scenario)
+        from coliseum.textlab.schema import SchemaError
+
+        if not config.get("execution_order"):
+            raise RunnerRefusal(
+                f"{experiment_id}: config declares no execution_order — the "
+                "preregistration requires interleaved execution and a driver "
+                "default would silently run the historical blocked order")
+        registry_path = os.path.join(repo, "configs", "registry",
+                                     "experiments.yaml")
+        try:
+            bundle = load_thresholds(registry_path, experiment_id)
+        except (SchemaError, OSError) as exc:
+            raise RunnerRefusal(
+                f"{experiment_id}: frozen threshold bundle unavailable "
+                f"({exc}) — the driver never invents execution bounds")
+        max_surviving_delta = bundle.get("max_surviving_delta")
+        if max_surviving_delta is None:
+            raise RunnerRefusal(
+                f"{experiment_id}: registry entry carries no "
+                "max_surviving_delta — run_sweep skips the balance gate "
+                "without it, so an unbounded pack must refuse, not run")
+
+        # scramble-triplet preflight under the imposed-history contract: the
+        # three conditions must be matched-except-order BEFORE any model call.
+        scenarios = list(config["scenarios"])
+        if len(scenarios) != 3:
+            raise RunnerRefusal(
+                f"{experiment_id}: expected the A/B/C scramble triplet, got "
+                f"{scenarios!r}")
+        try:
+            a, b, c = (load_scenario(
+                os.path.join(config_dir, f"{sid}.yaml")) for sid in scenarios)
+            preflight = lint_scramble_triplet(
+                a, b, c,
+                os.path.join(repo, "configs", "registry", "scenarios.yaml"),
+                imposed_history=True)
+        except (SchemaError, OSError) as exc:
+            raise RunnerRefusal(
+                f"{experiment_id}: scramble-triplet preflight failed to run "
+                f"({exc})")
+        if preflight:
+            raise RunnerRefusal(
+                f"{experiment_id}: scramble-triplet preflight refused: "
+                + "; ".join(preflight))
+        sweep_extra = {"execution_order": config["execution_order"],
+                       "record_execution_index": True,
+                       "max_surviving_delta": max_surviving_delta}
+
     spec = {"models": config["models"], "scenarios": config["scenarios"],
             "seeds": config["seeds"],
             "sampler_seeds": config.get("sampler_seeds"),
@@ -86,7 +150,7 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
             "manifest": manifest_path}
     try:
         sweep = run_sweep(spec, deadline=deadline,
-                          expected_digests=expected_digests)
+                          expected_digests=expected_digests, **sweep_extra)
     except SweepAborted as exc:
         raise RunnerRefusal(str(exc))
 

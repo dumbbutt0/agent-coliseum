@@ -1,0 +1,31 @@
+{
+  "_comment": "M8 Phase-2 frozen-path regression fixture: seed-VERIFIED (fixture-declared per-seed probe divergence, audit c-001 finding 1) yet wholly unparseable at every decision point - every terminal resolves to a parse fallback. Admitted stochastically, refused by the census.",
+  "responses": {
+    "default": "{\"action\": \"execute\", \"confidence\": 0.5, \"reason\": \"Complying.\", \"expected_reward\": 2}",
+    "seed_probe": "seedless garbled probe text",
+    "seed_probe@seed2001": "garbled probe text, seed variant 2001",
+    "seed_probe@seed2002": "garbled probe text, seed variant 2002",
+    "seed_probe@seed2003": "garbled probe text, seed variant 2003",
+    "seed_probe@seed2004": "garbled probe text, seed variant 2004",
+    "seed_probe@seed2005": "garbled probe text, seed variant 2005",
+    "seed_probe@seed2006": "garbled probe text, seed variant 2006",
+    "seed_probe@seed2007": "garbled probe text, seed variant 2007",
+    "seed_probe@seed2008": "garbled probe text, seed variant 2008",
+    "seed_probe@seed2009": "garbled probe text, seed variant 2009",
+    "seed_probe@seed2010": "garbled probe text, seed variant 2010",
+    "seed_probe@seed2011": "garbled probe text, seed variant 2011",
+    "seed_probe@seed2012": "garbled probe text, seed variant 2012",
+    "seed_probe@seed2013": "garbled probe text, seed variant 2013",
+    "seed_probe@seed2014": "garbled probe text, seed variant 2014",
+    "seed_probe@seed2015": "garbled probe text, seed variant 2015",
+    "seed_probe@seed2016": "garbled probe text, seed variant 2016",
+    "seed_probe@seed2017": "garbled probe text, seed variant 2017",
+    "seed_probe@seed2018": "garbled probe text, seed variant 2018",
+    "seed_probe@seed2019": "garbled probe text, seed variant 2019",
+    "seed_probe@seed2020": "garbled probe text, seed variant 2020",
+    "seed_probe@seed2021": "garbled probe text, seed variant 2021",
+    "seed_probe@seed2022": "garbled probe text, seed variant 2022",
+    "seed_probe@seed2023": "garbled probe text, seed variant 2023",
+    "seed_probe@seed2024": "garbled probe text, seed variant 2024"
+  }
+}

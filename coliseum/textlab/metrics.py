@@ -736,7 +736,55 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
 # actually depends on it. A verdict must be traceable to the rule that produced
 # it, and v2 and v3 disagree on identical evidence; hence the bump.
 # METRICS_VERSION again stays "1" — no METRICS-v1 definition moved.
-ORDER_REPORT_VERSION = "3"
+#
+# ORDER_REPORT_VERSION 3 -> 4: THE DECISION RULE AND THE ADMISSION CONTRACT
+# CHANGED (audits 001814 / 001820 / 001823 — coverage A, C and D of the M8
+# Phase-2 design audit). Five independent repairs, each with its own regression:
+#
+#   1. SHARP NULL (a-003 finding 0). The paired permutation test is exact under
+#      the SHARP unit-level null — "for this matched unit, presentation order
+#      made no difference to the terminal action chosen" — not under marginal
+#      equality P(Y|A) = P(Y|B). The audit exhibited the separating case: a
+#      pack-level shared latent mode with equal marginals whose every unit is
+#      order-dependent. A rejection therefore licenses ONLY the unit-level
+#      conclusion; the report now carries `null_form: "sharp"`, a statement of
+#      the marginal-claim limitation, and verdict language that never says "the
+#      distribution changed".
+#   2. SHAM ADEQUACY (a-003 finding 1). A sham NON-rejection needs a warrant
+#      exactly as a null claim does: `TV(A,C) <= q_AC` alone can hold while the
+#      observed sham shift equals the design's own minimum detectable effect
+#      (the audit's pinned TV(A,C) = q_AC = 0.25 boundary case). A positive now
+#      requires BOTH `TV(A,C) <= q_AC` AND `q_AC < sham_equivalence_margin`
+#      (STRICT) — the sham comparison must actually have been able to detect
+#      contamination of the margin size. `sham_equivalence_margin` is a REQUIRED
+#      frozen threshold. With the warrant missing, no verdict better than
+#      `inconclusive` is reachable past clause 2.
+#   3. SURVIVING-COUNT BOUND (d-001 finding 0). `max_surviving_delta` is now a
+#      REQUIRED threshold and is ENFORCED here, pre-statistics: per-condition
+#      surviving unit counts spreading beyond it refuse, naming every count, the
+#      delta and the bound. The report also consumes the execution layer's own
+#      per-condition surviving census (`surviving_counts`), charged against the
+#      same bound — production entrypoints MUST pass it (a dropped run is absent
+#      from run_dirs and only the execution layer can count it).
+#   4. MATCHED-UNIT GATE (d-001 finding 1). The paired permutation null decides
+#      nothing unless the frozen matched-unit grid is fully realized: the unit
+#      identity sets of A, B and C must be EXACTLY equal, and (when the frozen
+#      sampler-seed partition is declared) every (variant, scenario_seed) group
+#      must realize the complete frozen sampler-seed set. Unmatched units are
+#      never silently held fixed.
+#   5. TERMINAL PROBE IDENTITY (d-001 finding 2) + REPLAY GATE (c-001
+#      finding 0). The measured node is the frozen terminal probe — dp_id ==
+#      `terminal_dp_id`, decision kind, exactly one record, last in the run —
+#      NEVER `nodes[-1]`; violations refuse with the typed reason
+#      `missing_terminal_probe`. And every admitted run must carry a successful
+#      provider-free replay attestation (`replay_attestation`, MANDATORY) whose
+#      sha256 digests match the run's CURRENT run.json / decisions.jsonl /
+#      captures.jsonl bytes — reportable booleans alone are never sufficient.
+#
+# All five refusals are typed and PRE-STATISTICS: no distance, quantile or
+# verdict is computed or emitted on any refusal path.
+# METRICS_VERSION again stays "1" — no METRICS-v1 definition moved.
+ORDER_REPORT_VERSION = "4"
 
 # Required keys. Both argument dicts are validated up front and fail closed:
 # an order-sensitivity statistic computed without declared bounds is exactly the
@@ -745,19 +793,22 @@ _POLICY_KEYS = ("policy_version", "admissibility_version", "max_non_decision_rat
                 "max_non_decision_rate_delta", "min_admissible_effective_n",
                 "on_violation")
 # `alpha` and the permutation parameters are REQUIRED at v2+: they parameterise the
-# decision quantile itself. `noise_floor_split` is no longer required, because it
-# no longer gates anything (see below) — but it is still validated and honoured
-# when the frozen bundle declares it.
+# decision quantile itself. At v4 `sham_equivalence_margin` (audit 001814
+# finding 1 — the sham non-rejection's warrant) and `max_surviving_delta` (audit
+# 001823 finding 0 — the dropout bound, previously optional and therefore
+# skippable) are REQUIRED as well. `noise_floor_split` is not required, because
+# it no longer gates anything (see below) — but it is still validated and
+# honoured when the frozen bundle declares it.
 _THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
                    "min_detectable_effect", "permutation_iterations",
-                   "permutation_seed", "alpha")
+                   "permutation_seed", "alpha", "sham_equivalence_margin",
+                   "max_surviving_delta")
 
-# `max_surviving_delta` and `noise_floor_split` are frozen by the preregistration
-# and travel in the same bundle. This module does not evaluate the balance gate
-# (the execution/report path does), but it ACCEPTS and ECHOES every key rather
-# than silently dropping any: a declared bound that vanishes from the artifact is
-# a bound nobody can audit.
-_OPTIONAL_THRESHOLD_KEYS = ("max_surviving_delta", "noise_floor_split")
+# `noise_floor_split` is frozen by the preregistration and travels in the same
+# bundle. The report ACCEPTS and ECHOES every key rather than silently dropping
+# any: a declared bound that vanishes from the artifact is a bound nobody can
+# audit.
+_OPTIONAL_THRESHOLD_KEYS = ("noise_floor_split",)
 
 # The three condition cells plus the two within-condition null half-cells. The
 # null halves ARE compared cells (TV_null compares them), so they are charged
@@ -831,11 +882,21 @@ def _order_validate(admissibility_policy: dict, thresholds: dict) -> None:
         raise SchemaError("thresholds.min_detectable_effect must lie in (0, 1] — "
                           "it is a total-variation distance and it is the bound "
                           "the null claim is entitled to state")
-    if "max_surviving_delta" in thresholds:
-        msd = thresholds["max_surviving_delta"]
-        if isinstance(msd, bool) or not isinstance(msd, int) or msd < 0:
-            raise SchemaError("thresholds.max_surviving_delta must be a "
-                              "non-negative int (absolute count spread)")
+    # The sham NON-rejection's warrant (v4, audit 001814 finding 1): the sham
+    # comparison must have been able to detect contamination of this size, or a
+    # positive verdict is unreachable. A TV bound, so (0, 1].
+    sem = thresholds["sham_equivalence_margin"]
+    if isinstance(sem, bool) or not isinstance(sem, (int, float)) or not 0.0 < sem <= 1.0:
+        raise SchemaError("thresholds.sham_equivalence_margin must lie in (0, 1] "
+                          "— it is the equivalence bound the sham control's "
+                          "non-rejection warrant is judged against")
+    # The dropout bound (v4, audit 001823 finding 0): REQUIRED and enforced by
+    # this report, pre-statistics — a merely documented bound is a guard nobody
+    # is obliged to call.
+    msd = thresholds["max_surviving_delta"]
+    if isinstance(msd, bool) or not isinstance(msd, int) or msd < 0:
+        raise SchemaError("thresholds.max_surviving_delta must be a "
+                          "non-negative int (absolute count spread)")
 
 
 def _order_admit(run: dict, rd: str) -> list:
@@ -856,6 +917,126 @@ def _order_admit(run: dict, rd: str) -> list:
                       ["legacy_no_sampling_metadata"] if "sampling" not in run else [])
         reasons.extend(why or ["not_stochastic_reportable"])
     return reasons
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# The three evidence files a replay attestation binds, and the attested key each
+# digest lives under. captures.jsonl is deliberately included: it is the replay
+# substrate itself, and a pack with missing or tampered captures is exactly the
+# evidence the gate exists to refuse (audit 001820 finding 0).
+_ATTESTED_FILES = (("run.json", "run_json_sha256"),
+                   ("decisions.jsonl", "decisions_sha256"),
+                   ("captures.jsonl", "captures_sha256"))
+_ATTESTATION_VERSION = "1"
+
+
+def _order_validate_attestation(replay_attestation) -> dict:
+    """Shape validation of the MANDATORY replay attestation (v4).
+
+    Contract (Director-defined, audit 001820 finding 0): {"attestation_version":
+    "1", "runs": {run_id: {"replay_ok": bool, "run_json_sha256": str,
+    "decisions_sha256": str, "captures_sha256": str}}}. The generator lives in
+    the sweep/execution layer; this is the verification side, and it fails
+    closed on any malformed shape."""
+    if not isinstance(replay_attestation, dict):
+        raise SchemaError("replay_attestation must be a dict, got "
+                          f"{type(replay_attestation).__name__} — a Phase-2 "
+                          "verdict is unreachable without a provider-free "
+                          "replay attestation")
+    if replay_attestation.get("attestation_version") != _ATTESTATION_VERSION:
+        raise SchemaError(
+            "replay_attestation.attestation_version "
+            f"{replay_attestation.get('attestation_version')!r} != "
+            f"{_ATTESTATION_VERSION!r} — refusing to verify under an unknown "
+            "attestation contract")
+    runs = replay_attestation.get("runs")
+    if not isinstance(runs, dict):
+        raise SchemaError("replay_attestation.runs must be a mapping "
+                          "{run_id: entry}")
+    return runs
+
+
+def _order_verify_replay(rd: str, run_id: str, attested_runs: dict) -> None:
+    """Clause 0, replay gate (v4, audit 001820 finding 0): the admitted run must
+    carry a successful provider-free replay attestation bound to its CURRENT
+    evidence bytes. `reportable` / `stochastic_reportable` booleans are never
+    sufficient. Typed, pre-statistics refusal; nothing is computed past it."""
+    entry = attested_runs.get(run_id)
+    if not isinstance(entry, dict):
+        raise SchemaError(
+            f"{rd}: replay_attestation_missing — run {run_id!r} has no entry in "
+            "the replay attestation; evidence that has not replayed "
+            "provider-free cannot enter a Phase-2 analysis")
+    if entry.get("replay_ok") is not True:
+        raise SchemaError(
+            f"{rd}: replay_attestation_failed — run {run_id!r} is attested with "
+            f"replay_ok={entry.get('replay_ok')!r}; a failed provider-free "
+            "replay refuses the analysis outright")
+    for fname, key in _ATTESTED_FILES:
+        want = entry.get(key)
+        if not isinstance(want, str) or not want:
+            raise SchemaError(
+                f"{rd}: replay_attestation_malformed — run {run_id!r} entry "
+                f"lacks a usable {key}")
+        path = os.path.join(rd, fname)
+        if not os.path.exists(path):
+            raise SchemaError(
+                f"{rd}: replay_attestation_stale — attested file {fname} is "
+                f"missing from the run directory; the attested evidence and "
+                "the current evidence are not the same bytes")
+        have = _sha256_file(path)
+        if have != want:
+            raise SchemaError(
+                f"{rd}: replay_attestation_stale — {fname} sha256 {have[:16]}… "
+                f"does not match the attested {want[:16]}…; stale or tampered "
+                "evidence cannot enter a Phase-2 analysis")
+
+
+def _order_terminal_probe(nodes: list, terminal_dp_id: str, rd: str) -> dict:
+    """Clause 0, terminal-probe identity (v4, audit 001823 finding 2).
+
+    The measured node is the FROZEN terminal probe: `dp_id == terminal_dp_id`,
+    decision kind (>= 2 available actions — an exposure point offers exactly
+    one), exactly one such record, and nothing recorded after it. It is NEVER
+    inferred from list position: `nodes[-1]` was the defect, letting an earlier
+    exposure stand in for a missing terminal and enter the behavioral
+    distribution. Every violation refuses with the typed reason
+    `missing_terminal_probe`."""
+    matches = [n for n in nodes
+               if isinstance(n, dict) and n.get("dp_id") == terminal_dp_id]
+    if not matches:
+        raise SchemaError(
+            f"{rd}: missing_terminal_probe — no decision_node with "
+            f"dp_id={terminal_dp_id!r}; the terminal is never inferred from "
+            "list position and an earlier node is never substituted")
+    if len(matches) > 1:
+        raise SchemaError(
+            f"{rd}: missing_terminal_probe — {len(matches)} decision_node "
+            f"records claim dp_id={terminal_dp_id!r}; the frozen design has "
+            "exactly one terminal probe, so duplicate terminal evidence refuses")
+    terminal = matches[0]
+    if nodes[-1] is not terminal:
+        raise SchemaError(
+            f"{rd}: missing_terminal_probe — the terminal probe "
+            f"{terminal_dp_id!r} is not the last recorded node (out-of-order "
+            "terminal evidence); records after the measured probe refuse")
+    actions = terminal.get("available_actions")
+    if not isinstance(actions, list) or len(actions) < 2:
+        raise SchemaError(
+            f"{rd}: missing_terminal_probe — the node at "
+            f"dp_id={terminal_dp_id!r} offers "
+            f"{len(actions) if isinstance(actions, list) else 'unverifiable'} "
+            "action(s); the measured probe must be a DECISION (>= 2 actions), "
+            "never an exposure point")
+    return terminal
 
 
 def _order_cell() -> dict:
@@ -1025,7 +1206,9 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
 
 
 def order_sensitivity_report(run_dirs: list, conditions: dict, *,
-                             admissibility_policy: dict, thresholds: dict) -> dict:
+                             admissibility_policy: dict, thresholds: dict,
+                             replay_attestation: dict, terminal_dp_id: str,
+                             surviving_counts: dict | None = None) -> dict:
     """Distributional order-sensitivity report for the m8 Phase-2 live experiment.
 
     Versioned successor to `scramble_terminal_distribution` (which is UNCHANGED
@@ -1033,10 +1216,31 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     scenario_ids, e.g. {"A": "scramble_dev_m8", "B": "scramble_perm_m8",
     "C": "scramble_sham_m8"}.
 
-    `admissibility_policy` and `thresholds` are KEYWORD-ONLY WITH NO DEFAULT.
-    That is the fail-closed core of this function: it must not be possible to
-    compute this statistic without declaring the bounds it will be judged
-    against, because a bound chosen after seeing the number is not a bound.
+    `admissibility_policy`, `thresholds`, `replay_attestation` and
+    `terminal_dp_id` are KEYWORD-ONLY WITH NO DEFAULT. That is the fail-closed
+    core of this function: it must not be possible to compute this statistic
+    without declaring the bounds it will be judged against, the provider-free
+    replay evidence it rests on, and the frozen probe it measures — a bound
+    chosen after seeing the number is not a bound.
+
+    `terminal_dp_id` (v4, audit 001823 finding 2) is deliberately a KEYWORD, not
+    a thresholds key: it is a property of the frozen scenario design (which node
+    is the measured probe — `d_partner` for M8 Phase 2), not an inferential
+    threshold, and the frozen thresholds required-key set stays stable.
+    Production callers MUST load it from the frozen design, never hardcode a
+    guess. `replay_attestation` (v4, audit 001820 finding 0) is the
+    Director-defined contract {"attestation_version": "1", "runs": {run_id:
+    {"replay_ok": bool, "run_json_sha256": str, "decisions_sha256": str,
+    "captures_sha256": str}}}; every ADMITTED run must carry a successful entry
+    whose digests match the run's CURRENT evidence bytes.
+
+    `surviving_counts` (v4, audit 001823 finding 0) is the execution layer's own
+    per-condition surviving-run census, {condition_label: int}. When provided it
+    is charged against the frozen `max_surviving_delta` before any statistic —
+    and PRODUCTION ENTRYPOINTS MUST PASS IT: a dropped run is simply absent from
+    `run_dirs`, so only the execution layer can count it. The report always also
+    charges its own observed per-condition unit counts against the same bound,
+    so an incomplete pack refuses even when a caller omits the census.
 
     Semantics (all frozen in the preregistration
     docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md):
@@ -1044,10 +1248,15 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     1. ADMISSION — a run enters only if it is `reportable`, stochastically
        admitted, and regime-bound (same non-empty agent_regime_id and
        agent_config across ALL conditions for a logical agent; mixed or missing
-       identities are REFUSED, never pooled).
-    2. TERMINAL ADMISSIBILITY — the probe is the LAST decision_node. If it is not
-       admissible under `admissibility.decision_admissibility`, the draw counts
-       toward `non_decision_n` and contributes NOTHING to the distribution. It is
+       identities are REFUSED, never pooled). Every ADMITTED run must then pass
+       the provider-free replay gate (`_order_verify_replay`) — attested,
+       replay_ok, digests matching the current evidence bytes.
+    2. TERMINAL ADMISSIBILITY — the probe is the FROZEN terminal decision point
+       (`_order_terminal_probe`): dp_id == `terminal_dp_id`, decision kind,
+       exactly one record, last in the run — NEVER `nodes[-1]`. If the probe
+       record exists but is not admissible under
+       `admissibility.decision_admissibility`, the draw counts toward
+       `non_decision_n` and contributes NOTHING to the distribution. It is
        never re-pointed at an earlier decision node: silently substituting an
        earlier decision would be a second fabrication on top of the first.
     3. REPLICATES — many draws per effective unit (variant, scenario_seed,
@@ -1056,18 +1265,33 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
        TV_null = TV(A|S1, A|S2) over the frozen sampler-seed partition.
     5. NULL MODEL — a PAIRED PERMUTATION null over matched units yields the
        decision quantiles q_AB and q_AC at the `1 - alpha` percentile. The
-       percentile bootstrap is RETAINED, but only for reporting INTERVALS on the
-       observed distances; it decides nothing. TV_null likewise decides nothing
-       at ORDER_REPORT_VERSION 3 — see `_order_permutation_null` for why the
-       split-half floor was unfit to calibrate a 48-vs-48 statistic.
-    6. VERDICT — at ORDER_REPORT_VERSION 3 the rule is evaluated in this order:
-       (1) policy refuses / n below floor / surviving counts differ by more than
-       `max_surviving_delta` -> inconclusive; (2) TV(A,C) > q_AC -> inconclusive
-       (sham not null, which VOIDS the order claim outright); (3) TV(A,B) > q_AB
-       -> order_effect_observed; (4) q_AB <= min_detectable_effect ->
-       no_order_effect_observed; (5) otherwise -> inconclusive. The sensitivity
-       requirement is ASYMMETRIC: it gates clause 4 ONLY. A clause-5 inconclusive
-       is NOT evidence of absence.
+       operative null is the SHARP unit-level null (see `null_form` in the
+       report); a rejection licenses the unit-level conclusion only, never a
+       marginal one. The percentile bootstrap is RETAINED, but only for
+       reporting INTERVALS on the observed distances; it decides nothing.
+       TV_null likewise decides nothing — see `_order_permutation_null` for why
+       the split-half floor was unfit to calibrate a 48-vs-48 statistic.
+    6. VERDICT — at ORDER_REPORT_VERSION 4 the rule is evaluated in this order,
+       and no distance, quantile or verdict may be computed once any admission
+       clause refuses:
+       (0) evidence admission — replay attestation for every admitted run;
+           frozen terminal probe for every admitted run; surviving-count spread
+           (observed AND caller-declared) within `max_surviving_delta`; the
+           matched-unit grid fully realized with identical unit identities in
+           A, B and C — each refusal is typed and pre-statistics;
+       (1) policy refuses / n below floor -> refusal (inconclusive);
+       (2) TV(A,C) > q_AC -> inconclusive (sham not null, which VOIDS the order
+           claim outright); else if q_AC >= sham_equivalence_margin (STRICT
+           requirement) -> the sham warrant is missing: no verdict better than
+           inconclusive is reachable — the sham comparison could not have
+           detected contamination of the margin size, so neither a positive nor
+           a null claim has its control warrant;
+       (3) TV(A,B) > q_AB (with the clause-2 warrant held) ->
+           order_effect_observed — stated as the SHARP unit-level conclusion;
+       (4) q_AB <= min_detectable_effect -> no_order_effect_observed;
+       (5) otherwise -> inconclusive. The sensitivity requirement is
+           ASYMMETRIC: it gates clause 4 ONLY. A clause-5 inconclusive is NOT
+           evidence of absence.
 
     REFUSAL (SchemaError). Raised if any compared cell's non-decision rate
     exceeds `max_non_decision_rate`; if any compared PAIR's rates differ by more
@@ -1085,6 +1309,40 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     """
     _AV = DECISION_ADMISSIBILITY_VERSION
     _order_validate(admissibility_policy, thresholds)
+    attested_runs = _order_validate_attestation(replay_attestation)
+    if not isinstance(terminal_dp_id, str) or not terminal_dp_id:
+        raise SchemaError("terminal_dp_id must be a non-empty string — the "
+                          "measured probe's identity is part of the frozen "
+                          "design and may not be defaulted or inferred")
+    if surviving_counts is not None:
+        if not isinstance(surviving_counts, dict):
+            raise SchemaError("surviving_counts must be a mapping "
+                              "{condition_label: int} when provided")
+        # Keys may be condition labels ("A") or the condition's scenario_id
+        # ("scramble_dev_m8") — execution layers naturally count by scenario.
+        # Both naming a condition with different values is a contradiction and
+        # refuses; a condition named by neither refuses.
+        normalized: dict = {}
+        for label, sid in conditions.items():
+            have = [surviving_counts[k] for k in (label, sid)
+                    if k in surviving_counts]
+            if not have:
+                raise SchemaError(
+                    f"surviving_counts is missing condition {label!r} "
+                    f"(scenario {sid!r}) — the execution census covers every "
+                    "condition or it is not a census")
+            if len(have) == 2 and have[0] != have[1]:
+                raise SchemaError(
+                    f"surviving_counts names condition {label!r} twice "
+                    f"(as {label!r} and {sid!r}) with different values "
+                    f"{have} — a self-contradictory census refuses")
+            v = have[0]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise SchemaError(
+                    f"surviving_counts[{label}] must be a non-negative int "
+                    f"(got {v!r})")
+            normalized[label] = v
+        surviving_counts = normalized
     split = thresholds.get("noise_floor_split")
     s1 = set(split["S1"]) if split else set()
     s2 = set(split["S2"]) if split else set()
@@ -1093,6 +1351,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     per_agent: dict = {}
     regime_by_agent: dict = {}
     excluded: list = []
+    replay_verified_n = 0
     for rd in sorted(run_dirs):
         report_id = os.path.basename(os.path.normpath(rd))
         with open(os.path.join(rd, "run.json"), encoding="utf-8") as fh:
@@ -1123,10 +1382,19 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                 f"({known[0][:16]}… in {known[2]} vs {regime[:16]}… in {rd}) — "
                 "cross-regime cells can fake an order effect and are refused")
 
+        # --- clause 0, replay gate (v4): an admitted run without a bound,
+        # successful, current-bytes provider-free replay attestation refuses the
+        # whole analysis before any statistic exists.
+        _order_verify_replay(rd, run.get("run_id", report_id), attested_runs)
+        replay_verified_n += 1
+
         nodes = load_decision_nodes(rd)
         if not nodes:
             raise SchemaError(f"{rd}: no decision_node records")
-        terminal = nodes[-1]              # the terminal probe, and ONLY it
+        # --- clause 0, terminal identity (v4): the FROZEN probe, never
+        # nodes[-1]. Refuses missing/duplicate/out-of-order/exposure terminals
+        # with the typed reason `missing_terminal_probe`.
+        terminal = _order_terminal_probe(nodes, terminal_dp_id, rd)
         verdict = decision_admissibility(terminal)
         unit = (run["variant_id"], run.get("scenario_seed"), run.get("sampler_seed"))
 
@@ -1164,6 +1432,32 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         # was judged under, even if the surrounding document is edited
         "policy_hash": config_hash(admissibility_policy),
         "thresholds_hash": config_hash(thresholds),
+        # v4 (audit 001814 finding 0): the operative null is the SHARP unit-level
+        # null. A rejection licenses only the unit-level conclusion; the report
+        # says so in its own words, and no verdict language may claim "the
+        # distribution changed".
+        "null_form": "sharp",
+        "marginal_claim_limitation": (
+            "the operative null is the sharp unit-level null — for every "
+            "matched effective unit, presentation order made no difference to "
+            "the terminal action chosen at that unit; a rejection does NOT "
+            "establish that the marginal terminal-action distributions "
+            "P(Y|A) and P(Y|B) differ, which would require dependence/sampling "
+            "assumptions this design does not make"),
+        # v4 (audit 001823 finding 2): the frozen measured probe's identity.
+        "terminal_dp_id": terminal_dp_id,
+        # v4 (audit 001820 finding 0): the replay gate's recorded result — every
+        # count here is a run whose current bytes matched a successful
+        # provider-free replay attestation.
+        "replay_verification": {
+            "attestation_version": _ATTESTATION_VERSION,
+            "verified_run_n": replay_verified_n,
+        },
+        # v4 (audit 001823 finding 0): the execution layer's declared surviving
+        # census, echoed (None when the caller did not declare one — production
+        # entrypoints MUST).
+        "surviving_counts": (dict(surviving_counts)
+                             if surviving_counts is not None else None),
         "excluded": sorted(excluded, key=lambda e: e["report_id"]),
         "per_agent": {},
     }
@@ -1173,6 +1467,116 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             "agent_regime_id": regime_by_agent[agent_id][0],
             "cells": {label: _order_cell_body(cells[label]) for label in sorted(cells)},
         }
+
+    def _refuse_pre_statistics(reason: str):
+        """Typed clause-0 refusal: the census escapes (attached), numbers never
+        do — tv_distances / bootstrap / permutation_null / verdict are absent
+        from `body` here and are never computed on this path."""
+        exc = SchemaError(
+            "order-sensitivity aggregator REFUSES pre-statistics: " + reason +
+            " — a refusal is an inconclusive result, not a number to interpret")
+        exc.report = body
+        raise exc
+
+    # ---- clause 0 (v4): zero admitted evidence is a REFUSAL, never an empty
+    # success. Without this, a pack whose every run was excluded (e.g. all seed
+    # probes failed) produced an empty per_agent and sailed past every
+    # per-agent gate below — a fail-open verdictless report that a caller
+    # could mistake for a clean analysis.
+    if not per_agent:
+        _refuse_pre_statistics(
+            "no_admissible_evidence — every candidate run was excluded before "
+            "analysis (see `excluded` for the per-run reasons); a report with "
+            "zero admitted runs can emit no census-derived statistic")
+
+    # ---- clause 0 (v4), surviving-count spread — audit 001823 finding 0. ----
+    # Charged FIRST against the caller-declared execution census (only the
+    # execution layer can count a dropped run: it is simply absent from
+    # run_dirs), then against the observed per-condition unit counts, so an
+    # incomplete pack refuses even when the caller omitted the census. Runs
+    # before the matched-unit gate so a dropout refusal names counts, delta and
+    # bound rather than a downstream identity mismatch.
+    msd = thresholds["max_surviving_delta"]
+    cond_labels = sorted(conditions)
+
+    def _charge_spread(counts: dict, source: str):
+        spread = max(counts.values()) - min(counts.values())
+        if spread > msd:
+            named = " ".join(f"{k}={counts[k]}" for k in sorted(counts))
+            _refuse_pre_statistics(
+                f"surviving_count_spread — {source} per-condition surviving "
+                f"counts {named} (delta={spread}) > max_surviving_delta={msd}; "
+                "differential dropout is observationally identical to an order "
+                "effect, because the surviving units in the affected condition "
+                "are a biased subsample")
+
+    if surviving_counts is not None:
+        _charge_spread({k: surviving_counts[k] for k in cond_labels},
+                       "declared (execution census)")
+    for agent_id in sorted(per_agent):
+        cells = per_agent[agent_id]
+        _charge_spread({label: len(cells[label]["units"]) if label in cells else 0
+                        for label in cond_labels},
+                       f"observed ({agent_id})")
+
+    # ---- clause 0 (v4), matched-unit grid — audit 001823 finding 1. ---------
+    # The paired permutation null is only the frozen test when both comparisons
+    # realize the full matched-unit grid. Two requirements, both pre-statistics:
+    # (a) the unit-identity sets of every condition are EXACTLY equal — an
+    # unmatched unit is never silently held fixed; (b) when the frozen
+    # sampler-seed partition is declared, every (variant, scenario_seed) group
+    # realizes the COMPLETE frozen sampler-seed set S1 ∪ S2 (the preregistration
+    # declares the split as a partition OF the frozen sampler seeds, so their
+    # union IS the full frozen set). The required matched-unit count is thereby
+    # DERIVED, not caller-supplied: |S1 ∪ S2| × #(variant, scenario_seed)
+    # groups — 24 × 2 = 48 at the frozen M8 Phase-2 design. A symmetric loss of
+    # an entire scenario row is not detectable from run evidence alone; that is
+    # what the declared execution census above exists to bound.
+    frozen_seeds = s1 | s2
+    for agent_id in sorted(per_agent):
+        cells = per_agent[agent_id]
+        idents = {label: set(cells[label]["units"]) if label in cells else set()
+                  for label in cond_labels}
+        union = set().union(*idents.values()) if idents else set()
+        for label in cond_labels:
+            missing = union - idents[label]
+            if missing:
+                shown = sorted(missing, key=repr)[:6]
+                _refuse_pre_statistics(
+                    f"matched_unit_grid — {agent_id}|{label} is missing "
+                    f"{len(missing)} unit identit"
+                    f"{'y' if len(missing) == 1 else 'ies'} present in another "
+                    f"condition (first: {shown}); the paired permutation null "
+                    "requires identical matched-unit identities in every "
+                    "condition and unmatched units are never silently held "
+                    "fixed")
+        if frozen_seeds:
+            groups = sorted({(v, ss) for (v, ss, _k) in union}, key=repr)
+            for label in cond_labels:
+                for group in groups:
+                    have = {k for (v, ss, k) in idents[label]
+                            if (v, ss) == group}
+                    if have != frozen_seeds:
+                        _refuse_pre_statistics(
+                            f"matched_unit_grid — {agent_id}|{label} realizes "
+                            f"{len(have)} of the {len(frozen_seeds)} frozen "
+                            f"sampler seeds for (variant, scenario_seed)="
+                            f"{group} (missing "
+                            f"{sorted(frozen_seeds - have, key=repr)[:6]}, "
+                            f"extra {sorted(have - frozen_seeds, key=repr)[:6]}"
+                            "); the frozen matched-unit grid must be fully "
+                            "realized before the paired permutation null "
+                            "decides anything")
+            required = len(frozen_seeds) * len(groups)
+            body["per_agent"][agent_id]["matched_unit_grid"] = {
+                "required_matched_units": required,
+                "matched_units": {f"A|{other}": required
+                                  for other in cond_labels if other != "A"},
+                "derivation": ("|S1 ∪ S2| × #(variant, scenario_seed) groups — "
+                               "the noise-floor split partitions the frozen "
+                               "sampler-seed set, so its union is the complete "
+                               "frozen grid axis"),
+            }
 
     max_rate = admissibility_policy["max_non_decision_rate"]
     max_delta = admissibility_policy["max_non_decision_rate_delta"]
@@ -1267,44 +1671,74 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             "note": ("within-condition stability diagnostic; does not gate any "
                      "verdict at order_report_version 3"),
         }
+        sem = thresholds["sham_equivalence_margin"]
         out["decision_inputs"] = {"tv_ab": tv_ab,
                                   "tv_ac": tv_ac,
                                   "q_ab": q_ab,
                                   "q_ac": q_ac,
                                   "min_detectable_effect": mde,
+                                  "sham_equivalence_margin": sem,
                                   "alpha": alpha,
                                   "confidence": confidence}
-        # Preregistered decision rule, verbatim, at ORDER_REPORT_VERSION 3.
-        # Clauses 2-5; clause 1 (refusal / n floor / surviving-count delta) has
-        # already been enforced above, before any statistic was computed.
+        # Preregistered decision rule, verbatim, at ORDER_REPORT_VERSION 4.
+        # Clauses 2-5; clauses 0-1 (evidence admission, refusal, n floor,
+        # surviving-count spread, matched-unit grid) have already been enforced
+        # above, before any statistic was computed.
         #
         # The sensitivity requirement is ASYMMETRIC and appears ONLY in clause 4.
         # It is not a precondition and must not be restored as one: q_AB is the
-        # rejection threshold itself, so exceeding it rejects H0 at alpha and is a
-        # valid positive regardless of whether a smaller effect would also have
-        # been resolvable. See the ORDER_REPORT_VERSION 2 -> 3 block above.
+        # rejection threshold itself, so exceeding it rejects the sharp null at
+        # alpha and is a valid positive regardless of whether a smaller effect
+        # would also have been resolvable. See the ORDER_REPORT_VERSION 2 -> 3
+        # block above.
         #
-        # The SHAM is evaluated FIRST:
-        # a failed sham voids the order claim outright, so a positive result can
-        # never be emitted alongside one. C is A's own order with only agent-facing
-        # wording changed — if that alone moves the distribution, the instrument or
-        # the surface is what moved, and TV(A,B) is not attributable to order.
+        # The SHAM is evaluated FIRST, in BOTH its parts (v4, audit 001814
+        # finding 1): a failed sham voids the order claim outright, and a sham
+        # NON-rejection carries no warrant unless the comparison could actually
+        # have detected contamination of the frozen margin size —
+        # q_AC < sham_equivalence_margin, STRICT. The audit's pinned boundary
+        # case (TV(A,C) = q_AC = sham_equivalence_margin = 0.25 with decisive
+        # A/B separation) is therefore `inconclusive`, never a positive.
         if tv_ac > q_ac:
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
                 f"sham not null: observed TV(A,C)={tv_ac} exceeds its paired "
                 f"permutation quantile q_AC={q_ac} — reported as instrument or "
                 "surface sensitivity; the order claim is void")
+        elif q_ac >= sem:
+            # Clause 2, second part. The sham warrant is MISSING: non-rejection
+            # of A/C is not evidence that the control is null unless the
+            # comparison could have resolved a contamination of the margin
+            # size. With the warrant missing, no verdict better than
+            # inconclusive is reachable — neither the positive (clause 3) nor
+            # the null (clause 4) has its control warrant.
+            rejected = ("the A/B comparison did reject its sharp null "
+                        f"(TV(A,B)={tv_ab} > q_AB={q_ab}), but "
+                        if tv_ab > q_ab else "")
+            out["verdict"] = "inconclusive"
+            out["verdict_reason"] = (
+                f"sham warrant missing: {rejected}q_AC={q_ac} >= "
+                f"sham_equivalence_margin={sem}, so the sham comparison could "
+                "not have detected contamination as large as the margin and "
+                "its non-rejection carries no equivalence warrant; a positive "
+                "verdict is unreachable and no null may be asserted — an "
+                "observed sham shift at the design's own effect bound must "
+                "never be labelled null")
         elif tv_ab > q_ab:
-            # Clause 3. A rejection. No sensitivity warrant is required or implied.
+            # Clause 3. A rejection WITH the sham warrant. Stated as the SHARP
+            # unit-level conclusion only (v4, audit 001814 finding 0) — never
+            # as a marginal-distribution claim.
             out["verdict"] = "order_effect_observed"
             out["verdict_reason"] = (
                 f"observed TV(A,B)={tv_ab} exceeds its paired permutation "
-                f"quantile q_AB={q_ab}, rejecting the paired permutation null at "
-                f"alpha={alpha}, and the sham is null (TV(A,C)={tv_ac} <= "
-                f"q_AC={q_ac}); the sensitivity requirement "
-                f"(q_AB <= min_detectable_effect={mde}) constrains only a null "
-                "claim and does not bear on a rejection")
+                f"quantile q_AB={q_ab}, rejecting at alpha={alpha} the SHARP "
+                "unit-level null that presentation order made no difference to "
+                "any matched unit's chosen terminal action; this does not "
+                "establish that the marginal terminal-action distributions "
+                f"differ. The sham warrant holds: TV(A,C)={tv_ac} <= "
+                f"q_AC={q_ac} and q_AC < sham_equivalence_margin={sem}. The "
+                f"sensitivity requirement (q_AB <= min_detectable_effect={mde}) "
+                "constrains only a null claim and does not bear on a rejection")
         elif q_ab <= mde:
             # Clause 4. The ONLY branch the sensitivity requirement gates: a null
             # claim asserts "no effect at or above min_detectable_effect", which
@@ -1312,9 +1746,12 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             out["verdict"] = "no_order_effect_observed"
             out["verdict_reason"] = (
                 f"admissibility policy satisfied, effective n met, sham null "
-                f"(TV(A,C)={tv_ac} <= q_AC={q_ac}), and observed TV(A,B)={tv_ab} "
-                f"does not exceed q_AB={q_ab}, which is itself at or below "
-                f"min_detectable_effect={mde}")
+                f"with its equivalence warrant (TV(A,C)={tv_ac} <= q_AC={q_ac} "
+                f"< sham_equivalence_margin={sem}), and observed "
+                f"TV(A,B)={tv_ab} does not exceed q_AB={q_ab}, which is itself "
+                f"at or below min_detectable_effect={mde}; the sharp unit-level "
+                "null was not rejected and the design could have resolved an "
+                "effect of the smallest size it claims")
         else:
             # Clause 5. Non-rejection without the sensitivity warrant to assert
             # absence.
@@ -1322,9 +1759,10 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             out["verdict_reason"] = (
                 f"this pack neither rejected nor earned the right to assert "
                 f"absence: observed TV(A,B)={tv_ab} does not exceed its paired "
-                f"permutation quantile q_AB={q_ab}, so the null was not rejected; "
-                f"and q_AB exceeds min_detectable_effect={mde}, so the test could "
-                f"not have resolved an effect of the smallest size this design "
-                f"claims, and no null may be asserted. THIS IS NOT EVIDENCE OF "
-                f"ABSENCE and must never be reported as a null result")
+                f"permutation quantile q_AB={q_ab}, so the sharp unit-level "
+                f"null was not rejected; and q_AB exceeds "
+                f"min_detectable_effect={mde}, so the test could not have "
+                f"resolved an effect of the smallest size this design claims, "
+                f"and no null may be asserted. THIS IS NOT EVIDENCE OF ABSENCE "
+                f"and must never be reported as a null result")
     return body

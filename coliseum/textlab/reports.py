@@ -185,3 +185,66 @@ def write(text: str, rel_path: str, repo_root: str) -> str:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return path
+
+
+# ------------------------------------------------- order-sensitivity report
+
+def _num(v):
+    return "—" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+
+
+def render_order_report(report: dict) -> str:
+    """Human-readable block for an order_sensitivity_report artifact — verdict,
+    TV distances, decision quantiles, per-cell census, exclusions. Derived
+    only from the report dict (same input -> byte-identical text). Tolerates a
+    refusal-shaped report (census present, no distances/verdict) and says so
+    rather than inventing a verdict."""
+    lines = [f"ORDER SENSITIVITY REPORT  "
+             f"(order_report_version {report.get('order_report_version')})"]
+    conds = report.get("conditions") or {}
+    if conds:
+        lines.append("conditions: " + "  ".join(
+            f"{k}={conds[k]}" for k in sorted(conds)))
+    excluded = report.get("excluded") or []
+    if excluded:
+        reasons: dict = {}
+        for e in excluded:
+            for why in e.get("reasons", []):
+                reasons[why] = reasons.get(why, 0) + 1
+        lines.append(f"excluded runs: {len(excluded)} ({reasons})")
+    for agent_id in sorted(report.get("per_agent") or {}):
+        a = report["per_agent"][agent_id] or {}
+        lines += ["", f"agent {agent_id}  "
+                  f"regime {str(a.get('agent_regime_id') or '')[:16]}…"]
+        cells = a.get("cells") or {}
+        for label in sorted(cells):
+            c = cells[label] or {}
+            lines.append(
+                f"  cell {label:<5} eff_n={_num(c.get('admissible_effective_n'))} "
+                f"draws={_num(c.get('admissible_draw_n'))} "
+                f"non_decisions={_num(c.get('non_decision_n'))} "
+                f"rate={_num(c.get('non_decision_rate'))}")
+            if c.get("non_decision_reasons"):
+                lines.append(f"        non-decision reasons: "
+                             f"{c['non_decision_reasons']}")
+        di = a.get("decision_inputs")
+        if di:
+            lines.append(
+                f"  TV(A,B)={_num(di.get('tv_ab'))}  q_AB={_num(di.get('q_ab'))}  "
+                f"TV(A,C)={_num(di.get('tv_ac'))}  q_AC={_num(di.get('q_ac'))}")
+            lines.append(
+                f"  alpha={_num(di.get('alpha'))}  "
+                f"min_detectable_effect={_num(di.get('min_detectable_effect'))}")
+        diag = a.get("diagnostics") or {}
+        if diag.get("tv_null") is not None:
+            lines.append(f"  TV_null={_num(diag['tv_null'])} "
+                         "(within-condition stability diagnostic; gates nothing)")
+        verdict = a.get("verdict")
+        if verdict:
+            lines.append(f"  VERDICT: {verdict}")
+            if a.get("verdict_reason"):
+                lines.append(f"    {a['verdict_reason']}")
+        else:
+            lines.append("  VERDICT: (absent — refusal-shaped report; no "
+                         "distances were computed and none may be inferred)")
+    return "\n".join(lines) + "\n"

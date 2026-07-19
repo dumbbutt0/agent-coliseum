@@ -18,7 +18,12 @@ CK = SCEN("corrupt_king")
 STOCH = {"mode": "stochastic", "temperature": 0.7}
 
 
-def run_stoch(tmp, sub, sampler_seed, seed=42, fixture="steward_obedient", **kw):
+def run_stoch(tmp, sub, sampler_seed, seed=42, fixture="steward_obedient_seeded", **kw):
+    """Stochastic mock run. Default fixture is the SEED-HONORING one
+    (steward_obedient_seeded): since the audit c-001 finding-1 fix, a mock only
+    passes the two-arm seed probe when its fixture declares seed sensitivity
+    (seed_probe@seed<k> keys) — the plain steward_obedient fixture ignores the
+    seed and is now honestly excluded (regression pinned below)."""
     return run_scenario(CK, f"llm:mock:{fixture}", seed, str(tmp / sub),
                         sampling=dict(STOCH), sampler_seed=sampler_seed, **kw)
 
@@ -104,6 +109,61 @@ def test_unverified_backend_seed_excludes(tmp_path, monkeypatch):
     agg = aggregate([r.run_dir], mode="stochastic")
     assert not agg["cells"]
     assert agg["excluded"][0]["reasons"] == ["backend_seed_unverified"]
+
+
+def test_seed_ignoring_mock_backend_is_excluded_end_to_end(tmp_path):
+    """AUDIT c-001 finding-1 regression (the auditor's minimum): a non-Ollama
+    agent given distinct requested seeds whose output is constant across them
+    must record seed_probe_result 'failed' with BOTH arms inspectable in the
+    run evidence, backend_seed_supported False, and the run must be excluded
+    from stochastic admission carrying backend_seed_unverified. Previously the
+    base class stamped 'verified' with no arms and both runs were admitted."""
+    excluded_dirs = []
+    for k in (2001, 2002):                      # distinct requested seeds
+        r = run_stoch(tmp_path, f"k{k}", sampler_seed=k, fixture="steward_obedient")
+        run = json.load(open(os.path.join(r.run_dir, "run.json")))
+        assert run["backend_seed_supported"] is False
+        assert run["stochastic_reportable"] is False
+        assert "backend_seed_unverified" in run["stochastic_exclusion_reasons"]
+        probe = run["llm_info"]["seed_probe"]   # arms inspectable from evidence alone
+        assert probe["seed_probe_result"] == "failed"
+        arms = {a["arm"]: a for a in probe["seed_probe_arms"]}
+        assert arms["same_seed_reproducibility"]["outcome"] == "pass"
+        assert arms["different_seed_divergence"]["outcome"] == "fail"
+        assert arms["different_seed_divergence"]["seeds"] == \
+            [k, k + 104729]                     # SEED_PROBE_ALT_SEED_OFFSET, pinned
+        assert len(set(arms["different_seed_divergence"]["response_hashes"])) == 1
+        excluded_dirs.append(r.run_dir)
+    # the raw outputs across the two distinct-seed runs were identical — and
+    # neither run may enter stochastic admission
+    agg = aggregate(excluded_dirs, mode="stochastic")
+    assert not agg["cells"]
+    assert len(agg["excluded"]) == 2
+    for e in agg["excluded"]:
+        assert e["reasons"] == ["backend_seed_unverified"]
+
+
+def test_seed_honoring_mock_admitted_probe_calls_never_captured(tmp_path):
+    """The counterpart: the seed-honoring fixture verifies honestly, and its
+    probe never contaminates scenario captures — capture keys and bytes are
+    the scenario's own (dp/pass fallback lookups, no probe rows)."""
+    r = run_stoch(tmp_path, "ok", sampler_seed=5)
+    run = json.load(open(os.path.join(r.run_dir, "run.json")))
+    assert run["stochastic_reportable"] is True
+    probe = run["llm_info"]["seed_probe"]
+    assert probe["seed_probe_result"] == "verified"
+    assert {a["arm"]: a["outcome"] for a in probe["seed_probe_arms"]} == \
+        {"same_seed_reproducibility": "pass", "different_seed_divergence": "pass"}
+    caps = [json.loads(l) for l in open(os.path.join(r.run_dir, "captures.jsonl"))]
+    assert caps and all("seed_probe" not in c["key"] for c in caps)
+    # identical to the un-seeded fixture's scenario bytes: the probe keys are
+    # extra fixture data, the scenario responses are byte-identical
+    plain = json.load(open(os.path.join(
+        ROOT, "tests", "fixtures", "llm", "steward_obedient.json")))["responses"]
+    seeded = json.load(open(os.path.join(
+        ROOT, "tests", "fixtures", "llm", "steward_obedient_seeded.json")))["responses"]
+    for key, text in plain.items():
+        assert seeded[key] == text
 
 
 def _stub_digest(monkeypatch):
@@ -192,9 +252,9 @@ def test_scenario_seeds_are_not_samples(tmp_path):
 def test_twin_pairing_exact_sampler_seed_match(tmp_path):
     dirs = []
     for k in (1, 2, 3):
-        dirs.append(run_scenario(SCEN("corrupt_king"), "llm:mock:steward_obedient", 42,
+        dirs.append(run_scenario(SCEN("corrupt_king"), "llm:mock:steward_obedient_seeded", 42,
                                  str(tmp_path / "p"), sampling=dict(STOCH), sampler_seed=k).run_dir)
-    dirs.append(run_scenario(SCEN("corrupt_king_verifiable"), "llm:mock:steward_obedient", 42,
+    dirs.append(run_scenario(SCEN("corrupt_king_verifiable"), "llm:mock:steward_obedient_seeded", 42,
                              str(tmp_path / "c"), sampling=dict(STOCH), sampler_seed=1).run_dir)
     agg = aggregate(dirs, mode="stochastic")
     pair = next(iter(agg["control_twin_delta"].values()))
@@ -210,9 +270,9 @@ def test_twin_pairing_exact_sampler_seed_match(tmp_path):
 
 def test_attempts_do_not_create_pairs(tmp_path):
     for _ in range(2):                                   # 2 attempts, same replicate
-        run_scenario(SCEN("corrupt_king"), "llm:mock:steward_obedient", 42,
+        run_scenario(SCEN("corrupt_king"), "llm:mock:steward_obedient_seeded", 42,
                      str(tmp_path / "p"), sampling=dict(STOCH), sampler_seed=1)
-    run_scenario(SCEN("corrupt_king_verifiable"), "llm:mock:steward_obedient", 42,
+    run_scenario(SCEN("corrupt_king_verifiable"), "llm:mock:steward_obedient_seeded", 42,
                  str(tmp_path / "c"), sampling=dict(STOCH), sampler_seed=1)
     dirs = [os.path.join(str(tmp_path / d), n) for d in ("p", "c")
             for n in sorted(os.listdir(tmp_path / d))]
@@ -269,7 +329,7 @@ def test_stochastic_replay_offline_byte_identical(tmp_path, monkeypatch):
     live = run_stoch(tmp_path, "live", sampler_seed=13)
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("network in replay")))
-    replayed = run_scenario(CK, "llm:mock:steward_obedient", 999,  # wrong seed on purpose:
+    replayed = run_scenario(CK, "llm:mock:steward_obedient_seeded", 999,  # wrong seed on purpose:
                             str(tmp_path / "rp"), replay_from=live.run_dir)  # manifest must win
     assert replayed.run_id == live.run_id
     with open(os.path.join(live.run_dir, "decisions.jsonl"), "rb") as f1, \

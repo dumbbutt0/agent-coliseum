@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 
 import yaml
 
@@ -69,7 +70,7 @@ ADMISSIBILITY_POLICY_KEYS = (
     "max_non_decision_rate_delta", "min_admissible_effective_n",
     "on_violation")
 THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
-                  "min_detectable_effect")
+                  "min_detectable_effect", "sham_equivalence_margin")
 # M8 audit repair R4: the null model is a PAIRED PERMUTATION null, so its
 # parameters must be frozen inside planned_design exactly like the bootstrap
 # parameters were. A design that omits them cannot state a decision quantile at
@@ -133,11 +134,28 @@ PERMUTATION_RULE_MARKERS = ("permutation", "q_AB")
 # perverse — total separation at TV(A,B)=1.0 against q_AB=0.2917 reported
 # `inconclusive` solely because 0.2917 > 0.25, discarding a decisive rejection.
 #
-# The analysis callable therefore bumps to ORDER_REPORT_VERSION 3: the rule
-# changed again, and a verdict must stay traceable to the rule that produced it.
-# The version is pinned literally in primary_event so a report emitted by an
-# older callable cannot be passed off as conforming to this design.
-ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 3"
+# The analysis callable version is pinned literally in primary_event so a
+# report emitted by an older callable cannot be passed off as conforming to
+# this design. FOURTH repair (audit 001834 / 001832, still pre-execution):
+# ORDER_REPORT_VERSION bumps 3 -> 4 — the rule gains a mandatory clause-0
+# evidence-admission block (provider-free replay attestation, frozen terminal
+# probe identity d_partner, the full 48-unit matched grid, and a REQUIRED
+# registry-loaded max_surviving_delta enforced before any statistic) and the
+# clause-2 sham-adequacy warrant (q_AC < sham_equivalence_margin, strict): a
+# sham NON-rejection needs a warrant exactly as a null claim does.
+ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 4"
+
+# literal markers the clause-0 EVIDENCE-ADMISSION block must carry (matched
+# case-sensitively, like the callable name). A primary_event that drops any of
+# them can be read as permitting the exact escapes audits 001832/001834 pinned:
+# attestation-free runs, a positionally-inferred terminal, an unmatched grid,
+# or an optional dropout bound.
+ADMISSION_RULE_MARKERS = (
+    "provider-free replay", "d_partner", "missing_terminal_probe",
+    "matched_units == 48", "before any statistic")
+# literal markers the clause-2 SHAM-ADEQUACY warrant must carry: the strict
+# margin comparison is the warrant itself.
+SHAM_ADEQUACY_MARKERS = ("q_AC < sham_equivalence_margin",)
 
 # literal markers of the SUPERSEDED SYMMETRIC sensitivity precondition (matched
 # case-insensitively against primary_event). Each phrase asserts the requirement
@@ -155,6 +173,138 @@ ASYMMETRIC_SENSITIVITY_MARKERS = (
     "attaches ONLY to the null branch",
     "never invalidates a rejection",
 )
+
+# ------------------------------------------- frozen NUMERIC PROFILE authority
+#
+# Audit b-001 finding 3 (the rehash attack): design_hash is SELF-derived from
+# planned_design, so an attacker who weakens a numeric bound, recomputes
+# design_hash and mirrors the config defeats hash reconstruction entirely —
+# and the semantic lint above only checks broad domains (rate in [0,1],
+# positive int), so a weaker-but-type-valid bound loaded cleanly. The frozen
+# numeric profile below is the INDEPENDENT authority: it lives in audited
+# code, not in the artifact being checked, so a mutate+rehash+mirror attack
+# now fails against constants no registry or config edit can move. Both lints
+# (registry AND config) compare against it, so neither artifact can be
+# weakened alone or in concert.
+#
+# Changing a value here is a deliberate, audited code change — exactly the
+# property the design_hash alone could not provide.
+M8_FROZEN_PROFILE = {
+    "admissibility_policy": {
+        "max_non_decision_rate": 0.20,
+        "max_non_decision_rate_delta": 0.05,
+        "min_admissible_effective_n": 20,
+        "on_violation": "refuse",
+    },
+    "thresholds": {
+        "bootstrap_iterations": 10000,
+        "bootstrap_seed": 20260719,
+        "confidence": 0.95,
+        "min_detectable_effect": 0.25,
+        "sham_equivalence_margin": 0.25,
+        "permutation_iterations": 10000,
+        "permutation_seed": 20260719,
+        "alpha": 0.05,
+    },
+    "max_surviving_delta": 2,
+    "sampler_seeds": list(range(2001, 2025)),
+    "noise_floor_split": {"S1": list(range(2001, 2013)),
+                          "S2": list(range(2013, 2025))},
+    "scenario_seeds": [42, 1],
+    "temperature": 0.7,
+    "arbitration": "planner_priority",
+    "model_digests": {
+        "huihui_ai/qwen2.5-abliterate:7b-instruct":
+            "103482475c9b4d4032999dd5d7383478cad8b966ae6ae984d525"
+            "daf7352c2219",
+    },
+}
+
+# experiment id -> audited frozen numeric profile
+FROZEN_NUMERIC_PROFILES = {
+    "m8-phase2-live-order-sensitivity": M8_FROZEN_PROFILE,
+}
+
+_FULL_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _is_full_digest(value) -> bool:
+    """A full immutable 64-hex model digest (an optional sha256: prefix is
+    tolerated and stripped, matching sweep.norm_digest)."""
+    return isinstance(value, str) and bool(
+        _FULL_DIGEST_RE.fullmatch(value.replace("sha256:", "")))
+
+
+def _profile_issues(eid: str, where: str, view: dict) -> list:
+    """Compare a planned_design (or a config projected into planned_design
+    shape) against the audited frozen numeric profile. Returns issue strings.
+
+    The comparison is EXACT: every profile value must be present and equal
+    (bools never impersonate ints), and the model_digests mapping must match
+    key-for-key and digest-for-digest — no missing, extra, or substituted
+    entries. Deviations are refused INDEPENDENTLY of design_hash, so they are
+    caught even after a rehash."""
+    prof = FROZEN_NUMERIC_PROFILES.get(eid)
+    if prof is None:
+        return []
+
+    def _mismatch(got, want):
+        return got != want or (isinstance(got, bool) is not
+                               isinstance(want, bool))
+
+    issues = []
+    for key, want in prof.items():
+        if key in ("admissibility_policy", "thresholds"):
+            block = view.get(key)
+            if not isinstance(block, dict):
+                issues.append(
+                    f"{where}: {key} is missing — the audited frozen profile "
+                    f"for {eid} requires it (profile authority is code, not "
+                    "the self-derived hash)")
+                continue
+            for k, w in want.items():
+                if k not in block:
+                    issues.append(
+                        f"{where}: {key}.{k} is missing — the audited frozen "
+                        f"profile pins it at {w!r}")
+                elif _mismatch(block[k], w):
+                    issues.append(
+                        f"{where}: {key}.{k} {block[k]!r} != audited frozen "
+                        f"profile value {w!r} — the M8 numeric profile is "
+                        "anchored in audited code, independent of the "
+                        "self-derived hash")
+            continue
+        if key == "model_digests":
+            got = view.get(key)
+            if got != want:
+                issues.append(
+                    f"{where}: model_digests {got!r} != audited frozen "
+                    f"profile digests {want!r} — a substituted, missing, or "
+                    "extra digest is a NEW regime and is refused "
+                    "independently of the self-derived hash")
+            continue
+        if key not in view:
+            issues.append(f"{where}: {key} is missing — the audited frozen "
+                          f"profile pins it at {want!r}")
+        elif _mismatch(view[key], want):
+            issues.append(
+                f"{where}: {key} {view[key]!r} != audited frozen profile "
+                f"value {want!r} — anchored in audited code, independent of "
+                "the self-derived hash")
+    return issues
+
+
+def _config_profile_view(cfg: dict) -> dict:
+    """Project a run config into planned_design shape so the SAME profile
+    comparison applies to both artifacts (config 'seeds' realizes the design's
+    'scenario_seeds')."""
+    view = {k: cfg[k] for k in (
+        "admissibility_policy", "thresholds", "max_surviving_delta",
+        "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
+        "model_digests") if k in cfg}
+    if "seeds" in cfg:
+        view["scenario_seeds"] = cfg["seeds"]
+    return view
 
 
 def _find_entry(registry_path: str, experiment_id: str) -> dict:
@@ -301,6 +451,18 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "must be a float in (0, 1] — a total-variation "
                           "distance is bounded by 1 and a zero floor claims "
                           "infinite resolving power")
+        # R7: the sham-adequacy warrant's margin. A sham non-rejection needs a
+        # warrant exactly as a null claim does: q_AC must be STRICTLY below
+        # this margin or a positive verdict is unreachable. Same domain as
+        # min_detectable_effect (a TV distance bound).
+        sem = th.get("sham_equivalence_margin")
+        if "sham_equivalence_margin" in th and (
+                isinstance(sem, bool) or not isinstance(sem, (int, float))
+                or not (0 < sem <= 1)):
+            issues.append(f"{eid}: thresholds sham_equivalence_margin {sem!r} "
+                          "must be a float in (0, 1] — it bounds a "
+                          "total-variation quantile and a zero margin makes "
+                          "the sham warrant unsatisfiable")
 
         # R4: paired-permutation null parameters. The decision quantile is the
         # 1-alpha percentile of a permutation null drawn under a declared seed
@@ -347,6 +509,33 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
             issues.append(f"{eid}: max_surviving_delta {msd!r} must be a "
                           "non-negative int (an absolute spread between "
                           "per-condition surviving counts)")
+
+    # b-001 finding 2: the frozen ARBITRATION regime must be declared in the
+    # design so the config gate can bind to it — an undeclared arbitration is
+    # an unpinned regime dimension the live driver would fill from a default.
+    if not pd.get("arbitration"):
+        issues.append(f"{eid}: planned_design missing 'arbitration' (the "
+                      "arbitration rule is part of the frozen regime and the "
+                      "config gate binds to it exactly)")
+
+    # b-001 finding 1: the FULL immutable model digest must be frozen in the
+    # design, per model, in full 64-hex shape — the config gate requires exact
+    # equality against this mapping, so a partial or malformed pin here would
+    # weaken the whole boundary.
+    md = pd.get("model_digests")
+    if not isinstance(md, dict) or not md:
+        issues.append(f"{eid}: planned_design missing 'model_digests' (a live "
+                      "design must freeze every model's FULL digest; a tag "
+                      "alone pins nothing immutable)")
+    else:
+        for m in pd.get("models") or []:
+            if m not in md:
+                issues.append(f"{eid}: planned model {m!r} has no frozen "
+                              "digest in planned_design.model_digests")
+        for m, dg in md.items():
+            if not _is_full_digest(dg):
+                issues.append(f"{eid}: model_digests[{m!r}] {str(dg)[:20]!r} "
+                              "is not a full immutable 64-hex digest")
 
     # frozen analysis identity: design_hash must cover WHICH analysis runs.
     pe = pd.get("primary_event")
@@ -414,6 +603,26 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                     "asymmetric sensitivity requirement (missing "
                     f"{marker!r}) — a design that leaves the requirement's "
                     "scope unstated can be read as gating both branches")
+        # R7: the clause-0 evidence-admission block is mandatory. A rule that
+        # drops any of its markers can be read as re-admitting the audited
+        # escapes: attestation-free runs, a positionally-inferred terminal, an
+        # unmatched grid, or an optional dropout bound.
+        for marker in ADMISSION_RULE_MARKERS:
+            if marker not in pe:
+                issues.append(
+                    f"{eid}: primary_event does not state the mandatory "
+                    f"clause-0 evidence-admission requirement (missing "
+                    f"{marker!r}) — every admission clause must refuse "
+                    "before any distance, quantile, or verdict exists")
+        # R7: the sham-adequacy warrant. A sham NON-rejection needs a warrant
+        # exactly as a null claim does: q_AC strictly below the frozen margin.
+        for marker in SHAM_ADEQUACY_MARKERS:
+            if marker not in pe:
+                issues.append(
+                    f"{eid}: primary_event does not state the sham-adequacy "
+                    f"warrant (missing {marker!r}) — without the strict "
+                    "margin requirement a vacuous sham comparison could "
+                    "warrant an order claim")
 
     # noise-floor split: TV_null = TV(A|S1, A|S2), so the split must partition
     # the DECLARED sampler seeds exactly — declared before execution and never
@@ -542,6 +751,10 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
                     issues.append(f"{eid}: planned_design missing {req!r}")
             if eid in POLICY_REQUIRED_EXPERIMENTS:
                 issues.extend(_lint_frozen_policy(eid, pd))
+                # b-001 finding 3: the audited code-level profile is checked
+                # INDEPENDENTLY of design_hash, so a mutate+rehash attack on
+                # the load-bearing numeric bounds still refuses here.
+                issues.extend(_profile_issues(eid, eid, pd))
             if pd.get("interaction_mode") and pd["interaction_mode"] not in \
                     ("independent_vignettes", "sequential_history"):
                 issues.append(f"{eid}: planned interaction_mode "
@@ -634,7 +847,7 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
 EXPERIMENT_CONFIG_REQUIRED = (
     "experiment_id", "design_hash", "task_id", "driver", "models",
     "model_digests", "scenarios", "seeds", "sampler_seeds", "temperature",
-    "interaction", "out_root", "manifest", "scenario_count",
+    "arbitration", "interaction", "out_root", "manifest", "scenario_count",
     "retries_per_unit", "expected_run_count")
 
 
@@ -705,6 +918,15 @@ def lint_experiment_config(config_path: str, registry_path: str,
     if cfg["temperature"] != design.get("temperature"):
         issues.append(f"{where}: temperature {cfg['temperature']} != frozen "
                       f"{design.get('temperature')}")
+    # b-001 finding 2: the arbitration rule is part of the frozen regime. When
+    # the design declares it (every live pre-registration from M8 on does —
+    # _lint_frozen_policy requires it), the config must realize it EXACTLY: a
+    # valid alternate rule is a different regime, not a variation.
+    if "arbitration" in design and cfg["arbitration"] != design["arbitration"]:
+        issues.append(f"{where}: arbitration {cfg['arbitration']!r} != frozen "
+                      f"arbitration {design['arbitration']!r} — a different "
+                      "arbitration rule is a NEW regime, never a variation "
+                      "of the pre-registered one")
     # b1 froze explicit scenario_seeds; b2/b3 leave variant-covering seeds to
     # the operational config, so we only pin them when the design did
     if "scenario_seeds" in design and cfg["seeds"] != design["scenario_seeds"]:
@@ -763,6 +985,59 @@ def lint_experiment_config(config_path: str, registry_path: str,
     for m in cfg["models"]:
         if m not in cfg["model_digests"]:
             issues.append(f"{where}: model {m!r} missing from model_digests")
+
+    # b-001 finding 1: when the frozen design pins full digests, the config's
+    # model_digests mapping must equal it EXACTLY — every planned model
+    # present, every digest a full immutable 64-hex value, byte-identical to
+    # the frozen pin, and no extra mappings. The @prefix check above only
+    # constrains models frozen as 'tag@prefix'; a design that freezes the
+    # full digest separately (planned_design.model_digests) is bound here, so
+    # a same-tag full-digest substitution refuses BEFORE the driver runs.
+    frozen_digests = design.get("model_digests")
+    if isinstance(frozen_digests, dict) and frozen_digests:
+        cfg_digests = cfg["model_digests"]
+        missing_d = sorted(set(frozen_digests) - set(cfg_digests))
+        extra_d = sorted(set(cfg_digests) - set(frozen_digests))
+        if missing_d:
+            issues.append(f"{where}: model_digests missing frozen models "
+                          f"{missing_d} — every planned model's digest must "
+                          "be realized")
+        if extra_d:
+            issues.append(f"{where}: model_digests carries extra models "
+                          f"{extra_d} absent from the frozen design")
+        for m, want in frozen_digests.items():
+            got = cfg_digests.get(m)
+            if got is None:
+                continue     # missing_d already refused it
+            if not _is_full_digest(got):
+                issues.append(f"{where}: model_digests[{m!r}] "
+                              f"{str(got)[:20]!r} is not a full immutable "
+                              "64-hex digest")
+            if str(got).replace("sha256:", "") != \
+                    str(want).replace("sha256:", ""):
+                issues.append(f"{where}: model_digests[{m!r}] "
+                              f"{str(got)[:20]}… != frozen digest "
+                              f"{str(want)[:20]}… — a same-tag digest "
+                              "substitution is a NEW regime and is refused "
+                              "before the driver runs")
+
+    # b-001 finding 3: the config side of the audited frozen numeric profile.
+    # A config that mirrors a mutated+rehashed registry passes every pairwise
+    # equality above, so the profile anchored in audited code must refuse it
+    # here independently of any hash comparison.
+    issues.extend(_profile_issues(cfg["experiment_id"], where,
+                                  _config_profile_view(cfg)))
+    if cfg["experiment_id"] in FROZEN_NUMERIC_PROFILES:
+        issues.extend(_profile_issues(cfg["experiment_id"],
+                                      f"{where} (registry)", design))
+        # the prereg requires interleaved execution; the driver refuses a
+        # config that leaves execution_order unset, and the gate refuses one
+        # that sets it to anything the frozen design forbids.
+        if cfg.get("execution_order") != "interleaved":
+            issues.append(f"{where}: execution_order "
+                          f"{cfg.get('execution_order')!r} != 'interleaved' "
+                          "— blocked execution perfectly confounds condition "
+                          "with backend state drift across the pack")
 
     # no duplicated grid dimension: run_sweep iterates the RAW lists, so a
     # duplicate would launch unplanned cells the declared count never counted

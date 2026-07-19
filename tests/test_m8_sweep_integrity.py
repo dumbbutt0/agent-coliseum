@@ -21,7 +21,9 @@ import coliseum.textlab.sweep as sweep_mod
 from coliseum.textlab.agents import MockLLMAgent, make_agent as real_make_agent
 from coliseum.textlab.sweep import (FAILURE_KINDS, REQUIRED_ROW_FIELDS,
                                     SweepAborted, SweepResult, SweepUnbalanced,
-                                    cell_order, classify_failure, run_sweep)
+                                    _file_sha256, cell_order, classify_failure,
+                                    run_sweep, surviving_counts_from_result,
+                                    verify_pack_replay)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = "steward_obedient"
@@ -402,3 +404,116 @@ def test_resume_is_unchanged_and_counted_per_condition(tmp_path, monkeypatch):
     assert second.resumed[key] == 2 and second.surviving[key] == 2
     assert second.attempted[key] == 0
     assert second.check_condition_balance(0) is None
+
+
+# ------------------------- audit c-001 finding 0 (generator side): attestation
+
+import hashlib
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _real_pack(tmp_path, monkeypatch, name="runs"):
+    """A real (fixture-backed, offline) 1-model x 1-scenario x 2-seed pack with
+    genuine run dirs, captures, and a validated manifest."""
+    _install_offline_ollama(monkeypatch)
+    spec = _spec(tmp_path, seeds=(42, 1), name=name)
+    result = run_sweep(spec)
+    assert result.rows_written == 2 and result.errors == []
+    return spec, result
+
+
+def test_verify_pack_replay_writes_bound_attestation(tmp_path, monkeypatch):
+    """The receipt the frozen analysis path authenticates: EXACTLY the
+    director-defined shape, hashes of the exact evidence bytes."""
+    spec, _ = _real_pack(tmp_path, monkeypatch)
+    att = verify_pack_replay(spec["manifest"], spec["out_root"],
+                             spec["config_dir"])
+    path = os.path.join(spec["out_root"], "replay_attestation.json")
+    assert os.path.exists(path)
+    on_disk = json.load(open(path, encoding="utf-8"))
+    assert on_disk == att
+    # top-level shape is exact — no extra keys, no missing keys
+    assert set(att) == {"attestation_version", "verified_utc",
+                        "manifest_sha256", "runs"}
+    assert att["attestation_version"] == "1"
+    assert att["manifest_sha256"] == hashlib.sha256(
+        open(spec["manifest"], "rb").read()).hexdigest()
+    rows = [json.loads(l) for l in open(spec["manifest"], encoding="utf-8")]
+    assert set(att["runs"]) == {r["run_id"] for r in rows}
+    for row in rows:
+        rec = att["runs"][row["run_id"]]
+        assert set(rec) == {"run_dir", "replay_ok", "run_json_sha256",
+                            "decisions_sha256", "captures_sha256"}
+        assert rec["run_dir"] == row["dir"]
+        assert rec["replay_ok"] is True
+        run_dir = os.path.join(spec["out_root"], row["dir"])
+        for field, fname in (("run_json_sha256", "run.json"),
+                             ("decisions_sha256", "decisions.jsonl"),
+                             ("captures_sha256", "captures.jsonl")):
+            assert rec[field] == hashlib.sha256(
+                open(os.path.join(run_dir, fname), "rb").read()).hexdigest()
+
+
+def test_verify_pack_replay_fails_closed_and_leaves_no_receipt(
+        tmp_path, monkeypatch):
+    """The audited failure mode: a pack whose captures cannot replay must
+    RAISE and leave NO attestation — including removing a stale receipt from
+    an earlier pass, so a failure can never sit next to a valid-looking one."""
+    spec, _ = _real_pack(tmp_path, monkeypatch)
+    att_path = os.path.join(spec["out_root"], "replay_attestation.json")
+    verify_pack_replay(spec["manifest"], spec["out_root"], spec["config_dir"])
+    assert os.path.exists(att_path)                     # stale receipt planted
+    rows = [json.loads(l) for l in open(spec["manifest"], encoding="utf-8")]
+    victim = os.path.join(spec["out_root"], rows[1]["dir"], "captures.jsonl")
+    os.remove(victim)                                   # the auditor's fixture: no captures
+    with pytest.raises(Exception):
+        verify_pack_replay(spec["manifest"], spec["out_root"],
+                           spec["config_dir"])
+    assert not os.path.exists(att_path), \
+        "a failing pack kept a valid-looking attestation"
+    assert not os.path.exists(att_path + ".tmp")
+
+
+def test_verify_pack_replay_refuses_missing_or_empty_manifest(tmp_path):
+    with pytest.raises(SweepAborted, match="no manifest"):
+        verify_pack_replay(str(tmp_path / "absent.jsonl"), str(tmp_path),
+                           os.path.join(ROOT, "configs", "scenarios"))
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    with pytest.raises(SweepAborted, match="no rows"):
+        verify_pack_replay(str(empty), str(tmp_path),
+                           os.path.join(ROOT, "configs", "scenarios"))
+
+
+def test_file_sha256_absent_captures_hash_as_empty_file(tmp_path):
+    """Scripted runs write no captures.jsonl; the attestation records the
+    empty-file hash for them by contract."""
+    assert _file_sha256(str(tmp_path / "nope.jsonl"),
+                        absent_as_empty=True) == EMPTY_SHA256
+    with pytest.raises(FileNotFoundError):
+        _file_sha256(str(tmp_path / "nope.jsonl"))      # default stays strict
+    p = tmp_path / "some.jsonl"
+    p.write_bytes(b"line\n")
+    assert _file_sha256(str(p)) == hashlib.sha256(b"line\n").hexdigest()
+    assert _file_sha256(str(p), absent_as_empty=True) == \
+        hashlib.sha256(b"line\n").hexdigest()
+
+
+# --------------------- per-condition surviving counts, the coordinated shape
+
+def test_surviving_counts_from_result_plain_dict():
+    r = _result_with({"scramble_dev": 48, "scramble_perm": 46,
+                      "scramble_sham": 47})
+    assert surviving_counts_from_result(r) == \
+        {"scramble_dev": 48, "scramble_perm": 46, "scramble_sham": 47}
+
+
+def test_surviving_counts_never_pool_two_models():
+    r = SweepResult()
+    for model in ("a", "b"):
+        for scenario in CONDITIONS:
+            key = r._condition((model, scenario))
+            r.surviving[key] = 4
+    with pytest.raises(SweepAborted, match="never be pooled"):
+        surviving_counts_from_result(r)

@@ -540,15 +540,33 @@ class LLMAgent(AgentInterface):
         self.sampler_seed = sampler_seed
 
     def verify_seeded_sampling(self) -> bool:
-        """Scoped probe: 'seeded sampling verified for THIS backend/model/config' —
-        never universal proof (owner amendment 3). Mock/abstract backends are
-        trivially deterministic, hence trivially verified."""
-        self.backend_seed_supported = True
+        """FAIL-CLOSED default (M8 Phase-2 audit c-001, finding 1). The base class
+        has no falsifiable two-arm evidence to offer, so it must never record
+        itself verified: the previous implementation stamped 'verified'
+        unconditionally, which meant any subclass that ignores `options.seed`
+        (MockLLMAgent included) inherited backend_seed_supported=True with zero
+        arm evidence — anonymous randomness wearing identified-replicate labels,
+        exactly what the probe exists to prevent.
+
+        Every backend eligible for stochastic admission must OVERRIDE this with
+        recorded same-seed AND different-seed arms (see OllamaAgent and
+        MockLLMAgent). Anything else stays backend_seed_unverified: the runner
+        then emits the machine-readable exclusion reason and the run can never
+        enter stochastic admission. Being deterministic is not seeded-sampling
+        evidence — a deterministic fixture that ignores the seed cannot support
+        seeded replication and must not be represented as if it could."""
+        arms = [_probe_arm("same_seed_reproducibility", [], [], "identical", "not_run"),
+                _probe_arm("different_seed_divergence", [], [], "different", "not_run")]
+        self.backend_seed_supported = False
         self.seed_probe = {"backend_name": self.backend, "backend_version": "n/a",
                            "model_digest": self.model_digest,
-                           "seed_probe_prompt_hash": "", "seed_probe_result": "verified",
-                           "seed_probe_timestamp": ""}
-        return True
+                           "seed_probe_prompt_hash": "",
+                           "seed_probe_arms": arms,
+                           "seed_probe_scope": "this backend/model/sampling config only",
+                           "seed_probe_result": "failed",
+                           "seed_probe_timestamp": time.strftime(
+                               "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return False
 
     # -- backend contract ----------------------------------------------------
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
@@ -646,6 +664,16 @@ class MockLLMAgent(LLMAgent):
     Fixture format (tests/fixtures/llm/<name>.json):
       {"responses": {"<dp_id>/reflex": "<raw text>", "<dp_id>/plan": "...",
                      "default": "<raw text>"}}
+
+    Seed sensitivity is FIXTURE-DECLARED DATA, never synthesized by code
+    (audit c-001, finding 1): a fixture may key responses
+    "<dp_id>/<pass>@seed<k>" (scenario calls) and "seed_probe@seed<k>" /
+    "seed_probe" (probe calls), each falling back to the un-keyed lookup when
+    absent. Existing fixtures carry no seed keys, so every lookup falls
+    through to the exact pre-change key — capture bytes are unchanged. A
+    fixture whose responses genuinely ignore the seed therefore FAILS the
+    different-seed probe arm honestly and is excluded from stochastic
+    admission, instead of code inventing divergence the fixture never had.
     """
 
     backend = "mock"
@@ -666,7 +694,13 @@ class MockLLMAgent(LLMAgent):
 
     def _generate(self, prompt: str, budget: dict) -> tuple[str, float]:
         key = f"{self._current_key}"
-        raw = self._responses.get(key, self._responses.get("default", ""))
+        raw = None
+        if self.sampler_seed is not None:
+            # optional fixture-declared seed sensitivity; absent keys fall
+            # through to the exact pre-change lookup (byte-identical captures)
+            raw = self._responses.get(f"{key}@seed{self.sampler_seed}")
+        if raw is None:
+            raw = self._responses.get(key, self._responses.get("default", ""))
         # payload mirror so the stochastic path is testable offline: what an HTTP
         # backend WOULD have been sent (temperature/decoding/seed)
         opts = {"temperature": self.sampling.get("temperature", 0),
@@ -683,6 +717,65 @@ class MockLLMAgent(LLMAgent):
         # mock keys on dp_id/pass (no call counter) so fixtures stay readable
         self._current_key = f"{state.get('dp_id', '')}/{'plan' if deliberate else 'reflex'}"
         return super()._pass(state, actions, deliberate)
+
+    def _probe_response(self, seed) -> str:
+        """Probe-arm text for one seed, resolved DIRECTLY from fixture data —
+        never through _pass/_generate, so a probe call can neither append to
+        self.captures nor collide with a scenario key. Lookup order:
+        "seed_probe@seed<k>" -> "seed_probe" -> "default"."""
+        return self._responses.get(
+            f"seed_probe@seed{seed}",
+            self._responses.get("seed_probe", self._responses.get("default", "")))
+
+    def verify_seeded_sampling(self) -> bool:
+        """HONEST two-arm probe for the mock backend (audit c-001, finding 1):
+        the same recorded, falsifiable arm structure as OllamaAgent, driven by
+        fixture-declared seed sensitivity (see the class docstring).
+
+          same_seed_reproducibility — the same seed twice must be byte-equal
+          (the mock's deterministic lookup genuinely reproduces, so this arm
+          records real reproducibility, not a stipulation);
+          different_seed_divergence — a different seed must produce different
+          text, which only a fixture that actually keys on the seed can do.
+
+        A fixture whose output ignores the seed FAILS the divergence arm and is
+        excluded from stochastic admission — the correct verdict, since it
+        cannot support seeded replication. Probe calls never touch captures:
+        scenario capture bytes for existing fixtures are unchanged."""
+        seed = self.sampler_seed
+        arms: list = []
+        if seed is None:
+            arms.append(_probe_arm("same_seed_reproducibility", [], [],
+                                   "identical", "not_run"))
+            arms.append(_probe_arm("different_seed_divergence", [], [],
+                                   "different", "not_run"))
+        else:
+            a = self._probe_response(seed)
+            b = self._probe_response(seed)
+            arms.append(_probe_arm("same_seed_reproducibility", [seed, seed],
+                                   [config_hash(a), config_hash(b)], "identical",
+                                   "pass" if a == b else "fail"))
+            if self.sampling.get("mode") != "stochastic":
+                arms.append(_probe_arm("different_seed_divergence", [], [],
+                                       "different", "not_applicable"))
+            else:
+                alt_seed = seed + SEED_PROBE_ALT_SEED_OFFSET
+                c = self._probe_response(alt_seed)
+                arms.append(_probe_arm("different_seed_divergence", [seed, alt_seed],
+                                       [config_hash(a), config_hash(c)], "different",
+                                       "pass" if c != a else "fail"))
+        verified = seed is not None and all(
+            arm["outcome"] in ("pass", "not_applicable") for arm in arms)
+        self.backend_seed_supported = verified
+        self.seed_probe = {"backend_name": self.backend, "backend_version": "n/a",
+                           "model_digest": self.model_digest,
+                           "seed_probe_prompt_hash": config_hash(SEED_PROBE_PROMPT),
+                           "seed_probe_arms": arms,
+                           "seed_probe_scope": "this backend/model/sampling config only",
+                           "seed_probe_result": "verified" if verified else "failed",
+                           "seed_probe_timestamp": time.strftime(
+                               "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return verified
 
 
 class OllamaAgent(LLMAgent):

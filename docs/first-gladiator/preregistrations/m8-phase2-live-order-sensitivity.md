@@ -26,14 +26,34 @@ otherwise matched experience set moves a terminal action distribution.
 
 ## Hypothesis (primary, pre-registered — null first)
 
-**H0:** `P(Y | A) = P(Y | B)`
+**Operative H0 (sharp / unit-level):** for every matched effective unit
+`(variant_id, scenario_seed, sampler_seed)`, the presentation order of the
+experience set made no difference to the terminal action chosen at that unit.
 
-**H1:** `P(Y | A) ≠ P(Y | B)`
+**H1:** the negation — for at least some units, presentation order changed the
+terminal action.
 
-where `Y` is the terminal `final_action` at the `d_partner` probe, `A` is the
-developmental order, `B` is the identical admitted experience multiset in a
-permuted order, and `C` is the sham control (A's order; agent-facing wording and
-formatting only).
+`Y` is the terminal `final_action` at the **`d_partner`** probe (frozen terminal
+probe identity; nothing else may be measured); `A` is the developmental order,
+`B` the identical admitted experience multiset in a permuted order, `C` the sham
+control (A's order; agent-facing wording and formatting only).
+
+**Why the sharp null is operative, on whose authority, and what was corrected
+(audit 001828 finding 1).** The paired permutation test is exact under the sharp
+null, not under marginal equality `P(Y|A) = P(Y|B)`. These are not equivalent,
+and the audit exhibited the separating case: a pack-level shared latent mode
+(mode 0: every unit chooses `share_resource` under A and `decline_partnership`
+under B; mode 1 the reverse) has exactly equal marginals yet every single unit
+is order-dependent — the sharp null is genuinely false, the marginal null true.
+The test correctly rejects there, so a rejection licenses only the **unit-level**
+conclusion, never "the marginal distribution changed." An earlier registry note
+claiming exchangeability is "implied by H0" was **false** and is removed. The
+owner's Live Ollama directive (Step 7) explicitly directs: *"Use the operative
+sharp null already adopted by the design"* and requires the report to state the
+relationship between the sharp null and the broader marginal claim — that is the
+authority for narrowing the hypothesis and claim ceiling to the sharp null. The
+claim ceiling below is narrowed to match; the marginal claim would require
+additional dependence/sampling assumptions this design does not make.
 
 No stronger alternative is authorized at this stage.
 
@@ -303,16 +323,46 @@ candidate to return a clean null from wholly unparseable output. Naming it here
 would freeze the exact unsafe path this design exists to avoid.
 
 Let `q_AB` and `q_AC` be the `1 − alpha` quantiles of the paired permutation
-nulls for A vs B and A vs C. The rule is evaluated in this order:
+nulls for A vs B and A vs C. The rule (`ORDER_REPORT_VERSION 4`) is evaluated in
+this order, and **no distance, quantile, or verdict may be computed or emitted
+once any admission clause refuses**:
 
-1. If the admissibility policy refuses, or effective n falls below the floor, or
-   per-condition surviving counts differ by more than `max_surviving_delta`:
+0. **Evidence admission (all mandatory, refusal is typed):**
+   - every candidate run must carry a successful **provider-free replay**
+     attestation bound to that exact run identity — `reportable` /
+     `stochastic_reportable` booleans alone are never sufficient (audit 001832
+     finding 1);
+   - the measured node of every included run must be the frozen terminal probe
+     — `dp_id == d_partner`, point kind decision, exactly one such admissible
+     record; missing, duplicate, out-of-order, or exposure-kind terminal
+     evidence refuses with `missing_terminal_probe` — the terminal is **never**
+     inferred from list position (audit 001834 finding 3);
+   - both comparisons must realize the **full frozen matched-unit grid**:
+     `matched_units == 48` for A|B and A|C; any unit-identity mismatch refuses
+     — unmatched units are never silently held fixed (audit 001834 finding 2);
+   - `max_surviving_delta` is a **required** threshold, loaded from the frozen
+     registry bundle and enforced here before any statistic: per-condition
+     surviving counts spreading beyond it refuse (audit 001834 finding 1).
+1. If the admissibility policy refuses, or effective n falls below the floor:
    **inconclusive**.
-2. Else if the observed `TV(A,C)` **exceeds** `q_AC`: **inconclusive** — the sham
-   is not null, which voids any order claim.
-3. Else if the observed `TV(A,B)` **exceeds** `q_AB`: **order effect observed**.
-4. Else if `q_AB ≤ min_detectable_effect`: **no order effect observed**.
+2. **Sham-control adequacy** (audit 001828 finding 2 — a sham *non-rejection*
+   needs a warrant exactly as a null claim does): the order claim requires
+   **both** `TV(A,C) ≤ q_AC` (no rejection) **and** `q_AC < sham_equivalence_margin`
+   (strict — the sham comparison could actually have detected contamination of
+   the margin size). If `TV(A,C) > q_AC`: **inconclusive** — the sham is not
+   null, which voids any order claim. If `q_AC ≥ sham_equivalence_margin`: the
+   sham warrant is missing; a positive verdict is unreachable and the outcome is
+   at most **inconclusive** past clause 3.
+3. Else if the observed `TV(A,B)` **exceeds** `q_AB` **and** the sham warrant of
+   clause 2 holds: **order effect observed**.
+4. Else if `TV(A,B) ≤ q_AB` and `q_AB ≤ min_detectable_effect`: **no order
+   effect observed**.
 5. Else: **inconclusive**.
+
+**`sham_equivalence_margin = 0.25`** (equal to `min_detectable_effect`), frozen
+in `planned_design.thresholds` and covered by `design_hash`. The audit's pinned
+boundary case — `TV(A,C) = q_AC = 0.25` with decisive A/B separation — is
+**inconclusive** under the strict inequality, never a positive.
 
 ### The sensitivity requirement is asymmetric, and deliberately so
 
@@ -381,10 +431,21 @@ exists and is covered by `design_hash`.
 
 The false-positive rate under H0 and the power at the `min_detectable_effect`
 boundary must be characterised by simulation at the frozen `n = 48` units per
-condition, using the frozen bootstrap parameters, and committed with the
-candidate. A design whose simulated false-positive rate materially exceeds
-`1 - confidence`, or whose power at the boundary is negligible, is not fit to run
-and must be corrected **before** execution rather than reinterpreted after.
+condition **using the exact frozen decision parameters — including
+`permutation_iterations = 10000` and `bootstrap_iterations = 10000`, never
+substituted smaller values — with enough outer trials to bound the type-I
+criterion and with confidence intervals reported, not point estimates** (audit
+001828 finding 3). The null families characterised must include **dependent
+processes satisfying only the sharp null's negation-space honestly** — in
+particular the pack-level shared-latent two-mode process from audit 001828
+finding 1, which must not emit `order_effect_observed` above the frozen type-I
+bound *when the sharp null is true within each mode*, and whose behavior under
+sharp-null violation must be reported for what it is. The characterisation is
+committed as an artifact produced by the same frozen threshold bundle the
+production path loads; a CI regression asserts that binding. A design whose
+simulated false-positive rate materially exceeds `1 - confidence`, or whose
+power at the boundary is negligible, is not fit to run and must be corrected
+**before** execution rather than reinterpreted after.
 
 Phase 1's exact thresholds (ε = τ = 0) are **not** carried over. Zero thresholds
 are coherent only for a deterministic decider whose terminal action is a
@@ -412,10 +473,15 @@ it defeat (5). Those require the separately preregistered follow-ups named below
 
 ## What may NOT be claimed
 
-**Maximum positive claim:**
+**Maximum positive claim** *(narrowed to the sharp null per audit 001828
+finding 1 and the owner directive's Step-7 authority; a rejection licenses the
+unit-level conclusion only)*:
 
-> Under the frozen live-model regime, the temporal ordering of an otherwise
-> matched experience set changed the measured terminal-action distribution.
+> Under the frozen live-model regime, the terminal actions of matched units were
+> order-dependent: the paired exact test rejected the sharp null that
+> presentation order made no difference to any unit's chosen terminal action.
+> This does not establish that the marginal terminal-action distributions
+> differ, which would require dependence assumptions this design does not make.
 
 **Maximum null claim:**
 
