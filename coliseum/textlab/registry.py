@@ -68,12 +68,93 @@ ADMISSIBILITY_POLICY_KEYS = (
     "policy_version", "admissibility_version", "max_non_decision_rate",
     "max_non_decision_rate_delta", "min_admissible_effective_n",
     "on_violation")
-THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence")
+THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
+                  "min_detectable_effect")
+# M8 audit repair R4: the null model is a PAIRED PERMUTATION null, so its
+# parameters must be frozen inside planned_design exactly like the bootstrap
+# parameters were. A design that omits them cannot state a decision quantile at
+# all, so absence is a lint failure rather than a runtime default.
+PERMUTATION_THRESHOLD_KEYS = ("permutation_iterations", "permutation_seed",
+                              "alpha")
 _RATE_KEYS = ("max_non_decision_rate", "max_non_decision_rate_delta")
 
 # experiments whose frozen design MUST carry a policy + thresholds + a
 # noise-floor split (a stochastic live design cannot be analysed without them)
 POLICY_REQUIRED_EXPERIMENTS = ("m8-phase2-live-order-sensitivity",)
+
+# --------------------------------------------------- frozen ANALYSIS IDENTITY
+#
+# A design_hash that does not cover *which analysis runs* freezes nothing that
+# matters: the same run set yields different verdicts under different callables.
+# The Phase-2 successor is `metrics.order_sensitivity_report`; the Phase-1
+# comparator `metrics.scramble_terminal_distribution` admits parse fallbacks as
+# decisions and can return a clean null from wholly unparseable output, so a
+# design naming it must FAIL rather than load quietly.
+#
+# The ban is a literal symbol ban on primary_event, not an attempt to read an
+# English negation ("computed by X" vs "X is not the path" are the same
+# substring). The prose exclusion therefore lives in planned_design.notes —
+# equally covered by design_hash — and primary_event names only the successor.
+#
+# Why amending a frozen-looking design is legitimate here: at the time of this
+# repair no outcome exists, no live run has occurred and no model has been
+# contacted. The anti-rigging prohibition is on moving thresholds AFTER seeing
+# outcomes; this is the audit repair loop operating on an unfrozen candidate.
+# Nothing is weakened — two bounds are ADDED and the analysis path is narrowed
+# to the safer one.
+#
+# SECOND repair (R4), also pre-execution: the split-half noise floor that the
+# original decision rule compared against was found INERT by the design's own
+# required characterisation — TV_null between two 24-unit halves carries about
+# twice the small-sample inflation of TV(A,B) on 48-vs-48, putting the floor
+# near 0.49 against a 0.25 ceiling, so the simulated false-positive rate AND the
+# power were both 0.000. The null is now a PAIRED PERMUTATION null and the
+# decision rule compares observed distances against its 1-alpha quantile. Since
+# a superseded rule left in place would still hash and still load, the lint bans
+# the old bootstrap-bound-comparison phrasing outright.
+ANALYSIS_CALLABLE_REQUIRED = "order_sensitivity_report"
+ANALYSIS_CALLABLE_FORBIDDEN = "scramble_terminal_distribution"
+
+# literal markers of the SUPERSEDED bootstrap-bound-comparison rule (matched
+# case-insensitively against primary_event). Prose, like the symbol ban above,
+# rather than an attempt to parse an English negation.
+SUPERSEDED_RULE_MARKERS = ("lower bound of tv(a,b)", "upper bound of tv_null")
+# literal markers the PERMUTATION rule must carry
+PERMUTATION_RULE_MARKERS = ("permutation", "q_AB")
+
+# THIRD repair (R6), also pre-execution: the sensitivity requirement
+# `q_AB <= min_detectable_effect` was specified as a precondition gating BOTH
+# branches of the decision rule — carried over from the superseded split-half
+# null without re-derivation. Under a paired permutation null that is wrong:
+# `q_AB` IS the rejection threshold, so an observed distance exceeding it has
+# rejected H0 at `alpha`, and that is a valid positive whether or not a smaller
+# effect would also have been resolvable. Sensitivity constrains only what may
+# be concluded from a NON-rejection. Implemented symmetrically the rule was
+# perverse — total separation at TV(A,B)=1.0 against q_AB=0.2917 reported
+# `inconclusive` solely because 0.2917 > 0.25, discarding a decisive rejection.
+#
+# The analysis callable therefore bumps to ORDER_REPORT_VERSION 3: the rule
+# changed again, and a verdict must stay traceable to the rule that produced it.
+# The version is pinned literally in primary_event so a report emitted by an
+# older callable cannot be passed off as conforming to this design.
+ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 3"
+
+# literal markers of the SUPERSEDED SYMMETRIC sensitivity precondition (matched
+# case-insensitively against primary_event). Each phrase asserts the requirement
+# gates the whole rule or the POSITIVE branch, which is exactly the defect.
+SYMMETRIC_SENSITIVITY_MARKERS = (
+    "sensitivity precondition (evaluated first)",
+    "inconclusive whatever else holds",
+    "order effect observed iff the sensitivity precondition holds",
+    "the sensitivity precondition holds and",
+)
+# literal markers the CORRECTED asymmetric rule must carry: the requirement must
+# be stated as attaching to the null branch alone and as never overturning a
+# rejection. Matched case-sensitively, like the callable name.
+ASYMMETRIC_SENSITIVITY_MARKERS = (
+    "attaches ONLY to the null branch",
+    "never invalidates a rejection",
+)
 
 
 def _find_entry(registry_path: str, experiment_id: str) -> dict:
@@ -115,14 +196,28 @@ def load_thresholds(registry_path: str, experiment_id: str) -> dict:
 
     Composition note (Director assembly, M8): the bundle is assembled from two
     places in planned_design, deliberately. `thresholds` holds the inferential
-    parameters (bootstrap iterations/seed/confidence); `noise_floor_split` sits
-    at planned_design top level because it is a property of the SAMPLING design
-    — it partitions the declared sampler_seeds — and belongs beside them rather
-    than inside a block about bootstrapping. The analysis needs both to evaluate
-    the decision rule, so the loader returns them joined. Both live under
-    planned_design and are therefore equally covered by design_hash, so neither
-    can be moved after seeing outcomes; the split is a presentation choice,
-    never a difference in what is frozen.
+    parameters — the paired-permutation null that DECIDES
+    (`permutation_iterations`, `permutation_seed`, `alpha`), the bootstrap that
+    only REPORTS intervals (`bootstrap_iterations`, `bootstrap_seed`,
+    `confidence`), and the resolving power `min_detectable_effect`;
+    `noise_floor_split` sits at planned_design top
+    level because it is a property of the SAMPLING design — it partitions the
+    declared sampler_seeds — and belongs beside them rather than inside a block
+    about bootstrapping. It is RETAINED and still frozen after the R4 repair,
+    but purely as a reported DIAGNOSTIC of within-condition stability: it gates
+    no verdict. `max_surviving_delta` likewise sits at top level: it
+    bounds differential provider DROPOUT across conditions, which is a property
+    of execution, not of the bootstrap. The analysis needs all of them to
+    evaluate the decision rule, so the loader returns them joined. All live
+    under planned_design and are therefore equally covered by design_hash, so
+    none can be moved after seeing outcomes; the split across sections is a
+    presentation choice, never a difference in what is frozen.
+
+    Every bound the execution and report path needs comes out of THIS one call
+    (M8 audit repair R1c). `sweep.run_sweep` defaults `max_surviving_delta` to
+    None and SKIPS the balance gate when it is None, so a bound that is merely
+    documented is a guard nobody is obliged to call; carrying it in the same
+    bundle removes the caller's opportunity to omit it.
     """
     pd = _frozen_design(registry_path, experiment_id)
     th = pd.get("thresholds")
@@ -133,6 +228,9 @@ def load_thresholds(registry_path: str, experiment_id: str) -> dict:
     split = pd.get("noise_floor_split")
     if split is not None:
         bundle["noise_floor_split"] = split
+    delta = pd.get("max_surviving_delta")
+    if delta is not None:
+        bundle["max_surviving_delta"] = delta
     return bundle
 
 
@@ -191,6 +289,131 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                 or not (0 < cf < 1)):
             issues.append(f"{eid}: thresholds confidence {cf!r} must be in "
                           "(0, 1)")
+        # resolving power: the smallest effect the design claims to detect, and
+        # equally the tightest null it is entitled to assert. It gates BOTH
+        # branches of the decision rule (a noise floor at or above it makes the
+        # pack inconclusive), so a design without it has no sensitivity gate.
+        mde = th.get("min_detectable_effect")
+        if "min_detectable_effect" in th and (
+                isinstance(mde, bool) or not isinstance(mde, (int, float))
+                or not (0 < mde <= 1)):
+            issues.append(f"{eid}: thresholds min_detectable_effect {mde!r} "
+                          "must be a float in (0, 1] — a total-variation "
+                          "distance is bounded by 1 and a zero floor claims "
+                          "infinite resolving power")
+
+        # R4: paired-permutation null parameters. The decision quantile is the
+        # 1-alpha percentile of a permutation null drawn under a declared seed
+        # for a declared number of iterations; a design missing any of the three
+        # cannot state its own rejection threshold and must not load quietly.
+        for k in PERMUTATION_THRESHOLD_KEYS:
+            if k not in th:
+                issues.append(f"{eid}: thresholds missing {k!r} (the paired "
+                              "permutation null replaced the split-half noise "
+                              "floor; its parameters must be frozen before any "
+                              "outcome is seen)")
+        pit = th.get("permutation_iterations")
+        if "permutation_iterations" in th and (
+                isinstance(pit, bool) or not isinstance(pit, int) or pit <= 0):
+            issues.append(f"{eid}: thresholds permutation_iterations {pit!r} "
+                          "must be a positive int")
+        ps = th.get("permutation_seed")
+        if "permutation_seed" in th and (
+                isinstance(ps, bool) or not isinstance(ps, int)):
+            issues.append(f"{eid}: thresholds permutation_seed {ps!r} must be "
+                          "an int")
+        al = th.get("alpha")
+        if "alpha" in th and (
+                isinstance(al, bool) or not isinstance(al, (int, float))
+                or not (0 < al < 0.5)):
+            issues.append(f"{eid}: thresholds alpha {al!r} must be a float in "
+                          "(0, 0.5) — a decision quantile at or above the "
+                          "median is not a test")
+
+    # differential provider dropout is observationally identical to an order
+    # effect (the survivors in the affected condition are a biased subsample),
+    # and sweep.run_sweep SKIPS the balance gate when this bound is absent. An
+    # unbounded design could therefore complete a condition-imbalanced pack
+    # without the guard ever running, so absence is a lint failure, not a
+    # default.
+    if "max_surviving_delta" not in pd:
+        issues.append(f"{eid}: planned_design missing 'max_surviving_delta' "
+                      "(differential dropout must be bounded before execution; "
+                      "sweep.run_sweep skips the balance gate when the bound "
+                      "is absent, so an unfrozen bound is no bound at all)")
+    else:
+        msd = pd["max_surviving_delta"]
+        if isinstance(msd, bool) or not isinstance(msd, int) or msd < 0:
+            issues.append(f"{eid}: max_surviving_delta {msd!r} must be a "
+                          "non-negative int (an absolute spread between "
+                          "per-condition surviving counts)")
+
+    # frozen analysis identity: design_hash must cover WHICH analysis runs.
+    pe = pd.get("primary_event")
+    if not isinstance(pe, str) or not pe.strip():
+        issues.append(f"{eid}: planned_design missing a 'primary_event' "
+                      "string (the decision rule and the analysis identity)")
+    else:
+        if ANALYSIS_CALLABLE_REQUIRED not in pe:
+            issues.append(
+                f"{eid}: primary_event does not name the frozen analysis "
+                f"callable {ANALYSIS_CALLABLE_REQUIRED!r} — a design_hash that "
+                "does not cover which analysis runs freezes nothing that "
+                "matters")
+        if ANALYSIS_CALLABLE_FORBIDDEN in pe:
+            issues.append(
+                f"{eid}: primary_event names the Phase-1 comparator "
+                f"{ANALYSIS_CALLABLE_FORBIDDEN!r} — that path admits parse "
+                "fallbacks as decisions and can return a clean null from "
+                "wholly unparseable output; it may not be the frozen Phase-2 "
+                "analysis path (state the exclusion in notes instead)")
+        # R4: the superseded bootstrap-bound-comparison rule must not survive.
+        # It hashes and loads exactly as well as the correct one, so leaving it
+        # in place would freeze an inert decision rule (measured false-positive
+        # rate 0.000 and power 0.000) behind a valid design_hash.
+        low = pe.lower()
+        for marker in SUPERSEDED_RULE_MARKERS:
+            if marker in low:
+                issues.append(
+                    f"{eid}: primary_event still expresses the SUPERSEDED "
+                    f"bootstrap-bound-comparison rule ({marker!r}) — that rule "
+                    "compared a 48-vs-48 distance against a split-half null "
+                    "carrying about twice its small-sample inflation and was "
+                    "measured inert; the frozen rule is the paired permutation "
+                    "rule")
+        for marker in PERMUTATION_RULE_MARKERS:
+            if marker not in pe:
+                issues.append(
+                    f"{eid}: primary_event does not express the frozen paired "
+                    f"permutation decision rule (missing {marker!r})")
+        # R6: the analysis callable's version must be pinned, and pinned to the
+        # CURRENT rule. A verdict emitted by an older callable implements a
+        # different decision rule and must not be able to claim this design.
+        if ANALYSIS_CALLABLE_VERSION_MARKER not in pe:
+            issues.append(
+                f"{eid}: primary_event does not pin the frozen analysis "
+                f"callable version {ANALYSIS_CALLABLE_VERSION_MARKER!r} — the "
+                "decision rule changed with the version, so a verdict must "
+                "stay traceable to the rule that produced it")
+        # R6: the SYMMETRIC sensitivity precondition must not survive. It gated
+        # the POSITIVE branch on min_detectable_effect, which under a
+        # permutation null discards decisive rejections (TV(A,B)=1.0 against
+        # q_AB=0.2917 was reported inconclusive because 0.2917 > 0.25).
+        for marker in SYMMETRIC_SENSITIVITY_MARKERS:
+            if marker in low:
+                issues.append(
+                    f"{eid}: primary_event still expresses the SUPERSEDED "
+                    f"SYMMETRIC sensitivity precondition ({marker!r}) — q_AB "
+                    "IS the rejection threshold, so exceeding it rejects H0 at "
+                    "alpha and the sensitivity requirement may gate ONLY the "
+                    "null branch, never a rejection")
+        for marker in ASYMMETRIC_SENSITIVITY_MARKERS:
+            if marker not in pe:
+                issues.append(
+                    f"{eid}: primary_event does not state the CORRECTED "
+                    "asymmetric sensitivity requirement (missing "
+                    f"{marker!r}) — a design that leaves the requirement's "
+                    "scope unstated can be read as gating both branches")
 
     # noise-floor split: TV_null = TV(A|S1, A|S2), so the split must partition
     # the DECLARED sampler seeds exactly — declared before execution and never

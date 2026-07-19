@@ -117,6 +117,101 @@ the copied evidence is gitignored and is not committed. The expected test count
 declared in each request is taken from a complete run in an environment that
 contains it.
 
+## Repair history — cycle 1 (`b39fde46` → this candidate)
+
+Coverage section A returned **`AUDIT_BLOCKED`** (event `001803`) on candidate
+`b39fde46` with three HIGH findings, all reproduced by the auditor and
+independently re-reproduced by the Director before repair. None was disputed.
+
+| Finding | Repair |
+|---|---|
+| **1.** `design_hash` froze `scramble_terminal_distribution` as the analysis path — the Phase-1 comparator this candidate itself proves manufactures nulls from unparseable output | `primary_event` re-expressed to name `metrics.order_sensitivity_report`; a literal symbol ban on the Phase-1 comparator in `primary_event`, with the named prose exclusion in `planned_design.notes` (equally design-hashed); lint fails a design naming it |
+| **2.** No frozen `max_surviving_delta`; the balance gate defaults to `None` and is skipped | `max_surviving_delta = 2` frozen in `planned_design` and joined into the single `load_thresholds` bundle; lint fails a design omitting it |
+| **3.** No sensitivity ceiling — maximal within-condition noise misclassified as a successful null | `min_detectable_effect = 0.25` frozen; a sensitivity precondition now gates **both** branches; operating characteristics simulated and committed |
+
+### What the required characterisation then found
+
+Finding 3's repair obliged a simulation of operating characteristics *before*
+execution. That simulation found a further, deeper defect that neither the
+builders nor the audit had seen:
+
+**The design as frozen was inert — false-positive rate 0.000 and power 0.000.**
+`TV_null` was estimated between A's two 24-unit halves while `TV(A,B)` was
+computed on 48 vs 48. Total variation between empirical distributions is biased
+upward at small n, so the null carried roughly **twice** the small-sample
+inflation of the statistic it calibrated — measured upper bound ≈0.49 against a
+0.25 ceiling. The gap is a property of the split, not of the evidence. Even a
+genuine `TV(A,B) = 0.6` was refused.
+
+Nothing was broken: every test passed and the rule read as principled. It would
+have consumed 144 live runs and returned "inconclusive" whatever the model did,
+and the natural reading would have been appropriate conservatism.
+
+**Correction:** the split-half null is replaced by a **paired permutation null**
+over the matched units the design already guarantees — exact under the
+exchangeability implied by H0, computed at the true sample sizes so no mismatch
+exists, and costing no additional live runs. `ORDER_REPORT_VERSION` bumps to 2
+so any verdict is traceable to the rule that produced it. `noise_floor_split`
+is retained as a reported diagnostic and explicitly stripped of authority.
+
+**The rejected alternative is recorded deliberately:** raising
+`min_detectable_effect` above the noise floor would have made the numbers work
+while admitting only enormous effects. That is the reinterpret-to-rescue move
+the preregistration forbids, and it was available and easy.
+
+### And one further correction the permutation null exposed
+
+Implementing the permutation null faithfully surfaced a third specification
+error. The sensitivity requirement had been written to gate **both** branches —
+correct for v1, where an inflated split-half floor genuinely broke both
+directions, and **wrong** once `q_AB` became the rejection threshold itself.
+Exceeding `q_AB` rejects H0 at `alpha`; that is a valid positive whether or not
+a smaller effect would also have been detectable.
+
+Implemented symmetrically it discarded decisive findings: total separation with
+`TV(A,B) = 1.0` against `q_AB = 0.2917` was reported **inconclusive**, purely
+because `0.2917 > 0.25`. The builder implemented the rule as specified, measured
+the consequence, pinned it in a test, and reported it rather than quietly
+correcting it.
+
+The rule is now an ordered five-clause form with the sensitivity requirement
+attached to the **null branch only** (clause 4). It governs what a
+*non*-rejection may assert; it never invalidates a rejection.
+
+### Measured operating characteristics across the three rule versions
+
+All at the frozen `n = 48` per condition, same seeds, same arms:
+
+| Rule | FPR under H0 | Power at `TV(A,B)=0.25` | Total separation |
+|---|---|---|---|
+| v1 split-half floor, symmetric gate | 0.000 | **0.000** | `no_order_effect_observed` |
+| v2 permutation null, symmetric gate | 0.025 / 0.000 / 0.050 | 0.600 | `inconclusive` |
+| **v3 permutation null, asymmetric gate** | 0.025 / 0.000 / 0.050 | **0.725** | `order_effect_observed` |
+
+v1 was inert — it could not detect an effect of any size. v3 leaks no additional
+false positives (identical FPR in every arm), because under H0 the packs whose
+`q_AB` exceeded the ceiling were also packs that failed to reject.
+
+**The Finding-3 invariant survives every revision.** The maximally-noisy pack is
+never reported as a successful null: under v3 clause 3 fires on a genuine
+rejection before clause 4 is reached. What changed is which clause protects it,
+and that the protection no longer costs valid rejections.
+
+### Provenance discipline
+
+Each rule change bumped `ORDER_REPORT_VERSION` (1 → 2 → 3), so every emitted
+verdict is traceable to the rule that produced it, and the registry lint fails a
+design whose version marker disagrees with its stated rule. Three separate
+`design_hash` values were issued and superseded during this repair cycle; the
+candidate carries only the final one.
+
+**All three specification errors in this cycle were the Director's, not the
+builders'.** Each came from carrying a rule across a change that invalidated its
+justification — reusing the old comparator's name in the frozen contract, reusing
+a noise-floor estimator across a sample-size change, and reusing a symmetry
+argument across a change in what the threshold meant. They are recorded here
+because a reviewer should know where this candidate's errors clustered.
+
 ## Coverage union — all five required, any BLOCKED blocks the union
 
 No section alone carries integration authority. `GO_WITH_CONDITIONS` is not plain

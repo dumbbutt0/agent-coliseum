@@ -699,7 +699,44 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
 # place would retroactively reinterpret already-audited evidence; the frozen
 # instrument therefore stays frozen and Phase 2 gets its own instrument.
 
-ORDER_REPORT_VERSION = "1"
+# ORDER_REPORT_VERSION 1 -> 2: THE DECISION RULE CHANGED.
+#
+# v1 judged observed distances against a SPLIT-HALF noise floor, TV_null =
+# TV(A|S1, A|S2) — a distance between two 24-unit halves of A compared against
+# TV(A,B), a distance between two 48-unit samples. Total variation between
+# empirical distributions is biased upward at small n, so the null carried
+# roughly TWICE the small-sample inflation of the statistic it was calibrating
+# (measured upper bound ~0.49 against min_detectable_effect = 0.25). The
+# characterisation required by the preregistration measured false-positive rate
+# 0.000 AND power 0.000 — an instrument that refuses an effect of any size is
+# inert, not conservative. The bias is a property of the split, not of the data.
+#
+# v2 replaces it with a PAIRED PERMUTATION NULL over the matched units the design
+# already guarantees. A report consumer MUST be able to tell which rule produced
+# a verdict, because the two rules can disagree on identical evidence; hence the
+# version bump. METRICS_VERSION is deliberately NOT bumped — see the block header
+# above: METRICS-v1 definitions did not move, and this artifact carries its own
+# version line.
+#
+# ORDER_REPORT_VERSION 2 -> 3: THE DECISION RULE CHANGED AGAIN.
+#
+# v2 evaluated the sensitivity precondition (q_AB <= min_detectable_effect) FIRST,
+# gating BOTH branches. That symmetry was carried over from v1's split-half floor
+# without re-derivation, and it is wrong under a permutation null. Under a
+# permutation null q_AB IS the rejection threshold: an observed TV(A,B) exceeding
+# it has rejected H0 at alpha, and that is a valid positive whether or not a
+# SMALLER effect would also have been resolvable. Sensitivity constrains what may
+# be concluded from a NON-rejection; it cannot invalidate a rejection.
+#
+# The symmetric rule produced a demonstrable perverse result, now pinned in the
+# tests: at total separation over near-two-point support, TV(A,B) = 1.0 against
+# q_AB = 0.2917 — a decisive rejection — was reported `inconclusive` solely
+# because 0.2917 > 0.25. v3 moves the sensitivity requirement to the NULL branch
+# only (clause 4), where the claim "no effect at or above min_detectable_effect"
+# actually depends on it. A verdict must be traceable to the rule that produced
+# it, and v2 and v3 disagree on identical evidence; hence the bump.
+# METRICS_VERSION again stays "1" — no METRICS-v1 definition moved.
+ORDER_REPORT_VERSION = "3"
 
 # Required keys. Both argument dicts are validated up front and fail closed:
 # an order-sensitivity statistic computed without declared bounds is exactly the
@@ -707,8 +744,20 @@ ORDER_REPORT_VERSION = "1"
 _POLICY_KEYS = ("policy_version", "admissibility_version", "max_non_decision_rate",
                 "max_non_decision_rate_delta", "min_admissible_effective_n",
                 "on_violation")
+# `alpha` and the permutation parameters are REQUIRED at v2+: they parameterise the
+# decision quantile itself. `noise_floor_split` is no longer required, because it
+# no longer gates anything (see below) — but it is still validated and honoured
+# when the frozen bundle declares it.
 _THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
-                   "noise_floor_split")
+                   "min_detectable_effect", "permutation_iterations",
+                   "permutation_seed", "alpha")
+
+# `max_surviving_delta` and `noise_floor_split` are frozen by the preregistration
+# and travel in the same bundle. This module does not evaluate the balance gate
+# (the execution/report path does), but it ACCEPTS and ECHOES every key rather
+# than silently dropping any: a declared bound that vanishes from the artifact is
+# a bound nobody can audit.
+_OPTIONAL_THRESHOLD_KEYS = ("max_surviving_delta", "noise_floor_split")
 
 # The three condition cells plus the two within-condition null half-cells. The
 # null halves ARE compared cells (TV_null compares them), so they are charged
@@ -744,21 +793,49 @@ def _order_validate(admissibility_policy: dict, thresholds: dict) -> None:
             f"on_violation={admissibility_policy['on_violation']!r} is not "
             "supported — the preregistered policy is 'refuse'; there is no "
             "'warn and report a number anyway' mode")
-    split = thresholds["noise_floor_split"]
-    if not isinstance(split, dict) or set(split) != {"S1", "S2"}:
-        raise SchemaError("thresholds.noise_floor_split must be {'S1': [...], 'S2': [...]}")
-    s1, s2 = set(split["S1"]), set(split["S2"])
-    if not s1 or not s2:
-        raise SchemaError("noise_floor_split halves must both be non-empty")
-    if s1 & s2:
-        raise SchemaError(f"noise_floor_split halves overlap on {sorted(s1 & s2, key=str)} "
-                          "— the within-condition null must compare DISJOINT samples")
-    if not isinstance(thresholds["bootstrap_iterations"], int) or \
-            thresholds["bootstrap_iterations"] < 1:
-        raise SchemaError("thresholds.bootstrap_iterations must be a positive int")
+    # DIAGNOSTIC ONLY at v2. The split-half null is still computed and reported as
+    # a within-condition STABILITY diagnostic, and it is still validated to the
+    # same standard so the diagnostic stays meaningful — but it no longer gates
+    # any verdict. A future reader must not infer that these halves still decide
+    # anything: the decision quantiles come from the paired permutation null.
+    if "noise_floor_split" in thresholds:
+        split = thresholds["noise_floor_split"]
+        if not isinstance(split, dict) or set(split) != {"S1", "S2"}:
+            raise SchemaError("thresholds.noise_floor_split must be {'S1': [...], 'S2': [...]}")
+        s1, s2 = set(split["S1"]), set(split["S2"])
+        if not s1 or not s2:
+            raise SchemaError("noise_floor_split halves must both be non-empty")
+        if s1 & s2:
+            raise SchemaError(f"noise_floor_split halves overlap on {sorted(s1 & s2, key=str)} "
+                              "— the within-condition null must compare DISJOINT samples")
+    for key in ("bootstrap_iterations", "permutation_iterations"):
+        if isinstance(thresholds[key], bool) or not isinstance(thresholds[key], int) \
+                or thresholds[key] < 1:
+            raise SchemaError(f"thresholds.{key} must be a positive int")
     conf = thresholds["confidence"]
     if not isinstance(conf, (int, float)) or not 0.0 < conf < 1.0:
         raise SchemaError("thresholds.confidence must lie strictly in (0, 1)")
+    # `alpha` sets the DECISION quantile (1 - alpha) of the permutation null. It is
+    # a separate frozen quantity from `confidence`, which sets the width of the
+    # REPORTING interval; conflating them would let a change to one silently move
+    # the other.
+    alpha = thresholds["alpha"]
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) \
+            or not 0.0 < alpha < 1.0:
+        raise SchemaError("thresholds.alpha must lie strictly in (0, 1) — it is the "
+                          "false-positive rate the decision quantile is set to")
+    # The sensitivity ceiling. A null claim is only ever entitled to the bound
+    # `min_detectable_effect`, so the statistic may not be computed without it.
+    mde = thresholds["min_detectable_effect"]
+    if isinstance(mde, bool) or not isinstance(mde, (int, float)) or not 0.0 < mde <= 1.0:
+        raise SchemaError("thresholds.min_detectable_effect must lie in (0, 1] — "
+                          "it is a total-variation distance and it is the bound "
+                          "the null claim is entitled to state")
+    if "max_surviving_delta" in thresholds:
+        msd = thresholds["max_surviving_delta"]
+        if isinstance(msd, bool) or not isinstance(msd, int) or msd < 0:
+            raise SchemaError("thresholds.max_surviving_delta must be a "
+                              "non-negative int (absolute count spread)")
 
 
 def _order_admit(run: dict, rd: str) -> list:
@@ -877,6 +954,76 @@ def _order_bootstrap(rng, unit_draws_x: list, unit_draws_y: list,
             "iterations": iterations}
 
 
+def _order_permutation_null(rng, units_x: dict, units_y: dict,
+                            iterations: int, alpha: float) -> dict:
+    """PAIRED PERMUTATION null of TV(X, Y), and the `1 - alpha` decision quantile.
+
+    This REPLACES the split-half noise floor as the calibrating null (prereg
+    §"Why the split-half noise floor was replaced"). The design guarantees matched
+    units — the same (variant_id, scenario_seed, sampler_seed) triple exists in
+    every condition — so under H0 ("condition label carries no information about
+    the terminal action") the two conditions' draws for a given unit are
+    EXCHANGEABLE. Exchanging them independently with probability ½ per matched
+    unit and recomputing TV therefore samples the exact null distribution of the
+    statistic, computed on the ACTUAL sample sizes.
+
+    Why that fixes the defect: the split-half null compared a 24-vs-24 distance
+    against a 48-vs-48 statistic, and TV between empirical distributions is biased
+    upward at small n, so the null carried about twice the inflation of the thing
+    it calibrated. Here both the null and the observed statistic are the same
+    functional of the same-sized samples, so the small-sample inflation is shared
+    and cancels out of the comparison instead of accumulating in the threshold.
+
+    Units admissible in only ONE condition cannot be exchanged (there is nothing
+    to exchange them with); they are held FIXED in their own condition across
+    every iteration, which preserves the observed cell sizes exactly.
+
+    `rng` is a caller-owned random.Random seeded from the frozen permutation seed.
+    Iteration order over units is fixed, so the quantile is byte-reproducible.
+    """
+    shared = sorted((u for u in units_x if units_x[u] and units_y.get(u)), key=repr)
+    shared_set = set(shared)
+
+    def fixed(units):
+        counts: dict = {}
+        total = 0
+        for unit, draws in units.items():
+            if unit in shared_set:
+                continue
+            for action in draws:
+                counts[action] = counts.get(action, 0) + 1
+                total += 1
+        return counts, total
+
+    fx, tx = fixed(units_x)
+    fy, ty = fixed(units_y)
+
+    reps = []
+    for _ in range(iterations):
+        cx, cy = dict(fx), dict(fy)
+        nx, ny = tx, ty
+        for unit in shared:
+            dx, dy = units_x[unit], units_y[unit]
+            if rng.random() < 0.5:
+                dx, dy = dy, dx
+            for action in dx:
+                cx[action] = cx.get(action, 0) + 1
+                nx += 1
+            for action in dy:
+                cy[action] = cy.get(action, 0) + 1
+                ny += 1
+        px = {a: c / nx for a, c in cx.items()} if nx else {}
+        py = {a: c / ny for a, c in cy.items()} if ny else {}
+        reps.append(_tv_distance(px, py))
+
+    return {"quantile": round(_order_percentile(reps, 1.0 - alpha), 6),
+            "median": round(_order_percentile(reps, 0.5), 6),
+            "max": round(max(reps), 6) if reps else 0.0,
+            "matched_units": len(shared),
+            "iterations": iterations,
+            "alpha": alpha}
+
+
 def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                              admissibility_policy: dict, thresholds: dict) -> dict:
     """Distributional order-sensitivity report for the m8 Phase-2 live experiment.
@@ -905,11 +1052,22 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
        earlier decision would be a second fabrication on top of the first.
     3. REPLICATES — many draws per effective unit (variant, scenario_seed,
        sampler_seed) are supported and aggregate into the cell distribution.
-    4. DISTANCES — TV(A,B), TV(A,C), and the within-condition null
+    4. DISTANCES — TV(A,B), TV(A,C), and (diagnostic only) the within-condition
        TV_null = TV(A|S1, A|S2) over the frozen sampler-seed partition.
-    5. UNCERTAINTY — percentile bootstrap over effective units at the frozen
-       iteration count and seed.
-    6. VERDICT — see below; a failed sham VOIDS the order claim outright.
+    5. NULL MODEL — a PAIRED PERMUTATION null over matched units yields the
+       decision quantiles q_AB and q_AC at the `1 - alpha` percentile. The
+       percentile bootstrap is RETAINED, but only for reporting INTERVALS on the
+       observed distances; it decides nothing. TV_null likewise decides nothing
+       at ORDER_REPORT_VERSION 3 — see `_order_permutation_null` for why the
+       split-half floor was unfit to calibrate a 48-vs-48 statistic.
+    6. VERDICT — at ORDER_REPORT_VERSION 3 the rule is evaluated in this order:
+       (1) policy refuses / n below floor / surviving counts differ by more than
+       `max_surviving_delta` -> inconclusive; (2) TV(A,C) > q_AC -> inconclusive
+       (sham not null, which VOIDS the order claim outright); (3) TV(A,B) > q_AB
+       -> order_effect_observed; (4) q_AB <= min_detectable_effect ->
+       no_order_effect_observed; (5) otherwise -> inconclusive. The sensitivity
+       requirement is ASYMMETRIC: it gates clause 4 ONLY. A clause-5 inconclusive
+       is NOT evidence of absence.
 
     REFUSAL (SchemaError). Raised if any compared cell's non-decision rate
     exceeds `max_non_decision_rate`; if any compared PAIR's rates differ by more
@@ -927,8 +1085,9 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     """
     _AV = DECISION_ADMISSIBILITY_VERSION
     _order_validate(admissibility_policy, thresholds)
-    split = thresholds["noise_floor_split"]
-    s1, s2 = set(split["S1"]), set(split["S2"])
+    split = thresholds.get("noise_floor_split")
+    s1 = set(split["S1"]) if split else set()
+    s2 = set(split["S2"]) if split else set()
     scen_to_cond = {sid: label for label, sid in conditions.items()}
 
     per_agent: dict = {}
@@ -1018,7 +1177,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     max_rate = admissibility_policy["max_non_decision_rate"]
     max_delta = admissibility_policy["max_non_decision_rate_delta"]
     min_n = admissibility_policy["min_admissible_effective_n"]
-    required = ("A", "B", "C", _NULL_A1, _NULL_A2)
+    required = ("A", "B", "C", _NULL_A1, _NULL_A2) if split else ("A", "B", "C")
     violations: list = []
     for agent_id in sorted(per_agent):
         agent_cells = body["per_agent"][agent_id]["cells"]
@@ -1062,16 +1221,21 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
 
     # ---- distances, uncertainty, verdict — reached ONLY past the gate -------
     rng = random.Random(thresholds["bootstrap_seed"])
+    perm_rng = random.Random(thresholds["permutation_seed"])
     iterations = thresholds["bootstrap_iterations"]
+    perm_iterations = thresholds["permutation_iterations"]
     confidence = thresholds["confidence"]
+    alpha = thresholds["alpha"]
+    mde = thresholds["min_detectable_effect"]
     for agent_id in sorted(per_agent):
         cells = per_agent[agent_id]
         out = body["per_agent"][agent_id]
         drawn = {label: [d for d in cells[label]["units"].values() if d]
                  for label in cells}
         dists = {label: out["cells"][label]["distribution"] for label in cells}
-        pairs = (("A|B", "A", "B"), ("A|C", "A", "C"),
-                 ("null", _NULL_A1, _NULL_A2))
+        pairs = [("A|B", "A", "B"), ("A|C", "A", "C")]
+        if _NULL_A1 in cells and _NULL_A2 in cells:
+            pairs.append(("null", _NULL_A1, _NULL_A2))
         out["tv_distances"] = {name: round(_tv_distance(dists[x], dists[y]), 6)
                                for name, x, y in pairs}
         # fixed statistic order => fixed RNG consumption order => byte-identical
@@ -1079,35 +1243,88 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         out["bootstrap"] = {name: _order_bootstrap(rng, drawn[x], drawn[y],
                                                    iterations, confidence)
                             for name, x, y in pairs}
-        null_upper = out["bootstrap"]["null"]["upper"]
-        ab_lower = out["bootstrap"]["A|B"]["lower"]
-        ac_upper = out["bootstrap"]["A|C"]["upper"]
-        out["decision_inputs"] = {"tv_ab_lower": ab_lower,
-                                  "tv_ac_upper": ac_upper,
-                                  "tv_null_upper": null_upper,
+        # The DECIDING null. Only the two substantive pairs get one: the split-half
+        # pair compares DISJOINT unit sets, so it has no matched units to permute —
+        # which is precisely the mismatch that made it unfit to calibrate anything.
+        out["permutation_null"] = {
+            name: _order_permutation_null(perm_rng, cells[x]["units"],
+                                          cells[y]["units"], perm_iterations, alpha)
+            for name, x, y in pairs if name != "null"}
+        q_ab = out["permutation_null"]["A|B"]["quantile"]
+        q_ac = out["permutation_null"]["A|C"]["quantile"]
+        tv_ab = out["tv_distances"]["A|B"]
+        tv_ac = out["tv_distances"]["A|C"]
+        # RETAINED, DIAGNOSTIC ONLY. TV_null and its bootstrap interval describe
+        # within-condition stability across the frozen sampler-seed halves. They
+        # GATE NOTHING at ORDER_REPORT_VERSION 3 and appear in no branch of the
+        # rule below — do not reintroduce them into a verdict without
+        # re-characterising the design, since comparing a 24-vs-24 distance
+        # against a 48-vs-48 statistic is the exact defect v2 exists to remove.
+        out["diagnostics"] = {
+            "tv_null": out["tv_distances"].get("null"),
+            "tv_null_upper": (out["bootstrap"]["null"]["upper"]
+                              if "null" in out["bootstrap"] else None),
+            "note": ("within-condition stability diagnostic; does not gate any "
+                     "verdict at order_report_version 3"),
+        }
+        out["decision_inputs"] = {"tv_ab": tv_ab,
+                                  "tv_ac": tv_ac,
+                                  "q_ab": q_ab,
+                                  "q_ac": q_ac,
+                                  "min_detectable_effect": mde,
+                                  "alpha": alpha,
                                   "confidence": confidence}
-        # Preregistered decision rule, verbatim. The SHAM is evaluated FIRST:
+        # Preregistered decision rule, verbatim, at ORDER_REPORT_VERSION 3.
+        # Clauses 2-5; clause 1 (refusal / n floor / surviving-count delta) has
+        # already been enforced above, before any statistic was computed.
+        #
+        # The sensitivity requirement is ASYMMETRIC and appears ONLY in clause 4.
+        # It is not a precondition and must not be restored as one: q_AB is the
+        # rejection threshold itself, so exceeding it rejects H0 at alpha and is a
+        # valid positive regardless of whether a smaller effect would also have
+        # been resolvable. See the ORDER_REPORT_VERSION 2 -> 3 block above.
+        #
+        # The SHAM is evaluated FIRST:
         # a failed sham voids the order claim outright, so a positive result can
         # never be emitted alongside one. C is A's own order with only agent-facing
         # wording changed — if that alone moves the distribution, the instrument or
         # the surface is what moved, and TV(A,B) is not attributable to order.
-        sham_null = ac_upper <= null_upper
-        if not sham_null:
+        if tv_ac > q_ac:
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
-                f"sham not null: bootstrap upper bound of TV(A,C)={ac_upper} "
-                f"exceeds upper bound of TV_null={null_upper} — reported as "
-                "instrument or surface sensitivity; the order claim is void")
-        elif ab_lower > null_upper:
+                f"sham not null: observed TV(A,C)={tv_ac} exceeds its paired "
+                f"permutation quantile q_AC={q_ac} — reported as instrument or "
+                "surface sensitivity; the order claim is void")
+        elif tv_ab > q_ab:
+            # Clause 3. A rejection. No sensitivity warrant is required or implied.
             out["verdict"] = "order_effect_observed"
             out["verdict_reason"] = (
-                f"bootstrap lower bound of TV(A,B)={ab_lower} exceeds upper bound "
-                f"of TV_null={null_upper}, and the sham is null "
-                f"(TV(A,C) upper={ac_upper} <= {null_upper})")
-        else:
+                f"observed TV(A,B)={tv_ab} exceeds its paired permutation "
+                f"quantile q_AB={q_ab}, rejecting the paired permutation null at "
+                f"alpha={alpha}, and the sham is null (TV(A,C)={tv_ac} <= "
+                f"q_AC={q_ac}); the sensitivity requirement "
+                f"(q_AB <= min_detectable_effect={mde}) constrains only a null "
+                "claim and does not bear on a rejection")
+        elif q_ab <= mde:
+            # Clause 4. The ONLY branch the sensitivity requirement gates: a null
+            # claim asserts "no effect at or above min_detectable_effect", which
+            # is unsupportable unless the test could have resolved one that size.
             out["verdict"] = "no_order_effect_observed"
             out["verdict_reason"] = (
-                f"admissibility policy satisfied and effective n met, but the "
-                f"bootstrap lower bound of TV(A,B)={ab_lower} does not exceed the "
-                f"upper bound of TV_null={null_upper}")
+                f"admissibility policy satisfied, effective n met, sham null "
+                f"(TV(A,C)={tv_ac} <= q_AC={q_ac}), and observed TV(A,B)={tv_ab} "
+                f"does not exceed q_AB={q_ab}, which is itself at or below "
+                f"min_detectable_effect={mde}")
+        else:
+            # Clause 5. Non-rejection without the sensitivity warrant to assert
+            # absence.
+            out["verdict"] = "inconclusive"
+            out["verdict_reason"] = (
+                f"this pack neither rejected nor earned the right to assert "
+                f"absence: observed TV(A,B)={tv_ab} does not exceed its paired "
+                f"permutation quantile q_AB={q_ab}, so the null was not rejected; "
+                f"and q_AB exceeds min_detectable_effect={mde}, so the test could "
+                f"not have resolved an effect of the smallest size this design "
+                f"claims, and no null may be asserted. THIS IS NOT EVIDENCE OF "
+                f"ABSENCE and must never be reported as a null result")
     return body

@@ -203,10 +203,49 @@ analysis, no early stopping, no post-hoc threshold movement.
    `final_action` over admissible effective units.
 3. **Distances.** `TV(P,Q) = ½ Σ_y |P(y) − Q(y)|` for `TV(A,B)`, `TV(A,C)`, and
    the within-condition null `TV_null = TV(A|S₁, A|S₂)`.
-4. **Uncertainty.** Percentile bootstrap over effective units, resampled with
-   replacement within each condition, **10 000 iterations, RNG seed
-   `20260719`**, reporting 95 % intervals for `TV(A,B)`, `TV(A,C)`, and
-   `TV_null`.
+4. **Uncertainty and the null model.** The null against which an observed
+   distance is judged is a **paired permutation null**, not a split-half noise
+   floor. For each of the 48 matched effective units — the same
+   `(variant_id, scenario_seed, sampler_seed)` triple exists in every condition
+   — the two conditions' terminal actions are exchanged with probability ½, the
+   distance is recomputed, and the procedure repeats for
+   **`permutation_iterations = 10000`** under **`permutation_seed = 20260719`**.
+   The decision quantile is the `1 − alpha` percentile of that null, with
+   **`alpha = 0.05`**. A percentile bootstrap (same iterations and seed) is
+   retained for reporting intervals on the observed distances.
+
+### Why the split-half noise floor was replaced
+
+*Recorded because it was found by the design's own required characterisation,
+before any execution, and because the correction changes an inferential core.*
+
+The original rule estimated the noise floor as `TV(A|S₁, A|S₂)` — a distance
+between two **24-unit** halves of A — and compared it against `TV(A,B)`, a
+distance between two **48-unit** samples. Total variation between empirical
+distributions is biased upward at small n, and the two quantities therefore
+carry **different small-sample inflation**: the null is systematically larger
+than the statistic it is meant to calibrate, purely because it is computed on
+half the data. The bias is a property of the split, not of the evidence.
+
+Simulation at the frozen n=48 over the 4-action menu measured the null's upper
+bound at ≈0.49 — about **twice** `min_detectable_effect = 0.25`. The
+sensitivity precondition therefore refused every arm, including one with a
+genuine effect at TV(A,B)=0.6: **false-positive rate 0.000, power 0.000.** A
+design that cannot detect an effect of any size is not conservative, it is
+inert.
+
+A paired permutation null fixes the cause rather than the symptom. It is exact
+under the exchangeability implied by H0, it uses the actual matched sample
+sizes so no size mismatch exists, it consumes no additional live runs, and it
+respects the pairing the design already guarantees. The rejected alternatives
+are recorded to show the choice was not the convenient one: raising
+`min_detectable_effect` above the noise floor would have "worked" while
+admitting only enormous effects — the reinterpret-to-rescue move this
+preregistration forbids; enlarging n would have shrunk the inflation without
+removing the mismatch, at several times the live-run cost.
+
+`noise_floor_split` is **retained as a reported diagnostic** of within-condition
+stability. It is no longer decisive and no longer gates any verdict.
 
 ## Admissibility policy (frozen)
 
@@ -230,21 +269,103 @@ A refusal is an inconclusive result, never a number to be interpreted.
 
 ## Primary event (decision rule)
 
-**Order effect observed** iff **both**:
+The analysis callable is **`metrics.order_sensitivity_report`** at
+**`ORDER_REPORT_VERSION 3`**. The version has been bumped once per change to the
+decision rule, so any emitted verdict is traceable to the rule that produced it:
+v1 the bootstrap-bound comparison against a split-half floor; v2 the paired
+permutation null; v3 the corrected asymmetric sensitivity requirement. The
+registry entry's `primary_event` is the authoritative statement of the frozen
+rule, and the lint fails a design whose version marker disagrees with it,
+consuming the frozen `admissibility_policy` and `thresholds` loaded from this
+experiment's registry entry. The Phase-1 comparator
+`metrics.scramble_terminal_distribution` is **explicitly NOT the Phase-2 analysis
+path** — it admits parse fallbacks as decisions and is demonstrated in this
+candidate to return a clean null from wholly unparseable output. Naming it here
+would freeze the exact unsafe path this design exists to avoid.
 
-1. the bootstrap **lower** bound of `TV(A,B)` exceeds the bootstrap **upper**
-   bound of `TV_null`; **and**
-2. the bootstrap **upper** bound of `TV(A,C)` does **not** exceed the upper
-   bound of `TV_null`.
+Let `q_AB` and `q_AC` be the `1 − alpha` quantiles of the paired permutation
+nulls for A vs B and A vs C. The rule is evaluated in this order:
 
-**No order effect observed** iff the admissibility policy is satisfied, effective
-n meets the floor, and condition (1) fails.
+1. If the admissibility policy refuses, or effective n falls below the floor, or
+   per-condition surviving counts differ by more than `max_surviving_delta`:
+   **inconclusive**.
+2. Else if the observed `TV(A,C)` **exceeds** `q_AC`: **inconclusive** — the sham
+   is not null, which voids any order claim.
+3. Else if the observed `TV(A,B)` **exceeds** `q_AB`: **order effect observed**.
+4. Else if `q_AB ≤ min_detectable_effect`: **no order effect observed**.
+5. Else: **inconclusive**.
 
-**Inconclusive** iff the admissibility policy refuses, effective n falls below
-the floor, the seed probe fails, digest drift is detected, or condition (2)
-fails — that is, **the sham is not null**. A failed sham voids the order claim
-outright; it is reported as instrument or surface sensitivity and is never
-rescued post hoc.
+### The sensitivity requirement is asymmetric, and deliberately so
+
+*Corrected after the paired permutation null replaced the split-half floor. The
+original formulation gated **both** branches on `q_AB ≤ min_detectable_effect`,
+carried over from v1 without re-derivation. That is wrong here, and the error is
+recorded rather than quietly patched.*
+
+Under the split-half null an inflated floor genuinely broke both directions: it
+could swallow a real effect *and* dress an unidentifiable pack as a null. Under a
+permutation null it does not, because **`q_AB` is the rejection threshold
+itself**. If the observed distance exceeds it, the null has been rejected at
+`alpha` — and that is a valid positive finding whether or not a *smaller* effect
+would also have been detectable. Sensitivity constrains what may be concluded
+from a **non**-rejection; it cannot invalidate a rejection.
+
+The symmetric rule produced a perverse result, pinned in the tests: at total
+separation over near-two-point support, `TV(A,B) = 1.0` against `q_AB = 0.2917`
+— a decisive rejection — was reported **inconclusive** solely because
+`0.2917 > 0.25`. A maximal, unambiguous effect would have been discarded.
+
+So the requirement attaches only where it is meaningful: a **null** claim asserts
+"no effect at or above `min_detectable_effect`," and that assertion is
+unsupportable unless the test could actually have resolved an effect of that
+size. A **positive** claim asserts only that this comparison rejected, and needs
+no such warrant.
+
+**What an `inconclusive` from clause 5 does and does not mean.** It means the
+pack neither rejected nor earned the right to assert absence. It is **not**
+evidence of absence, and must never be reported as a null result.
+
+**Inconclusive** arises from clause 1 (the admissibility policy refuses, effective
+n falls below the floor, per-condition surviving counts differ by more than
+`max_surviving_delta`, the seed probe fails, or digest drift is detected); from
+clause 2 (**the sham is not null** — a failed sham voids the order claim
+outright, is reported as instrument or surface sensitivity, and is never rescued
+post hoc); or from clause 5 (no rejection, and `q_AB` above
+`min_detectable_effect`, so the pack has not earned the right to assert absence).
+
+### Why a sensitivity requirement is needed at all
+
+Without one the null branch is degenerate at high noise. Reproduced at the exact
+declared sample size: a fully admissible 144-unit pack with `A|S1` entirely
+`share_resource`, `A|S2` entirely `verify_first`, `C` identical to `A`, and `B`
+entirely `decline_partnership` — A and B **maximally separated, empirically
+disjoint** — was returned by the original v1 rule as `no_order_effect_observed`,
+because its split-half floor `TV_null=1.0` was not strictly exceeded by
+`TV(A,B)=1.0`. A maximally unstable instrument would have closed the gate with a
+"successful null" and the downstream track would have advanced on it.
+
+Under the current rule that pack is `order_effect_observed`: clause 3 fires on a
+genuine rejection before clause 4 is ever reached. **The invariant the ceiling
+exists to protect is unchanged and now holds by construction — that pack can
+never be reported as a successful null.** What changed is which clause protects
+it, and that the protection no longer costs valid rejections.
+
+The requirement therefore attaches to clause 4 alone. It governs what a
+*non*-rejection is entitled to assert, never whether a rejection counts.
+
+### Frozen operating characteristics
+
+`min_detectable_effect = 0.25` — a shift of a quarter of the terminal probability
+mass is the smallest difference this design claims to resolve, and correspondingly
+the tightest null it is entitled to assert. It is declared **before** any outcome
+exists and is covered by `design_hash`.
+
+The false-positive rate under H0 and the power at the `min_detectable_effect`
+boundary must be characterised by simulation at the frozen `n = 48` units per
+condition, using the frozen bootstrap parameters, and committed with the
+candidate. A design whose simulated false-positive rate materially exceeds
+`1 - confidence`, or whose power at the boundary is negligible, is not fit to run
+and must be corrected **before** execution rather than reinterpreted after.
 
 Phase 1's exact thresholds (ε = τ = 0) are **not** carried over. Zero thresholds
 are coherent only for a deterministic decider whose terminal action is a
@@ -321,11 +442,25 @@ Every outcome below is recorded and counted; none is silently discarded.
 | Provider timeout / connection failure | run excluded; counted per condition as dropout |
 | Digest drift mid-pack | **pack aborts**; evidence quarantined; no partial analysis |
 | Seed probe failure | run excluded, reason `backend_seed_unverified` |
-| Unequal admitted n across conditions beyond the policy bound | aggregator refuses |
+| Per-condition surviving counts differing by more than `max_surviving_delta` | **refuses** — inconclusive |
 
 Per-condition dropout counts must be **compared, not merely reported**:
 differential dropout is observationally identical to an order effect, because the
 surviving units in the affected condition are a biased subsample.
+
+**`max_surviving_delta = 2`** (absolute spread between per-condition surviving
+counts), frozen here and covered by `design_hash`. Two justifications: it is
+≈5 % of the 48 units per condition, matching `max_non_decision_rate_delta`; and
+it is deliberately the **tighter** of the two mechanisms in kind, because a
+non-decision is *counted and visible in the census* whereas a dropped run is
+simply **absent** — invisible loss warrants a stricter bound than visible loss.
+
+Stating the bound is not enough: it must be **unskippable**. The balance gate
+takes a caller-supplied bound and is bypassed entirely when that argument is
+absent, so the Phase-2 execution and report path must load
+`max_surviving_delta` from the frozen registry and a Phase-2 pack must be unable
+to complete an analysis without it. A guard nobody is obliged to call is not a
+guard.
 
 ## Execution discipline
 

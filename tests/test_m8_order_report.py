@@ -108,7 +108,16 @@ def POLICY(**over):
 
 def THRESH(s1, s2, **over):
     t = {"bootstrap_iterations": 200, "bootstrap_seed": 20260719,
-         "confidence": 0.95, "noise_floor_split": {"S1": list(s1), "S2": list(s2)}}
+         "confidence": 0.95,
+         # DIAGNOSTIC ONLY at ORDER_REPORT_VERSION 3 — retained and reported as a
+         # within-condition stability measure, but it gates no verdict.
+         "noise_floor_split": {"S1": list(s1), "S2": list(s2)},
+         # the frozen sensitivity ceiling; mandatory, see _THRESHOLD_KEYS
+         "min_detectable_effect": 0.25,
+         # the paired permutation null that REPLACED the split-half noise floor
+         # as the calibrating null; these three are mandatory at v2
+         "permutation_iterations": 200, "permutation_seed": 20260719,
+         "alpha": 0.05}
     t.update(over)
     return t
 
@@ -207,6 +216,41 @@ def test_missing_policy_keys_and_non_refuse_mode_are_refused(tmp_path):
                                  thresholds=THRESH([1], [1]))
 
 
+def test_min_detectable_effect_is_a_mandatory_threshold(tmp_path):
+    """The sensitivity ceiling is part of the claim. A report computed without it
+    would be able to state a null it has no entitlement to state."""
+    dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
+                             "C": [(1, "share")]})
+    bad = THRESH([1], [1])
+    del bad["min_detectable_effect"]
+    with pytest.raises(SchemaError) as exc:
+        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                 thresholds=bad)
+    assert "min_detectable_effect" in str(exc.value)
+    for value in (0.0, -0.1, 1.5, "0.25", True):
+        with pytest.raises(SchemaError):
+            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                     thresholds=THRESH([1], [1],
+                                                       min_detectable_effect=value))
+
+
+def test_max_surviving_delta_is_accepted_and_echoed_not_dropped(tmp_path):
+    """A declared bound that vanishes from the artifact is a bound nobody can
+    audit, so an unknown-but-declared key must survive into the report."""
+    dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
+                             for c in ("A", "B", "C")})
+    thresholds = THRESH([1, 2], [3, 4], max_surviving_delta=2)
+    rep = order_sensitivity_report(dirs, CONDITIONS,
+                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
+                                   thresholds=thresholds)
+    assert rep["thresholds"]["max_surviving_delta"] == 2
+    assert rep["thresholds"] == thresholds
+    with pytest.raises(SchemaError):
+        order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                 thresholds=THRESH([1, 2], [3, 4],
+                                                   max_surviving_delta=-1))
+
+
 def test_overlapping_noise_floor_halves_are_refused(tmp_path):
     dirs = _build(tmp_path, {"A": [(1, "share")], "B": [(1, "share")],
                              "C": [(1, "share")]})
@@ -247,7 +291,13 @@ def test_refuses_on_differential_non_decision_rate_and_emits_no_distance(tmp_pat
         assert "tv_distances" not in agent
         assert "bootstrap" not in agent
         assert "verdict" not in agent
-    assert "tv_distances" not in canonical_json(body)
+        # v2 additions are on the same fail-closed side of the gate: no quantile
+        # and no diagnostic escapes a refusal either
+        assert "permutation_null" not in agent
+        assert "diagnostics" not in agent
+        assert "decision_inputs" not in agent
+    for leaked in ("tv_distances", "permutation_null", "q_ab", "verdict"):
+        assert leaked not in canonical_json(body)
 
 
 def test_refuses_when_a_cell_is_below_the_effective_n_floor(tmp_path):
@@ -425,40 +475,133 @@ def test_verdict_no_order_effect(tmp_path):
     assert agent["verdict"] == "no_order_effect_observed"
 
 
+# Realistic-n verdict fixtures. At ORDER_REPORT_VERSION 3 the decision quantile is
+# the paired permutation null, which is a function of the ACTUAL sample size — so a
+# 4-unit fixture has q_AB = 1.0 and correctly resolves to `inconclusive` whatever
+# the distances show. Exercising the substantive branches therefore requires the
+# frozen order of magnitude (48 matched units per condition), not a toy pack. This
+# is a fixture-size change, not a weakened assertion: every claim below is strictly
+# stronger than the v1 version it replaces, because it now also has to clear a null
+# calibrated on the real sample size.
+_N = 48
+_SEEDS = list(range(1, _N + 1))
+_HALF1, _HALF2 = _SEEDS[:24], _SEEDS[24:]
+_BIG_POLICY = POLICY(min_admissible_effective_n=20)
+
+
+def _mixed(shift=0):
+    """24 `share` / 24 `verify` over the 48 sampler seeds, displaced by `shift`
+    units toward `verify`. TV against `_mixed(0)` is exactly shift/48."""
+    return [(s, "share" if i < 24 - shift else "verify")
+            for i, s in enumerate(_SEEDS)]
+
+
 def test_verdict_order_effect_observed(tmp_path):
     dirs = _build(tmp_path, {
-        "A": [(s, "share") for s in range(1, 5)],
-        "B": [(s, "verify") for s in range(1, 5)],     # fully displaced
-        "C": [(s, "share") for s in range(1, 5)],      # sham null
+        "A": _mixed(0),
+        "B": _mixed(16),      # TV(A,B) = 1/3, well above its permutation quantile
+        "C": _mixed(0),       # sham null
     })
     rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
-                                   thresholds=THRESH([1, 2], [3, 4]))
+                                   admissibility_policy=_BIG_POLICY,
+                                   thresholds=THRESH(_HALF1, _HALF2))
     agent = rep["per_agent"]["live"]
-    assert agent["tv_distances"]["A|B"] == 1.0
-    assert agent["bootstrap"]["A|B"]["lower"] > agent["bootstrap"]["null"]["upper"]
-    assert agent["bootstrap"]["A|C"]["upper"] <= agent["bootstrap"]["null"]["upper"]
+    di = agent["decision_inputs"]
+    assert agent["tv_distances"]["A|B"] == pytest.approx(1 / 3, abs=1e-6)
+    # this pack clears the sensitivity warrant as well, so the positive here does
+    # not rely on the v3 asymmetry (that case is covered in the ops-characteristics
+    # module); clauses 2 and 3 are exercised directly
+    assert di["q_ab"] <= di["min_detectable_effect"]
+    assert di["tv_ab"] > di["q_ab"]                  # clause 3
+    assert di["tv_ac"] <= di["q_ac"]                 # clause 2
     assert agent["verdict"] == "order_effect_observed"
+    # the permutation null is what decided it, and it used the real matched n
+    assert agent["permutation_null"]["A|B"]["matched_units"] == _N
+    assert agent["permutation_null"]["A|B"]["iterations"] == 200
 
 
 def test_failed_sham_voids_a_large_ab_distance(tmp_path):
-    """The load-bearing negative case: TV(A,B) is maximal, but the sham — A's own
-    order with only agent-facing wording changed — also moves. The verdict must be
-    inconclusive, and must NEVER be positive."""
+    """The load-bearing negative case: TV(A,B) clears its own null, but the sham —
+    A's own order with only agent-facing wording changed — also moves. The verdict
+    must be inconclusive, and must NEVER be positive."""
     dirs = _build(tmp_path, {
-        "A": [(s, "share") for s in range(1, 5)],
-        "B": [(s, "verify") for s in range(1, 5)],
-        "C": [(s, "decline") for s in range(1, 5)],    # sham is NOT null
+        "A": _mixed(0),
+        "B": _mixed(16),
+        "C": _mixed(8),       # sham is NOT null
     })
     rep = order_sensitivity_report(dirs, CONDITIONS,
-                                   admissibility_policy=POLICY(min_admissible_effective_n=2),
-                                   thresholds=THRESH([1, 2], [3, 4]))
+                                   admissibility_policy=_BIG_POLICY,
+                                   thresholds=THRESH(_HALF1, _HALF2))
     agent = rep["per_agent"]["live"]
-    assert agent["tv_distances"]["A|B"] == 1.0       # large, and irrelevant
-    assert agent["bootstrap"]["A|C"]["upper"] > agent["bootstrap"]["null"]["upper"]
+    di = agent["decision_inputs"]
+    assert di["q_ab"] <= di["min_detectable_effect"]  # warrant present, irrelevant
+    assert di["tv_ab"] > di["q_ab"]                   # clause 3 WOULD hold, and is void
+    assert di["tv_ac"] > di["q_ac"]                   # clause 2 FAILS FIRST
     assert agent["verdict"] == "inconclusive"
     assert agent["verdict"] != "order_effect_observed"
     assert "sham not null" in agent["verdict_reason"]
+
+
+def test_split_half_noise_floor_no_longer_gates_any_verdict(tmp_path):
+    """v1 -> v2 regression in the OTHER direction (still holds at v3).
+
+    A|S1 is entirely `share` and A|S2 entirely `verify`, so the retained
+    diagnostic TV_null is 1.0 — its maximum. Under the v1 rule that alone forced
+    `inconclusive` on every pack. It must now decide nothing: the diagnostic is
+    reported, and the verdict comes from the paired permutation null.
+    """
+    dirs = _build(tmp_path, {
+        "A": _mixed(0),       # share on _HALF1, verify on _HALF2 -> TV_null = 1.0
+        "B": _mixed(16),
+        "C": _mixed(0),
+    })
+    rep = order_sensitivity_report(dirs, CONDITIONS,
+                                   admissibility_policy=_BIG_POLICY,
+                                   thresholds=THRESH(_HALF1, _HALF2))
+    agent = rep["per_agent"]["live"]
+    assert agent["tv_distances"]["null"] == 1.0
+    assert agent["diagnostics"]["tv_null"] == 1.0
+    assert agent["diagnostics"]["tv_null_upper"] == 1.0
+    # ...and it appears in NO decision input and gates nothing
+    assert "tv_null" not in agent["decision_inputs"]
+    assert "tv_null_upper" not in agent["decision_inputs"]
+    assert agent["verdict"] == "order_effect_observed"
+    assert "TV_null" not in agent["verdict_reason"]
+
+
+def test_permutation_parameters_are_mandatory_and_validated(tmp_path):
+    """The decision quantile is parameterised by these three. A report computed
+    without them would be judging distances against an undeclared null."""
+    dirs = _build(tmp_path, {c: [(s, "share") for s in range(1, 5)]
+                             for c in ("A", "B", "C")})
+    for key in ("permutation_iterations", "permutation_seed", "alpha"):
+        bad = THRESH([1, 2], [3, 4])
+        del bad[key]
+        with pytest.raises(SchemaError) as exc:
+            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                     thresholds=bad)
+        assert key in str(exc.value)
+    for value in (0.0, 1.0, -0.1, "0.05", True):
+        with pytest.raises(SchemaError):
+            order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=LOOSE,
+                                     thresholds=THRESH([1, 2], [3, 4], alpha=value))
+    for value in (0, -1, 2.5, True):
+        with pytest.raises(SchemaError):
+            order_sensitivity_report(
+                dirs, CONDITIONS, admissibility_policy=LOOSE,
+                thresholds=THRESH([1, 2], [3, 4], permutation_iterations=value))
+
+
+def test_permutation_null_is_deterministic_under_the_frozen_seed(tmp_path):
+    """`random.Random(permutation_seed)` only — no global RNG, no numpy — so the
+    quantile that decided a verdict regenerates byte-identically."""
+    dirs = _build(tmp_path, {"A": _mixed(0), "B": _mixed(16), "C": _mixed(0)})
+    kw = dict(admissibility_policy=_BIG_POLICY, thresholds=THRESH(_HALF1, _HALF2))
+    first = order_sensitivity_report(dirs, CONDITIONS, **kw)
+    second = order_sensitivity_report(dirs, CONDITIONS, **kw)
+    assert canonical_json(first) == canonical_json(second)
+    assert (first["per_agent"]["live"]["permutation_null"]
+            == second["per_agent"]["live"]["permutation_null"])
 
 
 # -------------------------------------------------------- 7. self-description
@@ -470,7 +613,12 @@ def test_report_is_self_describing(tmp_path):
     thresholds = THRESH([1, 2], [3, 4])
     rep = order_sensitivity_report(dirs, CONDITIONS, admissibility_policy=policy,
                                    thresholds=thresholds)
-    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "1"
+    # bumped 1 -> 2: the DECISION RULE changed (split-half noise floor replaced by
+    # a paired permutation null). Bumped 2 -> 3: it changed AGAIN — the
+    # sensitivity requirement moved from a precondition gating both branches to
+    # the null branch only. A consumer must be able to tell which rule produced a
+    # verdict; all three can disagree on identical evidence.
+    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "3"
     assert rep["admissibility_version"] == DECISION_ADMISSIBILITY_VERSION
     assert rep["policy_version"] == "1"
     assert rep["admissibility_policy"] == policy
