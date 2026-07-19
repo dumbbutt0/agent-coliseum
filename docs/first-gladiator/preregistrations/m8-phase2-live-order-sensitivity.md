@@ -214,6 +214,25 @@ analysis, no early stopping, no post-hoc threshold movement.
    **`alpha = 0.05`**. A percentile bootstrap (same iterations and seed) is
    retained for reporting intervals on the observed distances.
 
+   **The operative null is the sharp null, and that is stronger than the
+   marginal statement above.** A paired permutation test is exact under
+   *within-pair exchangeability* — that for each matched unit, the condition
+   label carries no information about that unit's terminal action. Equality of
+   the A and B **marginal** distributions, as `H0` is written, does **not**
+   logically imply it: two conditions can share a marginal distribution while
+   their outcomes are dependent within a unit in an asymmetric way, and under
+   that weaker hypothesis alone the test is not exact.
+
+   This design adopts the sharp null as operative, which is the scientifically
+   natural reading here rather than a convenience: the matched unit fixes the
+   variant, the scenario seed and the sampler seed, so the sharp null says
+   precisely "for this unit, presentation order made no difference to what was
+   chosen" — the thing the experiment is actually asking. The sharp null implies
+   the marginal null, so `H0` as stated remains the correct **claim-level**
+   summary and nothing in the claim ceiling widens. The exactness guarantee,
+   however, rests on the sharp null, and the result report must say so rather
+   than implying exactness under marginal equality alone.
+
 ### Why the split-half noise floor was replaced
 
 *Recorded because it was found by the design's own required characterisation,

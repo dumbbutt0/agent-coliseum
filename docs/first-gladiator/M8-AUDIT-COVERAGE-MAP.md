@@ -13,8 +13,16 @@ declared before the first request is published, per the Director mandate.
 | Branch | `codex/first-gladiator-phase2-design` |
 | Worktree | `/tmp/agent-coliseum-phase2` |
 | Frozen design | `docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md` |
-| Design hash | `eb715c6599946f4ee16b2598f6ddad3093370c8356819fdd5f9a57da4cfac445` |
+| Design hash | `1f9c2ce645054142cb421986408a56d206046c2094b2ca6a240568213dea8272` |
 | Candidate commit | *assigned at assembly; every request binds it exactly* |
+
+**The registry entry and the committed experiment manifest are authoritative for
+the design hash; this map is not.** Three hashes were issued and superseded
+during the cycle-1 repair (`eb715c65…` → `71aeb718…` → `869982d3…` → the value
+above). This table previously carried the first of them — a stale copy in a
+non-canonical document, recorded here rather than silently corrected because it
+is the same class of defect as cycle 1's blocking Finding 1: an artifact
+asserting a design identity that disagrees with the frozen source.
 
 **This candidate contains no result and no live evidence.** No model was
 contacted at any point during its construction. It is a design-and-instrument
