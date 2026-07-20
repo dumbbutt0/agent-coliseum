@@ -75,46 +75,71 @@ THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
                   "min_detectable_effect", "sham_equivalence_margin",
                   "power_target", "type_i_criterion")
 
-# ------------------------------------------------- the ONE canonical null (a-005)
+# ---------------------------------------- the ONE canonical null (a-005 -> a-006)
 #
-# Owner decision 2026-07-19 (resolving a-004 vs a-005): the FIRST live M8
-# experiment tests the DISTRIBUTIONAL (population-level) null, NOT the sharp/
-# per-unit null. a-004 had frozen a sharp unit-level null; a-005 then reproduced
-# that the aggregate TV(A,B) statistic is BLIND to balanced unit-level effects
-# (a fully discordant cancelling pack leaves the sharp null false at every unit
-# yet emits the successful-null verdict), so the sharp CLAIM and the marginal
-# STATISTIC were mismatched. The owner narrowed the claim to the statistic: the
-# operative null is now marginal equality P(Y|A)=P(Y|B) of the population
-# terminal-action distribution, and the replicated per-unit design is a SEPARATE
-# later preregistered experiment.
+# Owner decision 2026-07-20 (a-006 A-0), REFINING the a-005 distributional
+# framing. History: a-004 froze a sharp/per-unit null; a-005 narrowed to a
+# population-marginal null because the marginal TV(A,B) statistic is blind to
+# balanced unit-level effects; a-006 then reproduced that the within-pair
+# permutation test does NOT control finite-sample type-I for the BARE marginal
+# null (an equal-marginal arm rejected above alpha), because permutation
+# validity comes from invariance under the swaps the test performs, and equal
+# per-unit marginals do NOT imply the paired observation is swap-invariant.
 #
-# There is exactly ONE canonical, machine-readable null statement, anchored here
-# in audited code and mirrored VERBATIM in planned_design (null_form +
-# null_statement, both design-hashed), the hypothesis, the primary_event, the
-# preregistration document, the committed experiment config, the operating-
-# characteristics script and its committed artifact.
+# The operative confirmatory null is therefore WITHIN-UNIT JOINT SWAP INVARIANCE:
+#   for every matched unit i, (Y_iA, Y_iB) =d (Y_iB, Y_iA),
+# subject to the preregistered across-unit independence / exchangeability-block
+# assumptions. This is EXACTLY the null the within-pair permutation test provides
+# finite-sample type-I control for. It IMPLIES population-marginal equality, but
+# the test is NOT claimed to be an exact test of bare marginal equality.
 #
-# CLAIM CEILING (the whole point of the narrowing): a rejection supports ONLY a
-# distributional/marginal difference, never a per-unit claim; a non-rejection
-# supports ONLY "no distributional order effect observed at the detectable
-# threshold" and EXPLICITLY does not establish per-unit invariance — balanced
-# cancelling unit-level effects keep the marginals equal while the sharp null is
-# false (the permanent cancellation guardrail fixture pins exactly this case).
-# Heterogeneous / cancelling unit-level effects are OUT OF SCOPE for this
-# experiment's claim. See M8_CLAIM_SCOPE below and the preregistration.
-M8_NULL_FORM = "distributional"
+# THREE LAYERS, kept explicitly separate (owner, binding):
+#   (1) INFERENTIAL HYPOTHESIS = the swap-invariance null tested by the
+#       permutation p-value;
+#   (2) EFFECT-SIZE ESTIMAND = population-marginal TV(P_A, P_B);
+#   (3) SENSITIVITY = designed to detect large marginal divergence (MDE 0.35)
+#       under the SPECIFIC simulated alternative families / operating conditions
+#       where it was demonstrated — NOT a universal guarantee that every
+#       alternative with marginal TV >= 0.35 is detected (power depends on the
+#       within-unit coupling, outcome geometry, discreteness, heterogeneity, and
+#       the statistic).
+#
+# CANCELLATION IS NOT MERELY "LOW POWER": a non-exchangeable A/B coupling can
+# hold the marginals equal (TV=0) while VIOLATING swap invariance — such a case
+# is an ALTERNATIVE OUTSIDE the confirmatory null, not a null case. TV=0 is thus
+# never evidence the null is true, and a non-rejection is "no order effect
+# DETECTED at the threshold", never "no order effect" / "swap invariance holds" /
+# "per-unit invariance". The permanent cancellation guardrail pins this exactly.
+#
+# The canonical null_statement is anchored here in audited code and mirrored
+# VERBATIM in planned_design (null_form + null_statement, both design-hashed),
+# the hypothesis, the primary_event, the preregistration, the committed config,
+# and the operating-characteristics artifact.
+M8_NULL_FORM = "swap_invariance"
 M8_NULL_STATEMENT = (
-    "Distributional (population-level) null: across the frozen 48-unit matched "
-    "grid, presentation order does not change the population distribution of "
-    "terminal actions — the marginal terminal-action distribution under order A "
-    "equals the marginal terminal-action distribution under order B.")
+    "Operative confirmatory null (within-unit joint swap invariance): for every "
+    "matched experimental unit i, the joint distribution of the paired terminal "
+    "outcomes is invariant under exchanging presentation labels A and B — "
+    "(Y_iA, Y_iB) =d (Y_iB, Y_iA) — subject to the preregistered across-unit "
+    "independence / exchangeability-block assumptions. This implies equality of "
+    "the population-marginal terminal-action distributions, but the within-pair "
+    "permutation test is NOT claimed to be an exact test of bare population-"
+    "marginal equality alone.")
 # The claim-scope caveat is design-hashed prose (mirrored into notes and the
-# preregistration) and is enforced by lint: a design that omits it can be read
-# as licensing the per-unit / sharp claims the narrowing removed.
+# preregistration) and lint-enforced: it keeps the three layers separate and the
+# cancellation case correctly OUTSIDE the null.
 M8_CLAIM_SCOPE = (
-    "Claim scope: only the marginal terminal-action distribution is tested. "
-    "Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a "
-    "non-rejection does not establish per-unit invariance.")
+    "Claim scope: the permutation p-value tests ONLY the within-unit swap-"
+    "invariance null; the population-marginal total-variation distance "
+    "TV(P_A,P_B) is the effect-size ESTIMAND, not the null; and MDE 0.35 is "
+    "demonstrated sensitivity under the specific simulated alternative families "
+    "and operating conditions, not a universal detection guarantee. A rejection "
+    "evidences that presentation order changes the paired terminal-outcome "
+    "distribution at some unit; a non-rejection is 'no order effect detected at "
+    "the threshold' and never establishes swap invariance, per-unit invariance, "
+    "or marginal equality. A non-exchangeable A/B coupling can hold the marginals "
+    "equal (TV=0) while violating swap invariance, so TV=0 is not evidence the "
+    "null is true and such cancellation cases are OUTSIDE the confirmatory null.")
 
 # a-005 finding 1: the analysis timing / stopping rule must be FROZEN in the
 # design identity, not left to prose. A post-freeze edit that reversed it
@@ -151,7 +176,10 @@ M8_STOPPING_RULE = {
 # committed characterisation must MEET them before execution.
 M8_POWER_TARGET = 0.8
 M8_TYPE_I_CRITERION = (
-    "CP-95 upper bound of distributional-null rejection rate <= alpha")
+    "CP-95 upper bound of the swap-invariance-null rejection rate <= alpha "
+    "(finite-sample type-I control under the within-pair exchangeability "
+    "reference; equal-marginal arms that are jointly exchangeable are charged "
+    "as type-I, non-exchangeable equal-marginal couplings are alternatives)")
 # M8 audit repair R4: the null model is a PAIRED PERMUTATION null, so its
 # parameters must be frozen inside planned_design exactly like the bootstrap
 # parameters were. A design that omits them cannot state a decision quantile at
@@ -773,29 +801,31 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "(0, 0.5) — a decision quantile at or above the "
                           "median is not a test")
 
-    # a-005 (owner decision): ONE null everywhere, and it is the DISTRIBUTIONAL
+    # a-006 (owner decision): ONE null everywhere, and it is the SWAP-INVARIANCE
     # null. The design must declare its null form machine-readably; the declared
-    # form must be the frozen distributional form; and the ONE canonical
+    # form must be the frozen swap-invariance form; and the ONE canonical
     # statement must appear VERBATIM in both the hypothesis and the decision
     # rule — a design whose surfaces can answer different hypotheses has no
     # auditable null at all.
     #
-    # Note on the reference distribution (kept honest — an auditor will probe
-    # this): the within-unit paired permutation supplies the null REFERENCE
-    # distribution under exchangeability. Exchangeability (the sharp null)
-    # implies marginal equality, so that reference is a valid level-alpha test
-    # of marginal separation via the TV(A,B) statistic. The CLAIM is capped at
-    # the distributional level (see M8_CLAIM_SCOPE): a rejection evidences a
-    # marginal difference, a non-rejection evidences only "no distributional
-    # order effect observed at MDE" and never per-unit invariance. We do NOT
-    # assert the permutation test is exact for bare marginal equality.
+    # Reference-distribution honesty (an auditor WILL probe this): the within-unit
+    # paired permutation is finite-sample EXACT for the within-unit joint swap-
+    # invariance null (validity comes from invariance under the label swaps the
+    # test performs). That null IMPLIES population-marginal equality, but the test
+    # is NOT an exact test of bare marginal equality — equal per-unit marginals do
+    # not imply the paired observation is swap-invariant. So (see M8_CLAIM_SCOPE):
+    # the p-value tests swap invariance; TV(P_A,P_B) is the effect-size estimand;
+    # MDE 0.35 is demonstrated sensitivity under specific alternative families; a
+    # rejection evidences an order effect at some unit; a non-rejection is "no
+    # order effect DETECTED at the threshold" and never per-unit/marginal
+    # invariance; and TV=0 under a non-exchangeable coupling is OUTSIDE the null.
     nf = pd.get("null_form")
     if nf != M8_NULL_FORM:
         issues.append(f"{eid}: planned_design null_form {nf!r} != "
                       f"{M8_NULL_FORM!r} — the first live M8 experiment tests "
-                      "the distributional (population-marginal) null per the "
-                      "owner a-005 decision; the operative null must be "
-                      "declared machine-readably and match the frozen form")
+                      "the within-unit swap-invariance null per the owner a-006 "
+                      "decision; the operative null must be declared machine-"
+                      "readably and match the frozen form")
     ns = pd.get("null_statement")
     if not isinstance(ns, str) or not ns.strip():
         issues.append(f"{eid}: planned_design missing 'null_statement' (the "
@@ -814,19 +844,20 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "canonical null_statement VERBATIM — the decision "
                           "rule must test exactly the declared null")
 
-    # a-005 (owner decision): the claim-scope caveat is design-hashed prose. It
-    # must appear VERBATIM in planned_design.notes so a rejection can never be
-    # read as licensing a per-unit claim and a non-rejection can never be read
-    # as per-unit invariance. Dropping it re-opens exactly the over-claim the
-    # distributional narrowing was made to prevent.
+    # a-006 (owner decision): the claim-scope caveat is design-hashed prose. It
+    # must appear VERBATIM in planned_design.notes so the three layers stay
+    # separate and TV=0 / a non-rejection can never be read as evidence the
+    # swap-invariance null is true. Dropping it re-opens exactly the over-claim
+    # the swap-invariance refinement was made to prevent.
     if eid in POLICY_REQUIRED_EXPERIMENTS:
         notes = pd.get("notes") or ""
         if M8_CLAIM_SCOPE not in notes:
             issues.append(f"{eid}: planned_design.notes does not contain the "
                           "canonical M8_CLAIM_SCOPE caveat VERBATIM — the "
-                          "distributional claim ceiling (marginals only; "
-                          "cancelling unit-level effects out of scope; a "
-                          "non-rejection is not per-unit invariance) must be "
+                          "swap-invariance claim scope (p-value tests swap "
+                          "invariance; TV is the estimand; MDE is demonstrated "
+                          "sensitivity; TV=0 under non-exchangeable coupling is "
+                          "outside the null) must be "
                           "frozen in the design, not left to prose elsewhere")
         if M8_STOPPING_STATEMENT not in notes:
             issues.append(f"{eid}: planned_design.notes does not contain the "
