@@ -17,12 +17,13 @@ stochastic live model, where four of its properties become defects:
 behavior and output bytes (Phase-1 evidence and its three GO verdicts depend on it),
 and the tests below prove both halves of that claim.
 
-AT ORDER_REPORT_VERSION 4 the successor additionally enforces the five audit
-repairs (001814 / 001820 / 001823):
+AT ORDER_REPORT_VERSION 5 the successor enforces the audit repairs and the
+a-005 distributional re-framing (001814 / 001820 / 001823 / a-005):
 
-  a-003[0]  sharp-null claim discipline: `null_form: "sharp"`, the marginal-claim
-            limitation, and verdict language that states the unit-level
-            conclusion — never "the distribution changed";
+  a-005     distributional-null claim discipline: `null_form: "distributional"`,
+            the per-unit-claim limitation, and verdict language that states the
+            population-marginal conclusion — a rejection evidences a
+            marginal-distribution difference only, never a per-unit claim;
   a-003[1]  sham adequacy: a positive needs TV(A,C) <= q_AC AND
             q_AC < sham_equivalence_margin (STRICT);
   d-001[0]  `max_surviving_delta` REQUIRED and enforced pre-statistics, with the
@@ -626,8 +627,9 @@ def test_valid_attested_pack_passes_with_a_provider_call_trap(tmp_path, monkeypa
                      surviving={"A": 48, "B": 48, "C": 48})
     assert canonical_json(first) == canonical_json(second)
     agent = first["per_agent"]["live"]
-    assert agent["verdict"] in ("order_effect_observed",
-                                "no_order_effect_observed", "inconclusive")
+    assert agent["verdict"] in ("distributional_order_effect_observed",
+                                "no_distributional_order_effect_observed",
+                                "inconclusive")
     assert first["replay_verification"] == {"attestation_version": "1",
                                             "verified_run_n": 144}
 
@@ -741,7 +743,7 @@ def test_declared_execution_census_is_charged_against_the_bound(tmp_path):
     # boundary: spread exactly max_surviving_delta passes the dropout gate
     rep = _report(dirs, _GRID_POLICY, _grid_thresh(),
                   surviving={"A": 48, "B": 46, "C": 48})
-    assert rep["per_agent"]["live"]["verdict"] == "no_order_effect_observed"
+    assert rep["per_agent"]["live"]["verdict"] == "no_distributional_order_effect_observed"
     assert rep["surviving_counts"] == {"A": 48, "B": 46, "C": 48}
 
 
@@ -903,17 +905,17 @@ def test_retries_per_unit_zero_dedups_identical_and_refuses_conflicting(tmp_path
         assert "retries_per_unit" in str(exc2.value)
 
 
-def test_diagnostics_note_and_report_version_are_v4(tmp_path):
+def test_diagnostics_note_and_report_version_are_v5(tmp_path):
     """d-002 finding 1 (LOW): the emitted report identifies ORDER_REPORT_VERSION
-    4 consistently — the top-level version, the constant, and the diagnostics
-    note that previously read 'order_report_version 3'."""
+    5 consistently — the top-level version, the constant, and the diagnostics
+    note that previously read 'order_report_version 4'."""
     dirs = _build(tmp_path, {"A": _mixed(0), "B": _mixed(16), "C": _mixed(0)})
     rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
-    assert ORDER_REPORT_VERSION == "4"
-    assert rep["order_report_version"] == "4"
+    assert ORDER_REPORT_VERSION == "5"
+    assert rep["order_report_version"] == "5"
     note = rep["per_agent"]["live"]["diagnostics"]["note"]
-    assert "order_report_version 4" in note
-    assert "order_report_version 3" not in note
+    assert "order_report_version 5" in note
+    assert "order_report_version 4" not in note
 
 
 # ------------------------------------------------------------- 9. replicates (F3)
@@ -973,7 +975,7 @@ def test_verdict_no_order_effect(tmp_path):
                   THRESH([1, 2], [3, 4]))
     agent = rep["per_agent"]["live"]
     assert agent["tv_distances"] == {"A|B": 0.0, "A|C": 0.0, "null": 0.0}
-    assert agent["verdict"] == "no_order_effect_observed"
+    assert agent["verdict"] == "no_distributional_order_effect_observed"
 
 
 # Realistic-n verdict fixtures. The decision quantile is the paired permutation
@@ -994,7 +996,7 @@ def _mixed(shift=0):
             for i, s in enumerate(_SEEDS)]
 
 
-def test_verdict_order_effect_observed_states_the_sharp_null(tmp_path):
+def test_verdict_distributional_order_effect_states_the_marginal_claim(tmp_path):
     dirs = _build(tmp_path, {
         "A": _mixed(0),
         "B": _mixed(16),      # TV(A,B) = 1/3, well above its permutation quantile
@@ -1009,18 +1011,17 @@ def test_verdict_order_effect_observed_states_the_sharp_null(tmp_path):
     assert di["tv_ac"] <= di["q_ac"]                 # clause 2, first part
     # v4: the sham warrant — q_AC strictly below the frozen equivalence margin
     assert di["q_ac"] < di["sham_equivalence_margin"] == 0.25
-    assert agent["verdict"] == "order_effect_observed"
+    assert agent["verdict"] == "distributional_order_effect_observed"
     # the permutation null is what decided it, and it used the real matched n
     assert agent["permutation_null"]["A|B"]["matched_units"] == _N
     assert agent["permutation_null"]["A|B"]["iterations"] == 200
-    # a-003 finding 0: the claim is the SHARP unit-level conclusion, with the
-    # marginal limitation stated — never "the distribution changed"
+    # a-005: the claim is the DISTRIBUTIONAL (population-marginal) conclusion,
+    # capped there — a marginal-distribution difference, never a per-unit claim
     reason = agent["verdict_reason"]
-    assert "SHARP" in reason and "unit" in reason
-    assert "does not establish that the marginal" in reason
-    assert "distribution changed" not in reason
-    assert rep["null_form"] == "sharp"
-    assert "marginal" in rep["marginal_claim_limitation"]
+    assert "marginal" in reason and "population-level" in reason
+    assert "does not identify which units changed" in reason
+    assert rep["null_form"] == "distributional"
+    assert "marginal" in rep["per_unit_claim_limitation"]
 
 
 def test_failed_sham_voids_a_large_ab_distance(tmp_path):
@@ -1039,7 +1040,7 @@ def test_failed_sham_voids_a_large_ab_distance(tmp_path):
     assert di["tv_ab"] > di["q_ab"]                   # clause 3 WOULD hold, and is void
     assert di["tv_ac"] > di["q_ac"]                   # clause 2 FAILS FIRST
     assert agent["verdict"] == "inconclusive"
-    assert agent["verdict"] != "order_effect_observed"
+    assert agent["verdict"] != "distributional_order_effect_observed"
     assert "sham not null" in agent["verdict_reason"]
 
 
@@ -1051,7 +1052,7 @@ def test_sham_warrant_missing_boundary_is_inconclusive_never_positive(tmp_path):
     with every pair discordant where they differ, so TV(A,C) = 0.25 =
     min_detectable_effect and the paired permutation quantile q_AC lands AT or
     ABOVE the frozen sham_equivalence_margin = 0.25; B is decisively separated
-    (all decline). Under v3 this promoted (`order_effect_observed`) while an
+    (all decline). Under v3 this promoted (a positive) while an
     observed sham shift equalled the design's own declared minimum detectable
     effect. Under v4 the strict warrant `q_AC < sham_equivalence_margin` fails
     and the verdict is `inconclusive` with the sham-warrant-missing reason —
@@ -1079,7 +1080,7 @@ def test_sham_warrant_missing_boundary_is_inconclusive_never_positive(tmp_path):
     assert di["tv_ac"] <= di["q_ac"]                      # no A/C rejection...
     assert di["q_ac"] >= di["sham_equivalence_margin"]    # ...and no warrant either
     assert agent["verdict"] == "inconclusive"
-    assert agent["verdict"] != "order_effect_observed"
+    assert agent["verdict"] != "distributional_order_effect_observed"
     assert "sham warrant missing" in agent["verdict_reason"]
 
 
@@ -1103,13 +1104,13 @@ def test_positive_verdict_always_carries_the_sham_warrant(tmp_path):
     di = agent["decision_inputs"]
     assert di["q_ac"] < di["sham_equivalence_margin"]
     assert di["tv_ac"] <= di["q_ac"]
-    assert agent["verdict"] == "order_effect_observed"
+    assert agent["verdict"] == "distributional_order_effect_observed"
     assert "sham warrant holds" in agent["verdict_reason"].lower() or \
         "q_AC < sham_equivalence_margin" in agent["verdict_reason"]
 
 
 def test_split_half_noise_floor_no_longer_gates_any_verdict(tmp_path):
-    """v1 -> v2 regression in the OTHER direction (still holds at v4).
+    """v1 -> v2 regression in the OTHER direction (still holds at v5).
 
     A|S1 is entirely `share` and A|S2 entirely `verify`, so the retained
     diagnostic TV_null is 1.0 — its maximum. Under the v1 rule that alone forced
@@ -1129,7 +1130,7 @@ def test_split_half_noise_floor_no_longer_gates_any_verdict(tmp_path):
     # ...and it appears in NO decision input and gates nothing
     assert "tv_null" not in agent["decision_inputs"]
     assert "tv_null_upper" not in agent["decision_inputs"]
-    assert agent["verdict"] == "order_effect_observed"
+    assert agent["verdict"] == "distributional_order_effect_observed"
     assert "TV_null" not in agent["verdict_reason"]
 
 
@@ -1174,12 +1175,13 @@ def test_report_is_self_describing(tmp_path):
     rep = _report(dirs, policy, thresholds)
     # bumped 1 -> 2: the split-half noise floor was replaced by a paired
     # permutation null. 2 -> 3: the sensitivity requirement moved to the null
-    # branch only. 3 -> 4: sharp-null claim discipline, the strict sham
-    # equivalence warrant, and the clause-0 evidence-admission contract
-    # (replay attestation, frozen terminal probe, surviving-count bound,
-    # matched-unit grid). A consumer must be able to tell which rule produced a
-    # verdict; all four can disagree on identical evidence.
-    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "4"
+    # branch only. 3 -> 4: the strict sham equivalence warrant and the clause-0
+    # evidence-admission contract (replay attestation, frozen terminal probe,
+    # surviving-count bound, matched-unit grid). 4 -> 5: the operative null
+    # narrowed to DISTRIBUTIONAL — the claim ceiling and verdict vocabulary
+    # changed. A consumer must be able to tell which rule produced a verdict;
+    # all five can disagree on identical evidence.
+    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "5"
     assert rep["admissibility_version"] == DECISION_ADMISSIBILITY_VERSION
     assert rep["policy_version"] == "1"
     assert rep["admissibility_policy"] == policy
@@ -1187,11 +1189,11 @@ def test_report_is_self_describing(tmp_path):
     assert len(rep["policy_hash"]) == 64 and len(rep["thresholds_hash"]) == 64
     # METRICS-v1 definitions did not move: the new artifact carries its OWN version
     assert rep["metrics_version"] == METRICS_VERSION == "1"
-    # v4 self-description: the operative null, the marginal limitation, the
-    # frozen probe, and the recorded replay gate
-    assert rep["null_form"] == "sharp"
-    assert "sharp" in rep["marginal_claim_limitation"]
-    assert "P(Y|A)" in rep["marginal_claim_limitation"]
+    # v5 self-description: the operative distributional null, the per-unit-claim
+    # limitation, the frozen probe, and the recorded replay gate
+    assert rep["null_form"] == "distributional"
+    assert "marginal" in rep["per_unit_claim_limitation"]
+    assert "P(Y|A)" in rep["per_unit_claim_limitation"]
     assert rep["terminal_dp_id"] == TERMINAL
     assert rep["replay_verification"] == {"attestation_version": "1",
                                           "verified_run_n": 12}

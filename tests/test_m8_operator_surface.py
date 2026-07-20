@@ -2,7 +2,7 @@
 smoke-pack / result-package, all OFFLINE.
 
 The Director-defined contracts (sweep.verify_pack_replay and the
-ORDER_REPORT_VERSION-4 signature of metrics.order_sensitivity_report) are
+ORDER_REPORT_VERSION-5 signature of metrics.order_sensitivity_report) are
 implemented by concurrent builders; here they are monkeypatched with
 contract-shaped fakes so these tests exercise the OPERATOR surface — argument
 plumbing, refusal ordering, marker discipline, and package integrity — without
@@ -115,7 +115,7 @@ def _fake_verdict_report(conditions):
                      "non_decision_n": 0, "non_decision_rate": 0.0,
                      "non_decision_reasons": {}}
              for label in ("A", "B", "C", "A|S1", "A|S2")}
-    return {"report_id": "order_sensitivity", "order_report_version": "4",
+    return {"report_id": "order_sensitivity", "order_report_version": "5",
             "conditions": dict(conditions), "excluded": [],
             "per_agent": {f"llm:ollama:{MODEL}": {
                 "agent_regime_id": "a" * 64,
@@ -126,7 +126,7 @@ def _fake_verdict_report(conditions):
                                     "min_detectable_effect": 0.25,
                                     "alpha": 0.05, "confidence": 0.95},
                 "diagnostics": {"tv_null": 0.0},
-                "verdict": "no_order_effect_observed",
+                "verdict": "no_distributional_order_effect_observed",
                 "verdict_reason": "offline fake for operator-surface tests"}}}
 
 
@@ -202,28 +202,33 @@ def test_order_report_end_to_end_reaches_verdict_json(tmp_path, monkeypatch,
     captured = {}
 
     def fake_osr(run_dirs, conditions, *, admissibility_policy, thresholds,
-                 replay_attestation, terminal_dp_id, surviving_counts):
+                 replay_attestation, terminal_dp_id, surviving_counts,
+                 retries_per_unit=None):
         captured.update(run_dirs=run_dirs, conditions=conditions,
                         admissibility_policy=admissibility_policy,
                         thresholds=thresholds,
                         replay_attestation=replay_attestation,
                         terminal_dp_id=terminal_dp_id,
-                        surviving_counts=surviving_counts)
+                        surviving_counts=surviving_counts,
+                        retries_per_unit=retries_per_unit)
         # the cli DERIVES the terminal probe from the triplet's unique
         # decision-kind point — for the m8 scenarios that is d_partner
         assert terminal_dp_id == "d_partner"
+        # d-003 f1: the policy-required entrypoint sources retries_per_unit=0
+        # from the frozen verified design — omission is impossible
+        assert retries_per_unit == 0
         return _fake_verdict_report(conditions)
 
     monkeypatch.setattr(metrics_mod, "order_sensitivity_report", fake_osr)
     cli.main(_order_report_argv(manifest, out_root))
     out = capsys.readouterr().out
     # verdict + reasons printed
-    assert "no_order_effect_observed" in out and "VERDICT" in out
+    assert "no_distributional_order_effect_observed" in out and "VERDICT" in out
     # the report JSON was written
     rp = os.path.join(out_root, "order_report.json")
     assert os.path.isfile(rp)
     report = json.load(open(rp, encoding="utf-8"))
-    assert report["order_report_version"] == "4"
+    assert report["order_report_version"] == "5"
     # ALL contract kwargs were supplied, from the right sources
     assert captured["conditions"] == EXPECTED_CONDITIONS
     assert captured["surviving_counts"] == {s: 2 for s in SCENARIOS}
@@ -544,7 +549,11 @@ def test_smoke_pack_exact_authorization_reaches_sweep(tmp_path, monkeypatch,
 # ------------------------------------------------------------- result package
 
 def _analyzed_pack(tmp_path, monkeypatch):
-    """A pack with attestation + verdict-bearing report on disk."""
+    """A pack with attestation + verdict-bearing report on disk. Used ONLY by
+    the refusal tests whose gate fires BEFORE the d-003 f2 recompute (verdictless
+    report, missing attestation, attestation-bound-to-other-manifest), so the
+    fast synthetic `_mk_pack` — which the recompute would reject — is sufficient
+    and honest: those refusals never reach the recomputation at all."""
     manifest, out_root, run_ids = _mk_pack(tmp_path)
     _write_attestation(manifest, out_root, run_ids)
     report = _fake_verdict_report(EXPECTED_CONDITIONS)
@@ -554,12 +563,118 @@ def _analyzed_pack(tmp_path, monkeypatch):
     return manifest, out_root, report_path
 
 
-def test_result_package_builds_and_verifies(tmp_path, monkeypatch):
-    manifest, out_root, report_path = _analyzed_pack(tmp_path, monkeypatch)
+# ---- a REAL, recomputable pack (d-003 f2) --------------------------------
+#
+# build_result_package RE-DERIVES the order report for the policy-required m8
+# experiment from the bound evidence (sweep.manifest_load ->
+# metrics.order_sensitivity_report with the frozen VerifiedBundle and
+# retries_per_unit=0) and demands canonical equality with the supplied report.
+# To exercise that path HONESTLY the tests below hand it a pack the recompute
+# genuinely accepts and a report that is genuinely the recomputed one.
+#
+# The pack reuses the operating-characteristics builder `oc._write_unit`, which
+# writes a decision node carrying the terminal probe `d_partner` — exactly what
+# `metrics.order_sensitivity_report` consumes. The A/B/C conditions get the SAME
+# action per matched unit (a clean sharp-null-true pack), so the recompute yields
+# the deterministic verdict `no_distributional_order_effect_observed`.
+
+from scripts import m8_operating_characteristics as oc  # noqa: E402
+from coliseum.textlab.result_package import (  # noqa: E402
+    _recompute_order_report)
+
+# the real pack's per-agent id is oc._write_unit's fixed agent (`live`), not the
+# synthetic `llm:ollama:...` of `_mk_pack`
+REAL_AGENT = "live"
+# 3 conditions x 2 variants x 24 sampler seeds = 144 real run dirs
+REAL_RUN_COUNT = 3 * len(oc.VARIANTS) * len(oc.SAMPLER_SEEDS)
+
+
+def _recomputable_pack(tmp_path, subdir="pack", law=0):
+    """Write a REAL pack the d-003 f2 recompute accepts, plus a genuinely
+    recomputed order report on disk. Returns (manifest, out_root, report_path).
+
+    `law` selects a deterministic per-unit action assignment; A, B and C all
+    receive the SAME action for a matched unit (sharp-null true, so the
+    marginals are identical and the recompute verdict is
+    `no_distributional_order_effect_observed`). Two different `law` values yield
+    two valid packs whose recomputed reports differ — used to prove a report
+    bound to a DIFFERENT pack is refused by the recompute."""
+    out_root = str(tmp_path / subdir)
+    os.makedirs(out_root)
+    run_ids = []
+    rows = []
+    for cond in ("A", "B", "C"):
+        for variant, scen_seed in oc.VARIANTS:
+            for s_index, samp in enumerate(oc.SAMPLER_SEEDS):
+                # action depends ONLY on the unit (and the pack's law), never on
+                # the condition -> A_i == B_i == C_i at every matched unit. The
+                # two laws use DIFFERENT marginal supports (4-action cycle vs
+                # 2-action alternation) so their recomputed reports genuinely
+                # differ, while both stay sharp-null-true.
+                if law == 0:
+                    action = oc.MENU[(s_index
+                                      + (0 if variant == "v0_caravan" else 2))
+                                     % len(oc.MENU)]
+                else:
+                    action = oc.MENU[s_index % 2]
+                d = oc._write_unit(out_root, cond, variant, scen_seed, samp,
+                                   action)
+                rid = os.path.basename(d)
+                run_ids.append(rid)
+                # oc._write_unit omits comparison_regime_id; sweep.manifest_load
+                # keys resume identity on (comparison_regime_id, scenario_seed,
+                # sampler_seed), so a per-CONDITION regime id keeps all 144 keys
+                # unique across the shared unit grid.
+                rj = os.path.join(d, "run.json")
+                with open(rj, encoding="utf-8") as fh:
+                    run = json.load(fh)
+                run["comparison_regime_id"] = f"regime_{cond}"
+                with open(rj, "w", encoding="utf-8") as fh:
+                    json.dump(run, fh)
+                rows.append({"regime_id": f"regime_{cond}", "model": "",
+                             "scenario": oc.CONDITIONS[cond],
+                             "scenario_seed": scen_seed, "sampler_seed": samp,
+                             "variant_id": variant, "temperature": 0.7,
+                             "sampling_mode": "stochastic", "digest": "",
+                             "scenario_hash": "",
+                             "arbitration": "planner_priority", "run_id": rid,
+                             "dir": rid, "reportable": True,
+                             "stochastic_reportable": True,
+                             "interaction_mode": "sequential_history",
+                             "path": ["expose", action]})
+    manifest = os.path.join(out_root, "manifest.jsonl")
+    with open(manifest, "w", encoding="utf-8") as mf:
+        for row in rows:
+            mf.write(json.dumps(row) + "\n")
+
+    # attestation MUST bind manifest_sha256 to THIS manifest and carry a per-run
+    # record (with run_dir) for every run — written AFTER run.json was patched,
+    # so its hashes cover the final bytes.
+    _write_attestation(manifest, out_root, run_ids)
+
+    # the report handed to build_result_package IS the genuine recomputation
+    # (same VerifiedBundle / conditions / terminal probe / surviving counts /
+    # retries_per_unit=0 the recompute derives), so canonical equality holds.
+    att = json.load(open(os.path.join(out_root, "replay_attestation.json"),
+                         encoding="utf-8"))
+    report = _recompute_order_report(EID, REGISTRY, manifest, out_root,
+                                     "configs/scenarios", att)
+    from coliseum.textlab.schema import canonical_json
+    report_path = os.path.join(out_root, "order_report.json")
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(report) + "\n")
+    return manifest, out_root, report_path
+
+
+def test_result_package_builds_and_verifies(tmp_path):
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
     extra = {"suite_receipt": {"passed": 1766, "skipped": 13,
                                "command": "python3 -m pytest -q"}}
+    # config_dir points at the m8 scenarios so the recompute can derive the
+    # terminal probe d_partner
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, extra)
+                                report_path, extra,
+                                config_dir="configs/scenarios")
     assert path == os.path.join(out_root, "result_package.json")
     pkg = verify_result_package(path)   # raises on any mismatch
     assert pkg["package_version"] == "1"
@@ -572,9 +687,11 @@ def test_result_package_builds_and_verifies(tmp_path, monkeypatch):
     entry = _find_entry(REGISTRY, EID)
     assert pkg["design_hash"] == entry["design_hash"]
     assert pkg["design_hash"] == design_hash(entry["planned_design"])
-    assert pkg["order_report_version"] == "4"
-    assert pkg["verdicts"] == {f"llm:ollama:{MODEL}":
-                               "no_order_effect_observed"}
+    assert pkg["order_report_version"] == "5"
+    # the verdict is the DERIVED one, keyed by the real pack's agent id
+    assert pkg["verdicts"] == {REAL_AGENT:
+                               "no_distributional_order_effect_observed"}
+    # models/digests still come from the frozen registry design, not the pack
     assert pkg["models"] == [MODEL]
     assert pkg["model_digests"] == {MODEL: DIGEST}
     # every referenced artifact identified by hash
@@ -582,7 +699,7 @@ def test_result_package_builds_and_verifies(tmp_path, monkeypatch):
     assert pkg["replay_attestation"]["sha256"] == _sha256(
         os.path.join(out_root, "replay_attestation.json"))
     assert pkg["report"]["sha256"] == _sha256(report_path)
-    assert len(pkg["runs"]) == 6
+    assert len(pkg["runs"]) == REAL_RUN_COUNT
     for rec in pkg["runs"].values():
         assert set(rec) == {"run_dir", "replay_ok", "run_json_sha256",
                             "decisions_sha256", "captures_sha256"}
@@ -590,20 +707,20 @@ def test_result_package_builds_and_verifies(tmp_path, monkeypatch):
     assert "git_commit" in pkg   # recorded (may be None), never hashed
 
 
-def test_result_package_refuses_on_tamper(tmp_path, monkeypatch):
-    manifest, out_root, report_path = _analyzed_pack(tmp_path, monkeypatch)
+def test_result_package_refuses_on_tamper(tmp_path):
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, {})
+                                report_path, {}, config_dir="configs/scenarios")
     # 1) tamper the package body itself
     pkg = json.load(open(path, encoding="utf-8"))
-    pkg["verdicts"] = {f"llm:ollama:{MODEL}": "order_effect_observed"}
+    pkg["verdicts"] = {f"llm:ollama:{MODEL}": "distributional_order_effect_observed"}
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(pkg, fh)
     with pytest.raises(SchemaError, match="content hash mismatch"):
         verify_result_package(path)
     # 2) rebuild clean, then tamper a referenced artifact
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, {})
+                                report_path, {}, config_dir="configs/scenarios")
     verify_result_package(path)
     with open(report_path, "a", encoding="utf-8") as fh:
         fh.write("\n")
@@ -611,11 +728,62 @@ def test_result_package_refuses_on_tamper(tmp_path, monkeypatch):
         verify_result_package(path)
 
 
+def test_result_package_refuses_a_forged_verdict(tmp_path):
+    """The heart of d-003 finding 2: build_result_package RE-DERIVES the verdict
+    from the bound evidence and refuses any report whose verdict the evidence
+    does not produce — a caller-authored verdict is never packaged. Two attacks:
+    (1) a FLIPPED verdict on the real pack's own report, and (2) a genuinely
+    recomputed report from a DIFFERENT (but individually valid) pack. Both are
+    blocked BY THE RECOMPUTE, not by an earlier gate — the real pack passes the
+    verdict, versioning, attestation-binding and design-hash checks, so the only
+    thing left to catch the mismatch is the independent recomputation."""
+    from coliseum.textlab.schema import canonical_json
+
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
+
+    # sanity: the untouched real pack packages cleanly (so any refusal below is
+    # attributable to the tamper, not a latent pack defect)
+    ok = build_result_package(EID, manifest, out_root, REGISTRY, report_path,
+                              {}, config_dir="configs/scenarios")
+    verify_result_package(ok)
+    os.remove(ok)
+
+    # (1) FORGE the verdict: flip the derived non-rejection to a rejection. The
+    # report still carries a verdict and the right version, the attestation
+    # still binds THIS manifest, the design still reconstructs — only the
+    # recompute can tell the verdict is not what the evidence produces.
+    with open(report_path, encoding="utf-8") as fh:
+        report = json.load(fh)
+    (agent_id,) = tuple(report["per_agent"])
+    assert report["per_agent"][agent_id]["verdict"] == \
+        "no_distributional_order_effect_observed"
+    report["per_agent"][agent_id]["verdict"] = \
+        "distributional_order_effect_observed"
+    forged_path = os.path.join(out_root, "forged_order_report.json")
+    with open(forged_path, "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(report) + "\n")
+    with pytest.raises(SchemaError, match="independent recomputation"):
+        build_result_package(EID, manifest, out_root, REGISTRY, forged_path,
+                             {}, config_dir="configs/scenarios")
+
+    # (2) MIS-BIND: a report genuinely recomputed from a DIFFERENT valid pack
+    # (different per-unit action law) is handed against THIS pack's evidence.
+    # Every non-recompute gate passes; the recompute derives THIS pack's report
+    # and finds it unequal, so the mis-bound report is refused.
+    _, other_root, other_report = _recomputable_pack(tmp_path, subdir="other",
+                                                     law=1)
+    assert (canonical_json(json.load(open(other_report, encoding="utf-8")))
+            != canonical_json(json.load(open(report_path, encoding="utf-8"))))
+    with pytest.raises(SchemaError, match="independent recomputation"):
+        build_result_package(EID, manifest, out_root, REGISTRY, other_report,
+                             {}, config_dir="configs/scenarios")
+
+
 def test_result_package_refuses_verdictless_report_and_missing_attestation(
         tmp_path, monkeypatch):
     manifest, out_root, report_path = _analyzed_pack(tmp_path, monkeypatch)
     # refusal-shaped report (no verdict) is never packaged
-    refusal = {"report_id": "order_sensitivity", "order_report_version": "4",
+    refusal = {"report_id": "order_sensitivity", "order_report_version": "5",
                "per_agent": {f"llm:ollama:{MODEL}": {
                    "agent_regime_id": "a" * 64, "cells": {}}}}
     bad_report = os.path.join(out_root, "refusal_report.json")

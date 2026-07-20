@@ -27,44 +27,51 @@ otherwise matched experience set moves a terminal action distribution.
 ## Hypothesis (primary, pre-registered — null first)
 
 **Operative H0 — the ONE canonical null of this design, stated verbatim
-(machine-readable as `planned_design.null_form: sharp` +
+(machine-readable as `planned_design.null_form: distributional` +
 `planned_design.null_statement`, design-hashed, and anchored in audited code
 as `registry.M8_NULL_STATEMENT`):**
 
-> Sharp (unit-level) null: for every matched effective unit (variant_id, scenario_seed, sampler_seed), presentation order made no difference to the terminal action chosen at that unit.
+> Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order does not change the population distribution of terminal actions — the marginal terminal-action distribution under order A equals the marginal terminal-action distribution under order B.
 
-**H1:** the negation — for at least one matched unit, presentation order
-changed the terminal action chosen at that unit.
+**H1:** the negation — presentation order changes the population distribution of
+terminal actions, i.e. the marginal terminal-action distributions under A and B
+differ.
 
 This exact statement appears verbatim in the registry `hypothesis`, the
 registry `primary_event`, the committed experiment config, the
-operating-characteristics script, and the committed characterisation
-artifact. There is no second operative null: marginal equality
-`P(Y|A) = P(Y|B)` is a stated **consequence** of H0, never the hypothesis
-under test, and no marginal claim is licensed by any outcome (audit a-004
-finding 0).
+operating-characteristics script, and the committed characterisation artifact.
+
+**Claim scope (a-005, frozen), stated verbatim:**
+
+> Claim scope: only the marginal terminal-action distribution is tested. Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a non-rejection does not establish per-unit invariance.
+
+The replicated per-unit design is a SEPARATE future preregistered experiment.
 
 `Y` is the terminal `final_action` at the **`d_partner`** probe (frozen terminal
 probe identity; nothing else may be measured); `A` is the developmental order,
 `B` the identical admitted experience multiset in a permuted order, `C` the sham
 control (A's order; agent-facing wording and formatting only).
 
-**Why the sharp null is operative, on whose authority, and what was corrected
-(audit 001828 finding 1).** The paired permutation test is exact under the sharp
-null, not under marginal equality `P(Y|A) = P(Y|B)`. These are not equivalent,
-and the audit exhibited the separating case: a pack-level shared latent mode
-(mode 0: every unit chooses `share_resource` under A and `decline_partnership`
-under B; mode 1 the reverse) has exactly equal marginals yet every single unit
-is order-dependent — the sharp null is genuinely false, the marginal null true.
-The test correctly rejects there, so a rejection licenses only the **unit-level**
-conclusion, never "the marginal distribution changed." An earlier registry note
-claiming exchangeability is "implied by H0" was **false** and is removed. The
-owner's Live Ollama directive (Step 7) explicitly directs: *"Use the operative
-sharp null already adopted by the design"* and requires the report to state the
-relationship between the sharp null and the broader marginal claim — that is the
-authority for narrowing the hypothesis and claim ceiling to the sharp null. The
-claim ceiling below is narrowed to match; the marginal claim would require
-additional dependence/sampling assumptions this design does not make.
+**What the permutation test supplies, on whose authority, and the a-004 → a-005
+supersession.** Audit a-004 first froze this design around a **sharp/per-unit**
+null *(that framing is SUPERSEDED and preserved here only for the audit trail)*.
+The owner's a-005 decision then **narrowed the operative null to DISTRIBUTIONAL
+(population-marginal)**: a-005 reproduced that the aggregate `TV(A,B)` statistic
+is blind to balanced unit-level effects — a fully discordant cancelling pack (24
+units share→decline, 24 decline→share) leaves a sharp null false at every unit
+yet has exactly equal A and B marginals, so a sharp *claim* riding a marginal
+*statistic* was a mismatch. The owner narrowed the claim to the statistic. This
+changed the claim vocabulary and the claim ceiling, not the arithmetic. The
+within-unit paired permutation supplies the **reference distribution under
+exchangeability** (which implies marginal equality), a valid level-alpha
+reference for the marginal `TV(A,B)` statistic; the design does **not** claim
+the test is exact for bare marginal equality. A rejection evidences a
+**marginal-distribution difference only**, never a per-unit claim; a
+non-rejection evidences only "no distributional order effect observed at the
+detectable threshold" and never per-unit invariance (balanced cancelling
+unit-level effects keep the marginals equal — out of scope). An earlier registry
+note claiming exchangeability is "implied by H0" was **false** and was removed
+(audit 001828 finding 1).
 
 No stronger alternative is authorized at this stage.
 
@@ -244,8 +251,17 @@ excluded with reason `backend_seed_unverified`.
 
 ## Analysis rule (pre-registered)
 
-Applied to the run set **once**, after the complete pack closes. No interim
-analysis, no early stopping, no post-hoc threshold movement.
+**Analysis timing / stopping rule (frozen, a-005 finding 1), stated verbatim:**
+
+> Analysis timing (frozen): the analysis is performed exactly once, after the complete 144-run pack has closed; there is no interim analysis, no early stopping, no adaptive continuation, and no outcome-dependent addition or removal of units, seeds, scenarios or conditions.
+
+This is fixed by a structured `stopping_rule` block in `planned_design`
+(`analysis_timing: complete_pack`, `analyses_total: 1`, `interim_analyses: 0`,
+`early_stopping: false`, `adaptive_continuation: false`,
+`outcome_dependent_composition: false`, `pack_runs: 144`,
+`matched_units_per_condition: 48`), design-hashed, mirrored into the committed
+config, and lint-enforced independently of the self-derived hash. A partial pack
+yields no verdict.
 
 1. **Admission.** A run enters analysis only if it is `reportable`,
    `stochastic_reportable`, carries a matching `agent_regime_id` and
@@ -268,27 +284,28 @@ analysis, no early stopping, no post-hoc threshold movement.
    **`alpha = 0.05`**. A percentile bootstrap (same iterations and seed) is
    retained for reporting intervals on the observed distances.
 
-   **The null the test is exact under is exactly the null this design
-   declares — the canonical sharp null, and nothing weaker.** A paired
-   permutation test is exact under *within-pair exchangeability* — that for
-   each matched unit, the condition label carries no information about that
-   unit's terminal action — and the sharp null supplies it. Equality of the A
-   and B **marginal** distributions does **not** logically imply it: two
-   conditions can share a marginal distribution while their outcomes are
-   dependent within a unit in an asymmetric way, and under that weaker
-   hypothesis alone the test is not exact. That is why marginal equality is
-   nowhere the operative null of this design (audit a-004 finding 0 removed
-   every phrasing that read as if it were).
+   **What the test is a valid level-`alpha` reference for, and the claim it
+   licenses.** A paired permutation test draws its reference distribution from
+   *within-pair exchangeability* — that for each matched unit, the condition
+   label may be swapped without changing the joint law. Exchangeability implies
+   equality of the A and B **marginal** distributions, so the paired
+   permutation is a valid level-`alpha` reference for the marginal `TV(A,B)`
+   statistic. The design does **not** claim the test is exact for bare marginal
+   equality: two conditions can share a marginal distribution while their
+   outcomes are dependent within a unit in an asymmetric way, and under that
+   weaker hypothesis alone the test is not exact. The operative null is
+   therefore stated at the level the statistic actually resolves — the
+   **distributional (population-marginal)** null (audit a-005, which SUPERSEDED
+   the earlier sharp/per-unit framing).
 
-   The sharp null is also the scientifically natural reading rather than a
-   convenience: the matched unit fixes the variant, the scenario seed and the
-   sampler seed, so the canonical statement says precisely "for this unit,
-   presentation order made no difference to what was chosen" — the thing the
-   experiment is actually asking. The sharp null **implies** marginal
-   equality, so that marginal equality is a stated consequence of H0 and the
-   claim ceiling stays at the unit level; a rejection licenses only the
-   unit-level conclusion, and the result report must state exactness under
-   the sharp null, never under marginal equality alone.
+   Because the statistic is the marginal `TV(A,B)`, the claim ceiling is the
+   marginal distribution and nothing finer: a rejection evidences a
+   **marginal-distribution difference only** and never identifies which units
+   changed; a non-rejection evidences only "no distributional order effect
+   observed at the detectable threshold" and does **not** establish per-unit
+   invariance, because balanced cancelling unit-level effects can leave the
+   marginals equal (out of scope). The result report must state this
+   distributional claim ceiling explicitly.
 
 ### Why the split-half noise floor was replaced
 
@@ -310,10 +327,10 @@ genuine effect at TV(A,B)=0.6: **false-positive rate 0.000, power 0.000.** A
 design that cannot detect an effect of any size is not conservative, it is
 inert.
 
-A paired permutation null fixes the cause rather than the symptom. It is exact
-under the within-pair exchangeability that the canonical **sharp** H0
-supplies (marginal equality alone would not supply it — see the hypothesis
-section), it uses the actual matched sample sizes so no size mismatch exists,
+A paired permutation null fixes the cause rather than the symptom. It draws its
+reference distribution from within-pair exchangeability, supplied by the paired
+matched construction (marginal equality alone would not supply it — see the
+hypothesis section), it uses the actual matched sample sizes so no size mismatch exists,
 it consumes no additional live runs, and it respects the pairing the design
 already guarantees. The rejected alternatives
 are recorded to show the choice was not the convenient one: raising
@@ -348,15 +365,19 @@ A refusal is an inconclusive result, never a number to be interpreted.
 ## Primary event (decision rule)
 
 The analysis callable is **`metrics.order_sensitivity_report`** at
-**`ORDER_REPORT_VERSION 4`** — the ONE version literal this document pins, and
+**`ORDER_REPORT_VERSION 5`** — the ONE version literal this document pins, and
 it appears nowhere in this document at any other value (audit a-004 finding 0
 found a 3-vs-4 disagreement here; corrected). The version has been bumped once
-per change to the decision rule, so any emitted verdict is traceable to the
-rule that produced it: v1 the bootstrap-bound comparison against a split-half
-floor; v2 the paired permutation null; v3 the corrected asymmetric sensitivity
-requirement; v4 (current) the mandatory clause-0 evidence admission and the
-clause-2 sham-adequacy warrant. The a-004 scientific re-freeze changes **no**
-clause of the rule, so the version stays 4. The registry entry's
+per change to the decision rule or its claim ceiling, so any emitted verdict is
+traceable to the rule that produced it: v1 the bootstrap-bound comparison
+against a split-half floor; v2 the paired permutation null; v3 the corrected
+asymmetric sensitivity requirement; v4 the mandatory clause-0 evidence admission
+and the clause-2 sham-adequacy warrant; v5 (current, owner a-005) the operative
+null narrowed to **distributional** — the six-clause ordered rule and its
+arithmetic are unchanged, but the emitted verdict vocabulary
+(`distributional_order_effect_observed` / `no_distributional_order_effect_observed`)
+and the claim ceiling change, so a v4 (sharp-claim) report can never be mistaken
+for a v5 (distributional-claim) one. The registry entry's
 `primary_event` is the authoritative statement of the frozen rule, and the
 lint fails a design whose version marker disagrees with it, consuming the
 frozen `admissibility_policy` and `thresholds` loaded from this experiment's
@@ -367,7 +388,7 @@ candidate to return a clean null from wholly unparseable output. Naming it here
 would freeze the exact unsafe path this design exists to avoid.
 
 Let `q_AB` and `q_AC` be the `1 − alpha` quantiles of the paired permutation
-nulls for A vs B and A vs C. The rule (`ORDER_REPORT_VERSION 4`) is evaluated in
+nulls for A vs B and A vs C. The rule (`ORDER_REPORT_VERSION 5`) is evaluated in
 this order, and **no distance, quantile, or verdict may be computed or emitted
 once any admission clause refuses**:
 
@@ -398,9 +419,13 @@ once any admission clause refuses**:
    sham warrant is missing; a positive verdict is unreachable and the outcome is
    at most **inconclusive** past clause 3.
 3. Else if the observed `TV(A,B)` **exceeds** `q_AB` **and** the sham warrant of
-   clause 2 holds: **order effect observed**.
-4. Else if `TV(A,B) ≤ q_AB` and `q_AB ≤ min_detectable_effect`: **no order
-   effect observed**.
+   clause 2 holds: **distributional order effect observed**
+   (`distributional_order_effect_observed`) — a marginal-distribution difference
+   only, never a per-unit claim.
+4. Else if `TV(A,B) ≤ q_AB` and `q_AB ≤ min_detectable_effect`: **no
+   distributional order effect observed**
+   (`no_distributional_order_effect_observed`) — this does **not** establish
+   per-unit invariance.
 5. Else: **inconclusive**.
 
 **`sham_equivalence_margin = 0.25`**, frozen in `planned_design.thresholds`
@@ -459,12 +484,13 @@ Without one the null branch is degenerate at high noise. Reproduced at the exact
 declared sample size: a fully admissible 144-unit pack with `A|S1` entirely
 `share_resource`, `A|S2` entirely `verify_first`, `C` identical to `A`, and `B`
 entirely `decline_partnership` — A and B **maximally separated, empirically
-disjoint** — was returned by the original v1 rule as `no_order_effect_observed`,
+disjoint** — was returned by the original v1 rule as
+`no_order_effect_observed` (the superseded v1 verdict name),
 because its split-half floor `TV_null=1.0` was not strictly exceeded by
 `TV(A,B)=1.0`. A maximally unstable instrument would have closed the gate with a
 "successful null" and the downstream track would have advanced on it.
 
-Under the current rule that pack is `order_effect_observed`: clause 3 fires on a
+Under the current rule that pack is `distributional_order_effect_observed`: clause 3 fires on a
 genuine rejection before clause 4 is ever reached. **The invariant the ceiling
 exists to protect is unchanged and now holds by construction — that pack can
 never be reported as a successful null.** What changed is which clause protects
@@ -480,7 +506,7 @@ The criteria that declare this finite-sample design fit to run are **frozen in
 code** — they are never invented or adjusted inside the characterisation
 script (audit a-004 finding 1 blocked exactly that):
 
-- **`type_i_criterion` (frozen string): "CP-95 upper bound of sharp-null
+- **`type_i_criterion` (frozen string): "CP-95 upper bound of distributional-null
   rejection rate <= alpha".** The **upper** bound: only an upper confidence
   limit at or below `alpha` supports the claim "type-I error is at or below
   alpha". The superseded script-invented check bounded the *lower* limit,
@@ -511,13 +537,15 @@ charged arm).** The rule yielded:
 | 0.75 | 1.000 | [0.991, 1.000] | yes |
 | 1.00 | 1.000 | [0.991, 1.000] | yes |
 
-So **`min_detectable_effect` is frozen at `0.35`** — the honest smallest grid
-effect the design reliably resolves. The point estimate at 0.25 was exactly
+So **`min_detectable_effect` is frozen at `0.35`** — the **distributional
+detectable-effect floor**, the honest smallest grid effect the design reliably
+resolves (value unchanged at the a-005 re-framing; only its description is now
+distributional). The point estimate at 0.25 was exactly
 0.80, but its lower confidence bound fell short of the target, and neither the
 value nor `power_target` was adjusted to make 0.25 pass. **Effects between
 `0.25` and `0.35` total variation are real possibilities this design cannot
 reliably detect at `n = 48`; an inconclusive outcome in that band is expected
-and is not a null result.** The four sharp-null type-I arms all measured
+and is not a null result.** The four distributional-null type-I arms all measured
 `0/400` (CP-95 upper bound `0.0092 <= alpha = 0.05`).
 
 **The sham-equivalence margin is intentionally tighter than the MDE.**
@@ -528,32 +556,35 @@ scientifically conservative direction — raising the margin to 0.35 to "match"
 the MDE would *weaken* the sham warrant (`q_AC < margin` becomes easier to
 grant) — so the two bounds are deliberately decoupled.
 
-**The null arms must mechanically satisfy the canonical sharp null** (audit
-a-004 finding 0): a sharp-null H0 trial generates each matched unit's
-terminal action **once** and copies it across A/B/C exactly — the design
+**The null arms must mechanically satisfy the canonical distributional null**
+(audit a-004 finding 0, held through a-005): a distributional-null H0 trial
+generates each matched unit's terminal action **once** and copies it across
+A/B/C exactly — identical schedules have identical marginals, the design
 declares no condition-independent noise, so none is applied — and every
-generated schedule is verified **unit-by-unit before analysis** to satisfy
-the canonical statement; named alternative arms are verified to violate it on
+generated schedule is verified **unit-by-unit before analysis** (concordant by
+construction); named alternative arms are verified to violate it on
 their declared axis. Under seeded per-unit decoding this is the faithful
 model, not a convenience: if order (or the sham rewording) truly makes no
 difference to a unit's computation, the realized terminal action is
-identical. A structural consequence, stated honestly: under the sharp null
-the observed pack is condition-invariant by the null itself, so the
+identical. A structural consequence, stated honestly: under the distributional
+null so constructed the observed pack is condition-invariant, so the
 false-rejection rate is exactly zero and the frozen type-I bound holds
-mechanically — the exactness of the paired permutation test under its own
-null, exercised end-to-end rather than assumed.
+mechanically — the paired permutation test at its own reference distribution,
+exercised end-to-end rather than assumed.
 
 **The former iid equal-marginal "H0" arms are relabeled, not deleted**: A, B,
 C drawn iid from one distribution makes the *pair* distribution exchangeable
 — so the test still rejects near or below `alpha` for that broader family,
-reported as robustness context — but every such pack **violates** the sharp
-null (the audit measured 27–44 discordant units per pack), so those rates
-are never charged as sharp-null type-I. The dependent shared-latent two-mode
-process from audit 001828 finding 1 is characterised in both halves: sharp
-null true within mode (charged type-I) and sharp null false with equal
-marginals (the separating case, reported as correct detection).
+reported as robustness context — but each such pack has equal marginals only in
+expectation while disagreeing unit by unit (the audit measured 27–44 discordant
+units per pack), so those rates are exchangeability-robustness context, never
+charged as distributional-null type-I. The dependent shared-latent two-mode
+process from audit 001828 finding 1 is characterised in both halves: the null
+holds within mode (equal marginals across conditions, charged type-I) and the
+separating case where within-pack A/B marginals differ (reported as correct
+detection).
 
-**Power is characterised with the sham axis sharply null** (`C` copied from
+**Power is characterised with the sham axis holding the null** (`C` copied from
 `A`, verified): under the unified null form that is what "the sham is truly
 null" means. The exchangeability-context arms show the design's behavior
 when the sham axis is null only in distribution — the warrant frequently
@@ -602,20 +633,23 @@ it defeat (5). Those require the separately preregistered follow-ups named below
 
 ## What may NOT be claimed
 
-**Maximum positive claim** *(narrowed to the sharp null per audit 001828
-finding 1 and the owner directive's Step-7 authority; a rejection licenses the
-unit-level conclusion only)*:
+**Maximum positive claim** *(capped at the distributional level per owner audit
+a-005; a rejection evidences a marginal-distribution difference only, never a
+per-unit claim)*:
 
-> Under the frozen live-model regime, the terminal actions of matched units were
-> order-dependent: the paired exact test rejected the sharp null that
-> presentation order made no difference to any unit's chosen terminal action.
-> This does not establish that the marginal terminal-action distributions
-> differ, which would require dependence assumptions this design does not make.
+> Under the frozen live-model regime, the paired permutation test rejected the
+> distributional null: the population (marginal) distribution of terminal actions
+> under order A differs from that under order B. This is a population-level
+> (marginal) claim only — it does not identify which units changed or in which
+> direction, and does not establish any per-unit order effect.
 
-**Maximum null claim:**
+**Maximum null claim** *(the permitted null-result language, verbatim)*:
 
-> Under the frozen live-model regime and preregistered sensitivity bound, the
-> experiment did not detect a temporal-order effect.
+> No distributional order effect was observed at the experiment's
+> detectable-effect threshold.
+
+This does **not** establish per-unit invariance: balanced cancelling unit-level
+effects can leave the marginals equal (out of scope for this experiment's claim).
 
 **Maximum inconclusive claim:**
 

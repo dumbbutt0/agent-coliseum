@@ -94,14 +94,16 @@ def test_design_hash_reconstructs_from_planned_design():
 
 def test_frozen_design_values():
     pd = _entry()["planned_design"]
-    # a-004 finding 0: the ONE canonical null, machine-readable and verbatim
-    assert pd["null_form"] == "sharp"
+    # a-005: the ONE canonical null is now DISTRIBUTIONAL, machine-readable
+    # and verbatim
+    assert pd["null_form"] == "distributional"
     assert pd["null_statement"] == M8_NULL_STATEMENT
     assert pd["null_statement"] in pd["hypothesis"]
     assert pd["null_statement"] in pd["primary_event"]
-    # marginal equality is a stated CONSEQUENCE, never the operative null
-    assert "CONSEQUENCE" in pd["hypothesis"]
-    assert "never the operative" in pd["hypothesis"]
+    # only the marginal distribution is tested; per-unit effects are OUT OF SCOPE
+    assert "CLAIM SCOPE" in pd["hypothesis"]
+    assert "OUT OF SCOPE" in pd["hypothesis"]
+    assert "per-unit invariance" in pd["hypothesis"]
     assert pd["models"] == [MODEL]
     assert pd["model_digests"] == {MODEL: DIGEST}
     assert pd["scenarios"] == SCENARIOS
@@ -162,11 +164,12 @@ def test_decision_rule_is_a_rule_not_a_vibe():
 def test_primary_event_freezes_the_successor_analysis_callable():
     pe = _entry()["planned_design"]["primary_event"]
     assert "order_sensitivity_report" in pe
-    # R7: the callable bumps to version 4 because the decision rule changed
-    # AGAIN (mandatory clause-0 evidence admission + sham-adequacy warrant)
-    assert "ORDER_REPORT_VERSION 4" in pe
+    # a-005: the callable bumps to version 5 because the CLAIM changed — the
+    # operative null narrowed from sharp/per-unit to DISTRIBUTIONAL
+    assert "ORDER_REPORT_VERSION 5" in pe
     assert "ORDER_REPORT_VERSION 2" not in pe
     assert "ORDER_REPORT_VERSION 3" not in pe
+    assert "ORDER_REPORT_VERSION 4" not in pe
     # the Phase-1 comparator may not be the frozen path
     assert "scramble_terminal_distribution" not in pe
     # and the frozen bounds it consumes are named in the identity — including
@@ -473,7 +476,7 @@ def test_load_thresholds_returns_frozen_values():
         "alpha": 0.05,
         "power_target": 0.8,
         "type_i_criterion":
-            "CP-95 upper bound of sharp-null rejection rate <= alpha",
+            "CP-95 upper bound of distributional-null rejection rate <= alpha",
         "max_surviving_delta": 2,
         "noise_floor_split": {
             "S1": [2001, 2002, 2003, 2004, 2005, 2006,
@@ -677,7 +680,7 @@ def test_missing_noise_floor_split_is_refused(tmp_path):
 
 def test_primary_event_expresses_the_six_clause_ordered_rule():
     """The frozen decision rule mirrors the prereg's clause 0-5 rule exactly
-    (ORDER_REPORT_VERSION 4): clause 0 evidence admission, clause 1 policy
+    (ORDER_REPORT_VERSION 5): clause 0 evidence admission, clause 1 policy
     refusal, clause 2 sham adequacy, clause 3 rejection, clause 4 warranted
     null, clause 5 inconclusive."""
     pe = _entry()["planned_design"]["primary_event"]
@@ -716,12 +719,13 @@ def test_primary_event_expresses_the_six_clause_ordered_rule():
     # the audit's pinned boundary case decides INCONCLUSIVE, never positive
     assert "TV(A,C) = q_AC = sham_equivalence_margin is inconclusive under " \
            "the strict inequality, never a positive" in pe
-    # clause 3: rejection + sham warrant -> positive
+    # clause 3: rejection + sham warrant -> positive (distributional, a-005)
     assert "the observed TV(A,B) exceeds q_AB AND the sham warrant of " \
-           "clause (2) holds, the verdict is ORDER EFFECT OBSERVED" in pe
+           "clause (2) holds, the verdict is DISTRIBUTIONAL ORDER EFFECT " \
+           "OBSERVED" in pe
     # clause 4: sensitivity warrants the null claim
     assert "q_AB is less than or equal to min_detectable_effect" in pe
-    assert "NO ORDER EFFECT OBSERVED" in pe
+    assert "NO DISTRIBUTIONAL ORDER EFFECT OBSERVED" in pe
     # clause 5: neither rejected nor entitled to assert absence
     assert "(5) else the verdict is inconclusive" in pe
     assert "NOT evidence of absence" in pe
@@ -792,21 +796,23 @@ def test_dropping_the_sham_adequacy_warrant_fails_the_lint(tmp_path):
                for i in issues), issues
 
 
-def test_notes_state_the_sharp_null_not_the_false_exchangeability_claim():
-    """Audit a-003 finding 0: the registry note claiming the permutation
-    null's exchangeability is 'implied by H0' was FALSE (marginal equality
-    does not imply within-pair exchangeability) and is replaced by the
-    sharp-null statement mirroring the prereg."""
+def test_notes_preserve_the_exchangeability_correction_and_distributional_reframing():
+    """Audit a-003 finding 0: the registry note claiming the permutation null's
+    exchangeability is 'implied by H0' was FALSE (marginal equality does not
+    imply within-pair exchangeability) and was removed. a-005 then narrowed the
+    operative null to DISTRIBUTIONAL while keeping the within-unit permutation as
+    the reference distribution under exchangeability, capping the claim there."""
     pd = _entry()["planned_design"]
     assert "exchangeability implied by H0" not in pd["notes"]
     assert "WITHIN-PAIR EXCHANGEABILITY" in pd["notes"]
-    assert "SHARP null" in pd["notes"]
     assert "FALSE and is removed" in pd["notes"]
-    # a rejection licenses only the unit-level conclusion
-    assert "unit-level conclusion" in pd["notes"]
-    # the primary_event states the operative sharp null too
-    assert "SHARP" in pd["primary_event"]
-    assert "within-pair exchangeability" in pd["primary_event"]
+    # a-005 distributional re-framing is recorded, and the claim is capped there
+    assert "DISTRIBUTIONAL RE-FRAMING" in pd["notes"]
+    assert "per-unit invariance" in pd["notes"]
+    # the primary_event states the operative distributional null and keeps the
+    # permutation as the exchangeability reference
+    assert "distributional" in pd["primary_event"]
+    assert "reference distribution under exchangeability" in pd["primary_event"]
 
 
 def test_the_sensitivity_requirement_is_declared_null_branch_only():
@@ -851,19 +857,20 @@ def test_dropping_the_asymmetry_statement_fails_the_lint(tmp_path):
 
 @pytest.mark.parametrize("stale", ["ORDER_REPORT_VERSION 1",
                                    "ORDER_REPORT_VERSION 2",
-                                   "ORDER_REPORT_VERSION 3"])
+                                   "ORDER_REPORT_VERSION 3",
+                                   "ORDER_REPORT_VERSION 4"])
 def test_a_stale_callable_version_fails_the_lint(tmp_path, stale):
     """A verdict emitted by an older callable implements a DIFFERENT decision
     rule and must not be able to claim this design."""
     pe = _entry()["planned_design"]["primary_event"]
-    rigged = pe.replace("ORDER_REPORT_VERSION 4", stale)
+    rigged = pe.replace("ORDER_REPORT_VERSION 5", stale)
     assert stale in rigged
     path = _rehashed(
         tmp_path, lambda e: e["planned_design"].__setitem__(
             "primary_event", rigged))
     issues = _m8_issues(lint_experiments_registry(path, ROOT))
     assert not any("design_hash" in i for i in issues)
-    assert any("ORDER_REPORT_VERSION 4" in i for i in issues), issues
+    assert any("ORDER_REPORT_VERSION 5" in i for i in issues), issues
 
 
 def test_the_asymmetry_correction_is_justified_in_the_design_hashed_notes():
@@ -902,11 +909,12 @@ def test_config_agrees_with_the_registry_entry():
     assert cfg["thresholds"]["permutation_iterations"] == 10000
     assert cfg["thresholds"]["permutation_seed"] == 20260719
     assert cfg["thresholds"]["alpha"] == 0.05
-    # R7: both files carry the sham-adequacy margin and the v4 rule
+    # R7/a-005: both files carry the sham-adequacy margin and the v5 rule
     assert cfg["thresholds"]["sham_equivalence_margin"] == 0.25
-    assert "ORDER_REPORT_VERSION 4" in cfg["primary_event"]
+    assert "ORDER_REPORT_VERSION 5" in cfg["primary_event"]
     assert "ORDER_REPORT_VERSION 2" not in cfg["primary_event"]
     assert "ORDER_REPORT_VERSION 3" not in cfg["primary_event"]
+    assert "ORDER_REPORT_VERSION 4" not in cfg["primary_event"]
     assert "LOWER bound of TV(A,B)" not in cfg["primary_event"]
     # R6: and both files carry the corrected asymmetric sensitivity requirement
     assert "attaches ONLY to the null branch" in cfg["primary_event"]
@@ -1194,8 +1202,8 @@ def test_profile_constant_matches_the_shipped_design():
     for k, v in M8_FROZEN_PROFILE["thresholds"].items():
         assert pd["thresholds"][k] == v, k
     assert M8_FROZEN_PROFILE["model_digests"] == {MODEL: DIGEST}
-    # a-004: the profile anchors the canonical null and both fitness criteria
-    assert M8_FROZEN_PROFILE["null_form"] == "sharp"
+    # a-004/a-005: the profile anchors the canonical null and both fitness criteria
+    assert M8_FROZEN_PROFILE["null_form"] == "distributional"
     assert M8_FROZEN_PROFILE["null_statement"] == M8_NULL_STATEMENT
     assert M8_FROZEN_PROFILE["thresholds"]["power_target"] == 0.8
     assert M8_FROZEN_PROFILE["thresholds"]["type_i_criterion"] == \
@@ -1212,7 +1220,7 @@ def test_canonical_null_statement_is_mirrored_across_every_surface():
     pd = _entry()["planned_design"]
     cfg = _config()
     assert pd["null_statement"] == M8_NULL_STATEMENT
-    assert cfg["null_form"] == "sharp"
+    assert cfg["null_form"] == "distributional"
     assert cfg["null_statement"] == M8_NULL_STATEMENT
     assert M8_NULL_STATEMENT in pd["hypothesis"]
     assert M8_NULL_STATEMENT in pd["primary_event"]
@@ -1229,30 +1237,36 @@ def test_canonical_null_statement_is_mirrored_across_every_surface():
     assert M8_NULL_STATEMENT in " ".join(script.split())
 
 
-def test_the_marginal_null_is_nowhere_the_operative_hypothesis():
-    """The a-004 blocker: the registry hypothesis stated marginal
-    P(Y|A)=P(Y|B) while the rule tested the sharp null. The hypothesis now
-    leads with the canonical sharp statement, and every mention of marginal
-    equality in the frozen surfaces marks it a consequence, never the
-    operative null."""
+def test_the_distributional_null_is_the_operative_hypothesis():
+    """a-005 owner decision (the INVERSE of the a-004 posture): the operative
+    null is now the DISTRIBUTIONAL (population-marginal) null and the claim is
+    capped there. The hypothesis leads with the canonical distributional
+    statement, marks per-unit / cancelling effects OUT OF SCOPE, and never
+    reintroduces the sharp/per-unit null as operative; the frozen surfaces emit
+    no per-unit claim."""
     pd = _entry()["planned_design"]
     hyp = pd["hypothesis"]
-    # the hypothesis leads with the canonical sharp null
-    assert hyp.index("Sharp (unit-level) null") < hyp.index("P(Y|A)")
-    assert "CONSEQUENCE" in hyp and "never the operative" in hyp
-    # the old marginal-first hypothesis phrasing is gone
-    assert "is unchanged A vs B" not in hyp
-    assert "never the operative hypothesis" in pd["primary_event"]
+    # the hypothesis leads with the canonical distributional null, IS operative
+    assert hyp.index("Distributional (population-level) null") \
+        < hyp.index("CLAIM SCOPE")
+    assert "null_form: distributional" in hyp
+    # per-unit / cancelling effects are explicitly OUT OF SCOPE, not operative
+    assert "OUT OF SCOPE" in hyp and "per-unit invariance" in hyp
+    assert "Sharp (unit-level) null" not in hyp
+    # a rejection is capped at the marginal level and never a per-unit claim
+    assert "never a per-unit claim" in pd["primary_event"]
+    assert "never per-unit" in pd["primary_event"]
 
 
 def test_prereg_doc_pins_exactly_one_callable_version_literal():
-    """a-004 finding 0 evidence: the prereg simultaneously named
-    ORDER_REPORT_VERSION 3 and 4. One literal now, everywhere."""
+    """a-004 finding 0 evidence, held through a-005: the prereg once named two
+    callable versions at once. One literal now, everywhere — bumped to 5 at the
+    distributional re-framing."""
     with open(PREREG_DOC, encoding="utf-8") as fh:
         prereg = fh.read()
-    assert "ORDER_REPORT_VERSION 4" in prereg
+    assert "ORDER_REPORT_VERSION 5" in prereg
     for stale in ("ORDER_REPORT_VERSION 1", "ORDER_REPORT_VERSION 2",
-                  "ORDER_REPORT_VERSION 3", "ORDER_REPORT_VERSION 5"):
+                  "ORDER_REPORT_VERSION 3", "ORDER_REPORT_VERSION 4"):
         assert stale not in prereg, stale
 
 
@@ -1337,7 +1351,7 @@ def test_the_lower_bound_type_i_direction_is_refused(tmp_path):
     path = _rehashed(
         tmp_path, lambda e: e["planned_design"]["thresholds"].__setitem__(
             "type_i_criterion",
-            "CP-95 lower bound of sharp-null rejection rate <= alpha"))
+            "CP-95 lower bound of distributional-null rejection rate <= alpha"))
     issues = _m8_issues(lint_experiments_registry(path, ROOT))
     assert any("SUPERSEDED lower-bound direction" in i for i in issues), \
         issues

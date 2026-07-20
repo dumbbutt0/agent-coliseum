@@ -1,17 +1,21 @@
 """m8 Phase-2 — frozen operating characteristics of the finite-sample decision rule.
 
-RESTRUCTURED AT THE a-004 SCIENTIFIC RE-FREEZE. The audit blocked the previous
-shape of this characterisation on two grounds, and this module regresses the
-repairs:
+RESTRUCTURED AT THE a-004 SCIENTIFIC RE-FREEZE, then re-framed at the a-005
+DISTRIBUTIONAL narrowing (owner decision): the operative null is now the
+canonical distributional (population-marginal) null, the emitted verdicts are
+distributional_order_effect_observed / no_distributional_order_effect_observed,
+and ORDER_REPORT_VERSION is 5. The arithmetic is unchanged, so the committed
+numbers are unchanged. This module regresses the repairs:
 
-* Finding 0 — ONE NULL. The iid equal-marginal packs previously charged as
-  sharp-null type-I arms violate the sharp null in every generated trial (the
-  independent probe measured 27-44 discordant units per pack). The sharp-null
-  H0 arms now generate each unit's terminal action ONCE and copy it across
-  A/B/C exactly, every schedule is MECHANICALLY verified unit-by-unit before
-  analysis, and the iid arms are relabeled exchangeability-robustness context,
-  never charged as type-I. The canonical null statement is echoed verbatim by
-  the committed artifact and anchored in registry.M8_NULL_STATEMENT.
+* ONE NULL. The iid equal-marginal packs have equal marginals only in
+  expectation while disagreeing unit by unit in every generated trial (the
+  independent probe measured 27-44 discordant units per pack). The type-I H0
+  arms now generate each unit's terminal action ONCE and copy it across A/B/C
+  exactly (identical marginals by construction), every schedule is MECHANICALLY
+  verified unit-by-unit before analysis, and the iid arms are relabeled
+  exchangeability-robustness context, never charged as type-I. The canonical
+  null statement is echoed verbatim by the committed artifact and anchored in
+  registry.M8_NULL_STATEMENT.
 
 * Finding 1 — FROZEN CRITERIA, honest directions. The fitness criteria live
   in planned_design.thresholds (power_target = 0.8; type_i_criterion = the
@@ -52,7 +56,7 @@ ARTIFACT = os.path.join(ROOT, "derived", "textlab",
 SCRIPT = os.path.join(ROOT, "scripts", "m8_operating_characteristics.py")
 
 # importing the script module ALSO exercises its two import-time freezes:
-# ORDER_REPORT_VERSION == "4" and CANONICAL_NULL_STATEMENT == the audited
+# ORDER_REPORT_VERSION == "5" and CANONICAL_NULL_STATEMENT == the audited
 # registry.M8_NULL_STATEMENT anchor.
 _spec = importlib.util.spec_from_file_location("m8oc", SCRIPT)
 m8oc = importlib.util.module_from_spec(_spec)
@@ -136,8 +140,9 @@ def test_script_bundle_equals_the_registry_served_bundle():
 
 def test_every_sharp_null_arm_generates_concordant_schedules():
     """For each arm charged type_i, the generated potential-outcome schedule
-    satisfies the canonical sharp null at EVERY matched unit — one draw per
-    unit, copied across A/B/C exactly, no condition-dependent noise."""
+    holds the canonical distributional null by construction at EVERY matched
+    unit — one draw per unit, copied across A/B/C exactly (identical marginals),
+    no condition-dependent noise."""
     charged = {n: a for n, a in m8oc.ARMS.items() if a["charged"] == "type_i"}
     assert set(charged) == {"sharp_h0_iid_uniform", "sharp_h0_iid_graded",
                             "sharp_h0_iid_concentrated",
@@ -156,7 +161,7 @@ def test_every_sharp_null_arm_generates_concordant_schedules():
 
 def test_every_alternative_arm_violates_the_null_on_its_declared_axis():
     """The named separating/context/power arms must genuinely violate the
-    sharp null where they claim to — an 'alternative' that satisfies the null
+    null where they claim to — an 'alternative' that holds the null
     separates nothing."""
     for name, arm in m8oc.ARMS.items():
         if arm["charged"] == "type_i":
@@ -183,7 +188,7 @@ def test_verification_refuses_a_mislabeled_schedule():
     discordant = m8oc.build_schedule(
         "iid", {"A": m8oc.GRADED, "B": m8oc.GRADED, "C": m8oc.GRADED},
         random.Random(2))
-    with pytest.raises(AssertionError, match="SHARP-NULL TRUE"):
+    with pytest.raises(AssertionError, match="NULL-HOLDING TRUE"):
         m8oc.verify_schedule(discordant, {"AB": True, "AC": True}, "t")
     with pytest.raises(AssertionError, match="ALTERNATIVE"):
         m8oc.verify_schedule(concordant, {"AB": False}, "t")
@@ -192,8 +197,8 @@ def test_verification_refuses_a_mislabeled_schedule():
 def test_run_trial_verifies_before_any_analysis():
     """The verification sits INSIDE the trial path: a trial whose declared
     axes disagree with its generated schedule refuses before any statistic
-    exists (an iid process declared sharp-null true must raise)."""
-    with pytest.raises(AssertionError, match="SHARP-NULL TRUE"):
+    exists (an iid process declared null-holding true must raise)."""
+    with pytest.raises(AssertionError, match="NULL-HOLDING TRUE"):
         m8oc.run_trial(("iid",
                         {"A": m8oc.GRADED, "B": m8oc.GRADED, "C": m8oc.GRADED},
                         {"AB": True, "AC": True}, 12345, "mislabeled"))
@@ -222,8 +227,8 @@ def test_maximally_noisy_pack_is_never_a_successful_null(tmp_path):
     assert di["q_ac"] < di["sham_equivalence_margin"]        # clause 2, part 2 (v4)
     assert di["tv_ab"] > di["q_ab"]                          # clause 3 FIRES
     assert di["q_ab"] == 0.291667                            # rejection threshold
-    assert agent["verdict"] != "no_order_effect_observed"    # THE INVARIANT
-    assert agent["verdict"] == "order_effect_observed"
+    assert agent["verdict"] != "no_distributional_order_effect_observed"    # THE INVARIANT
+    assert agent["verdict"] == "distributional_order_effect_observed"
     # the split-half floor is still REPORTED at its maximum — and gates nothing
     assert agent["diagnostics"]["tv_null"] == 1.0
     assert "tv_null" not in di
@@ -250,18 +255,17 @@ def test_sensitivity_does_not_gate_the_positive_branch(tmp_path):
     assert di["tv_ab"] > di["q_ab"]                        # clause 3 FIRES
     assert di["tv_ac"] <= di["q_ac"]                       # clause 2 passes
     assert di["q_ac"] < di["sham_equivalence_margin"]      # v4 warrant holds
-    assert agent["verdict"] == "order_effect_observed"
+    assert agent["verdict"] == "distributional_order_effect_observed"
     assert "does not bear on a rejection" in agent["verdict_reason"]
 
 
-def test_total_separation_is_reported_as_a_sharp_unit_level_rejection(tmp_path):
+def test_total_separation_is_reported_as_a_distributional_rejection(tmp_path):
     """A and C entirely `share_resource`, B entirely `decline_partnership` — the
-    cleanest possible instrument and the most decisive possible effect. This is
-    ALSO the separating process at a fixed latent mode: the marginal
-    distributions of the PROCESS are equal across modes, but every unit is
-    order-dependent — the sharp null is genuinely FALSE. The frozen rule
-    rejects, and the claim is stated at the unit level with the marginal
-    limitation, which is exactly what makes the rejection honest."""
+    cleanest possible instrument and the most decisive possible effect. Within
+    the realized pack the A and B marginals are maximally different, so the
+    frozen rule rejects and the claim is stated at the DISTRIBUTIONAL
+    (population-marginal) level only — a marginal-distribution difference, never
+    a per-unit claim — which is exactly what makes the rejection honest."""
     agent = _run_pack(tmp_path, lambda c, v, s: ("decline_partnership" if c == "B"
                                                  else "share_resource"))
     di = agent["decision_inputs"]
@@ -269,24 +273,25 @@ def test_total_separation_is_reported_as_a_sharp_unit_level_rejection(tmp_path):
     assert agent["diagnostics"]["tv_null"] == 0.0      # a perfectly stable instrument
     assert di["q_ab"] == 0.291667                       # the rejection threshold
     assert di["tv_ab"] > di["q_ab"]                         # clause 3 FIRES
-    assert agent["verdict"] == "order_effect_observed"
-    assert agent["verdict"] != "no_order_effect_observed"   # never a false null
+    assert agent["verdict"] == "distributional_order_effect_observed"
+    assert agent["verdict"] != "no_distributional_order_effect_observed"   # never a false null
     reason = agent["verdict_reason"]
-    assert "SHARP" in reason and "unit" in reason
-    assert "does not establish that the marginal" in reason
-    assert "distribution changed" not in reason
+    # the claim is capped at the population-marginal level, never per-unit
+    assert "marginal" in reason and "population-level" in reason
+    assert "does not identify which units changed" in reason
 
 
 def test_shared_latent_sharp_true_process_reports_null_not_rejection(tmp_path):
     """The HONEST half of the shared-latent family: a pack-level latent mode
-    moves every unit's action, but identically in A, B and C — order made no
-    difference to any unit, so the sharp null is TRUE (and the process is
+    moves every unit's action, but identically in A, B and C — the marginals
+    are equal across conditions, so the distributional null is TRUE (and the
+    process is
     dependent across units). The frozen rule must not reject."""
     sched = m8oc.build_schedule("sharp_latent", None, random.Random(4))
     agent = _run_pack(tmp_path, _sched_choose(sched))
     di = agent["decision_inputs"]
     assert di["tv_ab"] == 0.0 and di["tv_ac"] == 0.0
-    assert agent["verdict"] == "no_order_effect_observed"
+    assert agent["verdict"] == "no_distributional_order_effect_observed"
 
 
 def test_a_quiet_instrument_still_reaches_both_substantive_verdicts(tmp_path):
@@ -294,7 +299,7 @@ def test_a_quiet_instrument_still_reaches_both_substantive_verdicts(tmp_path):
     q_AB comfortably below the ceiling and the v4 sham warrant held."""
     null_agent = _run_pack(tmp_path / "null", lambda c, v, s: "share_resource")
     assert null_agent["decision_inputs"]["q_ab"] == 0.0
-    assert null_agent["verdict"] == "no_order_effect_observed"
+    assert null_agent["verdict"] == "no_distributional_order_effect_observed"
     assert "equivalence warrant" in null_agent["verdict_reason"]
 
     def positive(cond, variant, samp):
@@ -309,7 +314,7 @@ def test_a_quiet_instrument_still_reaches_both_substantive_verdicts(tmp_path):
     assert di["q_ab"] <= MDE                    # sensitivity warrant present
     assert di["q_ac"] < di["sham_equivalence_margin"]
     assert di["tv_ab"] > di["q_ab"]
-    assert pos["verdict"] == "order_effect_observed"
+    assert pos["verdict"] == "distributional_order_effect_observed"
 
 
 # --------------------------------- 3. the study harness itself is deterministic
@@ -386,7 +391,7 @@ def test_artifact_was_produced_under_the_exact_frozen_bundle(artifact):
     assert artifact["frozen_bundle_hashes"]["policy_hash"] == \
         config_hash(echo["admissibility_policy"]) == config_hash(registry_policy)
     # produced by the rule version under test, at full scale
-    assert artifact["order_report_version"] == "4"
+    assert artifact["order_report_version"] == "5"
     assert artifact["metrics_version"] == "1"
     assert artifact["trials_scale"] == 1.0
 
@@ -396,7 +401,7 @@ def test_artifact_echoes_the_one_canonical_null_verbatim(artifact):
     is shared by registry, preregistration, loader, report and artifact. Here:
     the artifact echoes null_form and the exact statement, and declares the
     unit-by-unit schedule verification."""
-    assert artifact["null_form"] == "sharp"
+    assert artifact["null_form"] == "distributional"
     assert artifact["null_statement"] == M8_NULL_STATEMENT
     raw = load_experiments_registry(REGISTRY)
     pd = next(e for e in raw["experiments"]
@@ -416,7 +421,7 @@ def test_artifact_arms_are_structurally_sound(artifact):
         assert arm["charged"] == declared["charged"], name
         assert arm["sharp_null_axes"] == declared["axes"], name
         assert sum(arm["tally"].values()) == arm["trials"], name
-        k = arm["tally"].get("order_effect_observed", 0)
+        k = arm["tally"].get("distributional_order_effect_observed", 0)
         assert arm["positive_rate"] == round(k / arm["trials"], 6), name
         # the interval recomputes exactly from the tally
         assert tuple(arm["positive_rate_ci95"]) == \
@@ -425,10 +430,11 @@ def test_artifact_arms_are_structurally_sound(artifact):
 
 def test_artifact_type_i_satisfies_the_frozen_upper_bound_criterion(artifact):
     """a-004 finding 1: for every arm charged type_i, the exact CP-95 UPPER
-    bound of the sharp-null rejection rate is at or below alpha = 0.05, judged
-    against the frozen criterion string. Under the canonical sharp null with
-    seeded decoding the schedules are condition-invariant, so the rate is
-    structurally ZERO — pinned exactly, since the study is deterministic."""
+    bound of the distributional-null rejection rate is at or below alpha = 0.05,
+    judged against the frozen criterion string. Under the canonical
+    distributional null with seeded decoding the schedules are
+    condition-invariant, so the rate is structurally ZERO — pinned exactly,
+    since the study is deterministic."""
     charged = {n: a for n, a in artifact["arms"].items()
                if a["charged"] == "type_i"}
     assert set(charged) == {"sharp_h0_iid_uniform", "sharp_h0_iid_graded",
@@ -442,14 +448,14 @@ def test_artifact_type_i_satisfies_the_frozen_upper_bound_criterion(artifact):
         assert arm["trials"] == 400, name
         # structural zero, stated exactly: every trial returned the warranted
         # null verdict and none rejected
-        assert arm["tally"] == {"no_order_effect_observed": 400}, name
+        assert arm["tally"] == {"no_distributional_order_effect_observed": 400}, name
         assert arm["positive_rate"] == 0.0, name
 
 
 def test_iid_equal_marginal_arms_are_context_never_type_i(artifact):
     """a-004 finding 0: the relabeling itself. The iid equal-marginal arms are
     exchangeability-robustness context — present, reported with CIs, and
-    never charged as sharp-null type-I."""
+    never charged as distributional-null type-I."""
     context = {n: a for n, a in artifact["arms"].items()
                if a["charged"] == "exchangeable_context"}
     assert set(context) == {"iid_equal_marginals_uniform",
@@ -457,8 +463,8 @@ def test_iid_equal_marginal_arms_are_context_never_type_i(artifact):
                             "iid_equal_marginals_concentrated"}
     for name, arm in context.items():
         assert arm["charged"] != "type_i"
-        assert "never sharp-null type-I" in arm["criterion"]["statement"] \
-            or "not sharp-null false-positive" in arm["criterion"]["statement"]
+        assert "never distributional-null type-I" in arm["criterion"]["statement"] \
+            or "not distributional-null false-positive" in arm["criterion"]["statement"]
         assert arm["sharp_null_axes"] == {"AB": False, "AC": False}, name
         # exchangeable pair distribution: rejection stays at or below ~alpha
         # for the broader family (upper CI bounded well below 3*alpha)
@@ -513,14 +519,15 @@ def test_mde_selection_regenerates_from_the_committed_run(artifact):
 
 
 def test_artifact_reports_the_sharp_violation_arm_for_what_it_is(artifact):
-    """The audit's separating process — sharp null FALSE, marginal null true —
-    must be present, must NOT be charged against type-I, and must show the rule
-    rejecting essentially always (which is the correct sharp-null conclusion,
-    licensed by the claim ceiling)."""
+    """The audit's separating process — within-pack A/B marginals maximally
+    different (marginally equal only ACROSS latent modes) — must be present,
+    must NOT be charged against type-I, and must show the rule rejecting
+    essentially always (the correct distributional conclusion, licensed by the
+    claim ceiling)."""
     arm = artifact["arms"]["sharp_false_marginal_true"]
     assert arm["charged"] == "sharp_violation_detection"
     assert arm["positive_rate"] >= 0.95
-    assert "sharp" in arm["criterion"]["statement"]
+    assert "distributional" in arm["criterion"]["statement"]
     assert "Not charged against type-I" in arm["criterion"]["statement"]
 
 

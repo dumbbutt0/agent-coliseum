@@ -1,4 +1,4 @@
-# M8 C1-BUNDLE — the Director's scientific re-freeze (audit a-004, findings f0 + f1)
+# M8 C1-BUNDLE — the Director's scientific re-freeze (audit a-004, findings f0 + f1; distributional re-framing, owner a-005)
 
 **Cluster C1 deliverable. Owner directive: any change to the surfaces frozen
 here invalidates every downstream artifact built on them** — evidence packs,
@@ -10,13 +10,13 @@ all be regenerated against the values below, never inherited across a change.
 | Field | Value |
 |---|---|
 | `experiment_id` | `m8-phase2-live-order-sensitivity` |
-| `design_hash` | `e30fd3184bb07afba6707ccdf1f3447e62fe9f5510dcde668ae6117fc110c9ea` (regime-frozen final hash) |
-| Rule version pinned by the design | `ORDER_REPORT_VERSION 4` |
-| `null_form` | `sharp` |
+| `design_hash` | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (current, post-a-005 distributional re-framing; supersedes `e30fd318…`) |
+| Rule version pinned by the design | `ORDER_REPORT_VERSION 5` |
+| `null_form` | `distributional` |
 
 ## The ONE canonical null statement (verbatim, everywhere)
 
-> Sharp (unit-level) null: for every matched effective unit (variant_id, scenario_seed, sampler_seed), presentation order made no difference to the terminal action chosen at that unit.
+> Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order does not change the population distribution of terminal actions — the marginal terminal-action distribution under order A equals the marginal terminal-action distribution under order B.
 
 Anchored in audited code as `registry.M8_NULL_STATEMENT` and mirrored
 verbatim in: `planned_design.null_statement`, `planned_design.hypothesis`,
@@ -24,11 +24,15 @@ verbatim in: `planned_design.null_statement`, `planned_design.hypothesis`,
 (`configs/experiments/m8-phase2-live-order-sensitivity.experiment.json`),
 the preregistration document, `scripts/m8_operating_characteristics.py`
 (import-time asserted against the anchor), and the committed artifact's
-`null_statement` echo. Marginal equality `P(Y|A) = P(Y|B)` is a stated
-**consequence** of this null, never the operative hypothesis; a rejection
-licenses only the unit-level conclusion. The lint refuses a design whose
-hypothesis or decision rule does not contain the statement verbatim, whose
-`null_form` is not `sharp`, or whose surfaces disagree with the code anchor.
+`null_statement` echo. The within-unit paired permutation supplies the
+reference distribution under exchangeability (which implies marginal equality),
+a valid level-alpha reference for the marginal `TV(A,B)` statistic — the design
+does **not** claim the test is exact for bare marginal equality. A rejection
+evidences a **marginal-distribution difference only**, never a per-unit claim; a
+non-rejection does **not** establish per-unit invariance (out of scope). The
+lint refuses a design whose hypothesis or decision rule does not contain the
+statement verbatim, whose `null_form` is not `distributional`, or whose surfaces
+disagree with the code anchor.
 
 ## Frozen numeric values (all design-hashed AND anchored in `registry.M8_FROZEN_PROFILE`)
 
@@ -38,7 +42,7 @@ hypothesis or decision rule does not contain the statement verbatim, whose
 | `confidence` | `0.95` |
 | `min_detectable_effect` | `0.35` (measured-honest; the smallest grid effect whose power CP-95 lower bound reached 0.8 — see below) |
 | `power_target` | `0.8` (CP-95 **lower** bound of power at the MDE must reach it) |
-| `type_i_criterion` | `"CP-95 upper bound of sharp-null rejection rate <= alpha"` (**upper** bound — the superseded lower-bound direction is banned by lint) |
+| `type_i_criterion` | `"CP-95 upper bound of distributional-null rejection rate <= alpha"` (**upper** bound — the superseded lower-bound direction is banned by lint) |
 | `sham_equivalence_margin` | `0.25` — **intentionally tighter than the MDE (0.35)**: see the asymmetry rationale below |
 | `permutation_iterations` / `permutation_seed` | `10000` / `20260719` |
 | `bootstrap_iterations` / `bootstrap_seed` | `10000` / `20260719` |
@@ -63,7 +67,7 @@ so these figures are stable across the re-freeze.)
 | `sharp_h0_iid_uniform` | type_i | `0.0` (0/400) | `[0.0, 0.00918]` | PASS — upper `0.00918 <= alpha` |
 | `sharp_h0_iid_graded` | type_i | `0.0` (0/400) | `[0.0, 0.00918]` | PASS |
 | `sharp_h0_iid_concentrated` | type_i | `0.0` (0/400) | `[0.0, 0.00918]` | PASS |
-| `sharp_h0_shared_latent` | type_i | `0.0` (0/400) | `[0.0, 0.00918]` | PASS (dependent-across-units, sharp null true) |
+| `sharp_h0_shared_latent` | type_i | `0.0` (0/400) | `[0.0, 0.00918]` | PASS (dependent-across-units, distributional null true) |
 | `power_at_tv_025` | power_curve | `0.800` (320/400) | `[0.757, 0.838]` | lower `0.757 < 0.8` → NOT the MDE |
 | **`power_at_tv_035`** | **power** | **`0.9925` (397/400)** | **`[0.978, 0.998]`** | **PASS — lower `0.978 >= power_target 0.8`; this is the frozen MDE** |
 | `power_at_tv_050` | power_curve | `1.0` (400/400) | `[0.99082, 1.0]` | curve context |
@@ -72,20 +76,21 @@ so these figures are stable across the re-freeze.)
 | `iid_equal_marginals_uniform` | exchangeable_context | `0.01` (2/200) | `[0.00121, 0.03566]` | relabeled, never type-I |
 | `iid_equal_marginals_graded` | exchangeable_context | `0.01` (2/200) | `[0.00121, 0.03566]` | relabeled, never type-I |
 | `iid_equal_marginals_concentrated` | exchangeable_context | `0.07` (14/200) | `[0.03880, 0.11466]` | relabeled, never type-I |
-| `sharp_false_marginal_true` | sharp_violation_detection | `1.0` (200/200) | `[0.98173, 1.0]` | correct sharp rejection, not charged |
+| `sharp_false_marginal_true` | sharp_violation_detection | `1.0` (200/200) | `[0.98173, 1.0]` | within-pack A/B marginals differ → correct distributional rejection, not charged |
 | `sham_contaminated_at_margin` | sham_gate_context | `0.02` (4/200) | `[0.00548, 0.05041]` | leakage context (contamination at the margin scale 0.25) |
 
-- **Frozen MDE: `0.35`.** `mde_selection.selected_effect = 0.35`,
-  `consistent: true`. The 0.25 point estimate was exactly 0.80 but its CP-95
-  lower bound (0.757) fell short of `power_target = 0.8`; the value was not
+- **Frozen MDE: `0.35`** — the **distributional detectable-effect floor**
+  (value unchanged at a-005; description re-framed). `mde_selection.selected_effect
+  = 0.35`, `consistent: true`. The 0.25 point estimate was exactly 0.80 but its
+  CP-95 lower bound (0.757) fell short of `power_target = 0.8`; the value was not
   kept and the target was not lowered.
 - **`all_criteria_pass: true`.**
-- **Type-I, stated plainly:** all four sharp-null arms are a structural
-  `0/400` — under the canonical sharp null with seeded per-unit decoding the
-  three conditions' schedules are identical by the null itself (verified
-  unit-by-unit before analysis), so the false-rejection rate is exactly zero
-  and the frozen CP-95 upper-bound criterion (`0.00918 <= 0.05`) holds
-  mechanically.
+- **Type-I, stated plainly:** all four distributional-null type-I arms are a
+  structural `0/400` — under the canonical distributional null with seeded
+  per-unit decoding the three conditions' schedules are identical by
+  construction (verified unit-by-unit before analysis, so the marginals are
+  equal), so the false-rejection rate is exactly zero and the frozen CP-95
+  upper-bound criterion (`0.00918 <= 0.05`) holds mechanically.
 
 ## Sham-margin / MDE asymmetry (conscious decision, per Director)
 
@@ -106,15 +111,18 @@ likely to slip — measured leakage `0.02`, CP-95 `[0.00548, 0.05041]`.
 
 ## Required literal for downstream clusters (C2 note)
 
-`coliseum/textlab/metrics.py` **must keep `ORDER_REPORT_VERSION = "4"`.**
-The a-004 re-freeze changes **no clause** of the six-clause ordered decision
-rule, so the version does not bump; the frozen design, its `design_hash`,
-the registry lint marker (`ANALYSIS_CALLABLE_VERSION_MARKER`), the
-preregistration's single version literal, and the committed artifact all pin
-`4`. If any later cluster changes the decision rule it must bump the literal,
-re-freeze every surface listed here, recompute `design_hash`, and regenerate
-the operating-characteristics artifact — the script asserts the version at
-import and will refuse to characterise a different rule silently.
+`coliseum/textlab/metrics.py` **must keep `ORDER_REPORT_VERSION = "5"`.**
+The a-004 re-freeze changed **no clause** of the six-clause ordered decision
+rule (it stayed at `4`); the owner **a-005** decision then narrowed the
+operative null to distributional — the arithmetic is unchanged but the emitted
+verdict vocabulary and claim ceiling changed, so the literal bumped `4 → 5`. The
+frozen design, its `design_hash`, the registry lint marker
+(`ANALYSIS_CALLABLE_VERSION_MARKER`), the preregistration's single version
+literal, and the committed artifact all now pin `5`. If any later cluster
+changes the decision rule or claim ceiling it must bump the literal, re-freeze
+every surface listed here, recompute `design_hash`, and regenerate the
+operating-characteristics artifact — the script asserts the version at import
+and will refuse to characterise a different rule silently.
 
 The thresholds bundle served by `registry.load_thresholds` now carries two
 additional keys (`power_target`, `type_i_criterion`).
@@ -146,12 +154,20 @@ effective context length** executed and pooled under one `agent_regime_id`
   (`_lint_frozen_policy`/`_profile_issues` and `lint_experiment_config`) refuse
   omission or substitution of any control, independently of `design_hash`.
 
-This is the ONLY change to the frozen design after C1's re-freeze; it **adds
-regime identity only** — the sharp null, thresholds (MDE 0.35, sham margin 0.25,
-power_target 0.8, bootstrap/permutation 10000), decision rule, and
-`ORDER_REPORT_VERSION 4` are untouched. Adding `decoder_controls` to
-`planned_design` moved `design_hash`
-`e889882e…` → `e30fd318…` (the regime-frozen final hash above).
+The C3 decoder-regime freeze **added regime identity only** — the null,
+thresholds (MDE 0.35, sham margin 0.25, power_target 0.8, bootstrap/permutation
+10000), decision rule, and the callable version were untouched by it. Adding
+`decoder_controls` to `planned_design` moved `design_hash`
+`e889882e…` → `e30fd318…` (the regime-frozen hash at that point).
+
+**Subsequent change — owner a-005 distributional re-framing.** After C3, the
+owner narrowed the operative null from sharp/per-unit to **distributional**
+(`null_form`, `null_statement`, the primary_event verdict vocabulary and claim
+ceiling, `type_i_criterion` wording) and added the structured `stopping_rule`
+block. The arithmetic and every numeric threshold are unchanged, so the
+operating-characteristics numbers are unchanged; the callable version bumped
+`4 → 5`. This moved `design_hash` `e30fd318…` → `ce8eff3e…` (the current hash in
+the identity table above).
 
 Phase-1 evidence regenerates byte-identically: scripted and mock agents never
 carry these keys in their sampling dict (a key enters lineage only when present),

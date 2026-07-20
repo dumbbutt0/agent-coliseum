@@ -29,8 +29,10 @@
     "tests/fixtures/llm/garbled_m8_seeded.json",
     "tests/fixtures/llm/steward_obedient_seeded.json",
     "tests/test_decision_admissibility.py",
+    "tests/test_m8_cancellation_guardrail.py",
     "tests/test_m8_coverage_conformance.py",
     "tests/test_m8_driver_fidelity.py",
+    "tests/test_m8_execution_policy.py",
     "tests/test_m8_experiment_identity.py",
     "tests/test_m8_exposure_points.py",
     "tests/test_m8_frozen_analysis_path.py",
@@ -44,6 +46,6 @@
     "tests/test_textlab_stochastic.py",
     "tools/autonomy/drivers.py"
   ],
-  "path_count": 40,
-  "paths_sha256": "6222825ad74f6b538724615fe728fd7b90eca8432ada9b0b6d9406cf9a598e87"
+  "path_count": 42,
+  "paths_sha256": "6b1807aa6607440c3ff3259958d5e9ecb2da0f3abbce62362b1e5b2097b3108e"
 }

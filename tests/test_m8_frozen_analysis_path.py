@@ -14,7 +14,7 @@ are read from the registry (which refuses to serve them unless `design_hash`
 reconstructs), and the pack is produced by the real runner rather than by
 synthetic fixtures.
 
-AT ORDER_REPORT_VERSION 4 the frozen path additionally demands the clause-0
+AT ORDER_REPORT_VERSION 5 the frozen path additionally demands the clause-0
 evidence admission surfaces, so this module now drives them on real runner
 output too: the pack is the FULL frozen grid (3 conditions x 2 scenario seeds x
 24 sampler seeds = 144 runs — a partial grid refuses at the matched-unit gate
@@ -173,8 +173,8 @@ def test_frozen_path_refuses_the_garbled_pack_and_emits_no_distances(
     # be mistaken for a result may accompany it
     body = getattr(excinfo.value, "report", None)
     assert body is not None, "refusal must carry its census"
-    assert body["order_report_version"] == "4"
-    assert body["null_form"] == "sharp"
+    assert body["order_report_version"] == "5"
+    assert body["null_form"] == "distributional"
     assert body["terminal_dp_id"] == TERMINAL_DP_ID
     assert body["replay_verification"] == {"attestation_version": "1",
                                            "verified_run_n": 144}

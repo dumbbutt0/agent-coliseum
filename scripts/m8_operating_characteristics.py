@@ -1,53 +1,66 @@
 #!/usr/bin/env python3
-"""m8 Phase-2 — operating characteristics of the FROZEN decision rule (v4).
+"""m8 Phase-2 — operating characteristics of the FROZEN decision rule (v5).
 
-SCIENTIFIC RE-FREEZE (audit a-004, findings 0 and 1). The previous shape of
-this study was blocked for two reasons, both repaired here:
+SCIENTIFIC RE-FREEZE (audit a-004) + DISTRIBUTIONAL RE-FRAMING (owner a-005).
+The study is bound to the ONE canonical null of this design, and a-005 narrowed
+that null from sharp/per-unit to DISTRIBUTIONAL (population-marginal). The
+arithmetic is unchanged — same paired permutation, same TV(A,B) statistic, same
+ordered decision rule — so the committed numbers are unchanged; only the null
+vocabulary and the claim ceiling changed.
 
-* Finding 0 — ONE NULL EVERYWHERE. The operative null of this design is the
-  canonical sharp unit-level null, frozen in planned_design (null_form +
-  null_statement), anchored in audited code (registry.M8_NULL_STATEMENT) and
+* ONE NULL EVERYWHERE. The operative null of this design is the canonical
+  distributional (population-marginal) null, frozen in planned_design (null_form
+  + null_statement), anchored in audited code (registry.M8_NULL_STATEMENT) and
   stated verbatim here:
 
-      Sharp (unit-level) null: for every matched effective unit (variant_id,
-      scenario_seed, sampler_seed), presentation order made no difference to
-      the terminal action chosen at that unit.
+      Distributional (population-level) null: across the frozen 48-unit matched
+      grid, presentation order does not change the population distribution of
+      terminal actions — the marginal terminal-action distribution under order A
+      equals the marginal terminal-action distribution under order B.
 
-  A sharp-null H0 arm must MECHANICALLY satisfy that statement: each unit's
-  terminal action is generated ONCE and copied across A/B/C, exactly — the
-  design declares no condition-independent noise, so none is applied. Every
-  type-I trial's generated schedule is verified unit-by-unit (A_i == B_i ==
-  C_i for all 48 units) BEFORE analysis, and every named alternative arm is
-  verified to VIOLATE the null on its declared axis. The former iid
-  equal-marginal "H0" arms — whose every generated pack violated the sharp
-  null (the audit measured 27-44 discordant units per pack) — are RELABELED
-  as exchangeability-robustness context and are never charged as sharp-null
-  type-I.
+  A distributional-null H0 arm must MECHANICALLY satisfy that statement: each
+  unit's terminal action is generated ONCE and copied across A/B/C, exactly —
+  identical schedules have identical marginals, so the design declares no
+  condition-independent noise and none is applied. Every type-I trial's
+  generated schedule is verified unit-by-unit (A_i == B_i == C_i for all 48
+  units) BEFORE analysis, and every named alternative arm is verified to
+  VIOLATE the null on its declared axis. The iid equal-marginal arms — whose
+  every generated pack has equal marginals only in expectation while disagreeing
+  unit by unit — are RELABELED as exchangeability-robustness context and are
+  never charged as distributional-null type-I.
 
-* Finding 1 — FROZEN FITNESS CRITERIA, honest directions. The acceptance
-  criteria are no longer script inventions; they are frozen in
-  planned_design.thresholds and loaded from the registry bundle:
-  - type_i_criterion: "CP-95 upper bound of sharp-null rejection rate <=
-    alpha". The UPPER bound — the superseded lower-bound check tested only
+* FROZEN FITNESS CRITERIA, honest directions. The acceptance criteria are not
+  script inventions; they are frozen in planned_design.thresholds and loaded
+  from the registry bundle:
+  - type_i_criterion: "CP-95 upper bound of distributional-null rejection rate
+    <= alpha". The UPPER bound — the superseded lower-bound check tested only
     whether excess above alpha was demonstrated, the wrong direction.
   - power_target: 0.8 — the CP-95 LOWER bound of measured power at
     min_detectable_effect must reach it. min_detectable_effect is frozen at
     the smallest grid effect (0.25 / 0.35 / 0.5 / 0.75 / 1.0) whose measured
     power meets that bound under the exact frozen procedure; the artifact's
     mde_selection block recomputes the choice so it regenerates from the
-    committed run alone. Effects below the frozen boundary are real
-    possibilities this design cannot reliably detect.
+    committed run alone. It is the DISTRIBUTIONAL detectable-effect floor;
+    effects below it are real possibilities this design cannot reliably detect.
 
-POWER IS CHARACTERISED UNDER A SHARPLY-NULL SHAM AXIS, and that is the
-faithful model, not a convenience: decoding is seeded per unit, so if the
-sham rewording truly makes no difference to a unit's computation the realized
-terminal action is IDENTICAL — the sharp surface-form null literally predicts
-C_i == A_i. The power arms therefore copy C from A (verified), and the
-exchangeability-context arms show honestly what happens when the sham axis is
-null only in distribution: the warrant frequently refuses and the design goes
-inconclusive — conservative, never anti-conservative.
+The within-unit paired permutation supplies the REFERENCE distribution under
+exchangeability (which implies marginal equality), a valid level-alpha reference
+for the marginal TV(A,B) statistic; it is NOT claimed exact for bare marginal
+equality. A rejection evidences a marginal-distribution difference only, never a
+per-unit claim; a non-rejection evidences only "no distributional order effect
+observed at MDE" and never per-unit invariance (balanced cancelling unit-level
+effects keep the marginals equal — out of scope).
 
-The study drives `metrics.order_sensitivity_report` (ORDER_REPORT_VERSION 4)
+POWER IS CHARACTERISED UNDER A NULL SHAM AXIS, and that is the faithful model,
+not a convenience: decoding is seeded per unit, so if the sham rewording truly
+makes no difference to a unit's computation the realized terminal action is
+IDENTICAL — C_i == A_i, so the sham axis holds the null exactly. The power arms
+therefore copy C from A (verified), and the exchangeability-context arms show
+honestly what happens when the sham axis is null only in distribution: the
+warrant frequently refuses and the design goes inconclusive — conservative,
+never anti-conservative.
+
+The study drives `metrics.order_sensitivity_report` (ORDER_REPORT_VERSION 5)
 end to end — synthetic run directories, real replay attestations over their
 actual bytes, the real terminal-probe / matched-unit / surviving-count /
 sham-adequacy gates — at the exact frozen threshold bundle, and writes the
@@ -100,15 +113,16 @@ from coliseum.textlab.schema import canonical_json, config_hash  # noqa: E402
 # The characterisation is bound to the rule version it characterises: a bump
 # of ORDER_REPORT_VERSION is a different decision rule, and this committed
 # artifact must be regenerated under it, never inherited.
-assert ORDER_REPORT_VERSION == "4", (
+assert ORDER_REPORT_VERSION == "5", (
     f"ORDER_REPORT_VERSION is {ORDER_REPORT_VERSION!r}; this study "
-    "characterises rule version '4' — regenerate deliberately")
+    "characterises rule version '5' — regenerate deliberately")
 
 # ------------------------------------------------------------ the ONE null
 CANONICAL_NULL_STATEMENT = (
-    "Sharp (unit-level) null: for every matched effective unit (variant_id, "
-    "scenario_seed, sampler_seed), presentation order made no difference to "
-    "the terminal action chosen at that unit.")
+    "Distributional (population-level) null: across the frozen 48-unit matched "
+    "grid, presentation order does not change the population distribution of "
+    "terminal actions — the marginal terminal-action distribution under order A "
+    "equals the marginal terminal-action distribution under order B.")
 assert CANONICAL_NULL_STATEMENT == M8_NULL_STATEMENT, (
     "the script's canonical null statement drifted from the audited "
     "registry.M8_NULL_STATEMENT anchor")
@@ -186,12 +200,15 @@ SHAM_MARGIN = FROZEN_THRESHOLDS["sham_equivalence_margin"]
 SHAM_C_AT_MARGIN = POWER_B[SHAM_MARGIN]
 
 # Each arm declares its null status per comparison axis ("AB", "AC"):
-#   True  -> the sharp null HOLDS on that axis; verified unit-by-unit equal.
-#   False -> the sharp null is VIOLATED on that axis; verified >=1 unit differs.
+#   True  -> the distributional null HOLDS on that axis; the H0 arms build it
+#            mechanically by copying one draw across conditions (unit-by-unit
+#            equal, so the marginals are identical by construction).
+#   False -> the null is VIOLATED on that axis; verified >=1 unit differs.
 ARMS = {
-    # ---- sharp-null H0 arms (charged type_i): each unit's action generated
-    # ONCE and copied across A/B/C exactly. Different unit-action laws prove
-    # the zero is structural, not an artifact of one distribution.
+    # ---- distributional-null H0 arms (charged type_i): each unit's action
+    # generated ONCE and copied across A/B/C exactly, so the marginals are
+    # identical. Different unit-action laws prove the zero is structural, not
+    # an artifact of one distribution.
     "sharp_h0_iid_uniform": {"kind": "sharp_iid", "per": {"unit": UNIFORM},
                              "axes": {"AB": True, "AC": True},
                              "trials": CHARGED_TRIALS, "seed": 101000,
@@ -205,16 +222,18 @@ ARMS = {
                                   "axes": {"AB": True, "AC": True},
                                   "trials": CHARGED_TRIALS, "seed": 103000,
                                   "charged": "type_i"},
-    # dependent across units (pack-level latent mode), still sharp-null true
+    # dependent across units (pack-level latent mode), still null-true
+    # (identical across A/B/C, so the marginals are equal)
     "sharp_h0_shared_latent": {"kind": "sharp_latent", "per": None,
                                "axes": {"AB": True, "AC": True},
                                "trials": CHARGED_TRIALS, "seed": 104000,
                                "charged": "type_i"},
     # ---- RELABELED context (audit a-004 finding 0): A, B, C drawn iid from
     # ONE distribution. The PAIR distribution is exchangeable, so rejection
-    # stays near alpha for the broader exchangeable family — but every
-    # generated pack VIOLATES the sharp null (units disagree), so these are
-    # never charged as sharp-null type-I.
+    # stays near alpha for the broader exchangeable family — the equal
+    # marginals hold only in expectation while units disagree, so these are
+    # exchangeability-robustness context, never charged as distributional-null
+    # type-I.
     "iid_equal_marginals_uniform": {"kind": "iid",
                                     "per": {"A": UNIFORM, "B": UNIFORM,
                                             "C": UNIFORM},
@@ -235,9 +254,11 @@ ARMS = {
                                          "trials": CONTEXT_TRIALS,
                                          "seed": 107000,
                                          "charged": "exchangeable_context"},
-    # ---- the audit's separating case: sharp null FALSE on A/B for every
-    # unit, marginal null true across the process. A rejection is the correct
-    # sharp unit-level conclusion; never charged against type-I.
+    # ---- the audit's separating case: within every realized pack A and B
+    # marginals are maximally different (the process is marginally equal only
+    # ACROSS latent modes), so the distributional null is FALSE for the pack.
+    # A rejection is the correct distributional conclusion; never charged
+    # against type-I.
     "sharp_false_marginal_true": {"kind": "latent_false", "per": None,
                                   "axes": {"AB": False, "AC": True},
                                   "trials": CONTEXT_TRIALS, "seed": 108000,
@@ -255,7 +276,7 @@ ARMS = {
 }
 # ---- the power grid: A ~ GRADED (disjoint-support base at the 1.0
 # endpoint), B shifted by exactly the named effect, C copied from A (the
-# sham axis sharply null, verified). The arm at the frozen
+# sham axis holds the null exactly, verified). The arm at the frozen
 # min_detectable_effect is charged against power_target; the rest are curve
 # context.
 for _i, _eff in enumerate(POWER_GRID):
@@ -279,15 +300,16 @@ def build_schedule(kind: str, per, rng: random.Random) -> dict:
     same schedule regardless of scheduling."""
     sched = {}
     if kind == "sharp_iid":
-        # ONE draw per unit, copied across conditions EXACTLY — the sharp
-        # null holds by construction, with no condition-dependent noise.
+        # ONE draw per unit, copied across conditions EXACTLY — the
+        # distributional null holds by construction (identical marginals),
+        # with no condition-dependent noise.
         for unit in UNITS:
             action = _draw(rng, per["unit"])
             for cond in CONDITIONS:
                 sched[(cond,) + unit] = action
     elif kind == "sharp_latent":
         # pack-level latent mode moves every unit, identically in A/B/C:
-        # dependent across units, sharp null still true.
+        # dependent across units, the null still holds (equal marginals).
         mode = rng.randrange(2)
         for unit in UNITS:
             variant, _scen, samp = unit
@@ -308,8 +330,8 @@ def build_schedule(kind: str, per, rng: random.Random) -> dict:
                 sched[(cond,) + unit] = pair[1] if cond == "B" else pair[0]
     elif kind == "power":
         # A drawn from the base law, B independently from the shifted law
-        # (sharp null violated on A/B), C COPIED from A (sharp null true on
-        # A/C: seeded decoding makes 'the rewording changed nothing' mean
+        # (null violated on A/B), C COPIED from A (the null holds on A/C:
+        # seeded decoding makes 'the rewording changed nothing' mean
         # byte-identical outcomes).
         for unit in UNITS:
             sched[("A",) + unit] = _draw(rng, per["A"])
@@ -326,8 +348,9 @@ def verify_schedule(sched: dict, axes: dict, where: str = "") -> dict:
     """THE MECHANICAL ASSERTION (audit a-004 finding 0, minimum_regression):
     before any trial is analysed, the generated potential-outcome schedule is
     checked unit-by-unit against the arm's DECLARED null status per axis —
-    a sharp-null axis must satisfy the canonical statement at every matched
-    unit; an alternative axis must violate it at one or more units. Returns
+    a null-holding axis must be built concordant (one draw copied across
+    conditions) at every matched unit, which forces identical marginals; an
+    alternative axis must violate it at one or more units. Returns
     {axis: discordant_unit_count}; raises on any mismatch."""
     counts = {}
     for axis, null_holds in axes.items():
@@ -337,15 +360,15 @@ def verify_schedule(sched: dict, axes: dict, where: str = "") -> dict:
         counts[axis] = len(discordant)
         if null_holds and discordant:
             raise AssertionError(
-                f"{where}: axis {axis} declared SHARP-NULL TRUE but "
+                f"{where}: axis {axis} declared NULL-HOLDING TRUE but "
                 f"{len(discordant)} of {len(UNITS)} matched units are "
-                "discordant — this schedule does not satisfy the canonical "
-                "sharp null and may not be charged as a null arm")
+                "discordant — this schedule was not built by copying one draw "
+                "across conditions and may not be charged as a null arm")
         if not null_holds and not discordant:
             raise AssertionError(
                 f"{where}: axis {axis} declared an ALTERNATIVE but every "
-                "matched unit is concordant — this schedule satisfies the "
-                "sharp null and cannot serve as a separating alternative")
+                "matched unit is concordant — this schedule holds the null "
+                "and cannot serve as a separating alternative")
     return counts
 
 
@@ -495,9 +518,9 @@ def _criterion(arm: dict, lo: float, hi: float) -> dict:
             "detail": ("frozen in planned_design.thresholds (audit a-004 "
                        "finding 1): only an UPPER confidence bound at or "
                        "below alpha supports an at-or-below-alpha type-I "
-                       "claim. Under the canonical sharp null with seeded "
-                       "per-unit decoding the three conditions' schedules "
-                       "are identical by the null itself (verified "
+                       "claim. Under the canonical distributional null with "
+                       "seeded per-unit decoding the three conditions' "
+                       "schedules are identical by construction (verified "
                        "unit-by-unit pre-analysis), so the structural "
                        "rejection rate is zero and the bound holds "
                        "mechanically."),
@@ -515,24 +538,25 @@ def _criterion(arm: dict, lo: float, hi: float) -> dict:
                               "criterion"), "pass": True}
     if charged == "exchangeable_context":
         return {
-            "statement": ("RELABELED context, never sharp-null type-I (audit "
-                          "a-004 finding 0): A/B/C drawn iid from one "
+            "statement": ("RELABELED context, never distributional-null type-I "
+                          "(audit a-004 finding 0): A/B/C drawn iid from one "
                           "distribution — the PAIR distribution is "
                           "exchangeable, so the paired permutation test "
                           "still rejects near or below alpha for this "
-                          "broader family, but every generated pack "
-                          "VIOLATES the canonical sharp null (verified "
+                          "broader family, but the equal marginals hold only "
+                          "in expectation while units disagree (verified "
                           "discordant pre-analysis), so these rates are "
-                          "robustness context for distribution-level "
-                          "nullness, not sharp-null false-positive rates."),
+                          "robustness context for the exchangeable family, "
+                          "not distributional-null false-positive rates."),
             "pass": True}
     if charged == "sharp_violation_detection":
         return {
-            "statement": ("reported for what it is: the sharp null is "
-                          "genuinely FALSE for every unit while the marginal "
-                          "null is true; a rejection is the correct sharp "
-                          "unit-level conclusion and the report's claim "
-                          "ceiling (null_form: sharp) matches it. Not "
+            "statement": ("reported for what it is: within every realized pack "
+                          "the A and B marginals are maximally different (the "
+                          "process is marginally equal only ACROSS latent "
+                          "modes); a rejection is the correct distributional "
+                          "conclusion and the report's claim ceiling "
+                          "(null_form: distributional) matches it. Not "
                           "charged against type-I."),
             "pass": True}
     if charged == "sham_gate_context":
@@ -568,7 +592,7 @@ def run_arm(name: str, arm: dict, workers: int) -> dict:
     tally: dict = {}
     for v in verdicts:
         tally[v] = tally.get(v, 0) + 1
-    positives = tally.get("order_effect_observed", 0)
+    positives = tally.get("distributional_order_effect_observed", 0)
     n = arm["trials"]
     lo, hi = clopper_pearson(positives, n)
     out = {"kind": arm["kind"], "charged": arm["charged"], "trials": n,
@@ -631,7 +655,7 @@ def main(argv=None) -> int:
         "method": ("smallest grid effect whose measured power CP-95 LOWER "
                    "bound >= power_target, at the exact frozen procedure "
                    "(n = 48 units per condition, 10000-iteration paired "
-                   "permutation null, sham axis sharply null)"),
+                   "permutation null, sham axis holding the null)"),
         "grid": list(POWER_GRID),
         "power_target": POWER_TARGET,
         "power_curve": curve,
@@ -653,11 +677,11 @@ def main(argv=None) -> int:
         "schedule_verification": (
             "every trial's generated potential-outcome schedule is verified "
             "unit-by-unit against its arm's declared null status BEFORE "
-            "analysis: sharp-null axes must satisfy the canonical statement "
-            "at every matched unit (A_i == B_i == C_i, exact, no "
-            "condition-dependent noise); alternative axes must violate it. "
-            "A completed arm is itself the proof — verification raises "
-            "before any statistic otherwise."),
+            "analysis: null-holding axes are built concordant at every matched "
+            "unit (A_i == B_i == C_i, exact, no condition-dependent noise, so "
+            "the marginals are identical by construction); alternative axes "
+            "must violate it. A completed arm is itself the proof — "
+            "verification raises before any statistic otherwise."),
         # the EXACT frozen bundle the production path loads; the CI regression
         # asserts echo equality and hash equality against the registry
         "frozen_bundle": {
