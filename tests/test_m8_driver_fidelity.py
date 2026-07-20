@@ -63,12 +63,15 @@ def _install_recorder(monkeypatch, calls):
     def fake_run_sweep(spec, *, deadline=None, expected_digests=None,
                        progress=None, execution_order="blocked",
                        record_execution_index=None,
-                       max_surviving_delta=None):
+                       max_surviving_delta=None, retries_per_unit=None,
+                       execution_policy=None):
         calls.append({"spec": spec, "deadline": deadline,
                       "expected_digests": expected_digests,
                       "execution_order": execution_order,
                       "record_execution_index": record_execution_index,
-                      "max_surviving_delta": max_surviving_delta})
+                      "max_surviving_delta": max_surviving_delta,
+                      "retries_per_unit": retries_per_unit,
+                      "execution_policy": execution_policy})
         return _StubSweep()
 
     monkeypatch.setattr(sweep_mod, "run_sweep", fake_run_sweep)
@@ -86,28 +89,35 @@ def test_driver_forwards_the_frozen_bounds_to_run_sweep(tmp_path,
     calls = []
     _install_recorder(monkeypatch, calls)
     loaded = []
-    real_load = registry_mod.load_thresholds
+    real_load = registry_mod.load_verified_bundle
 
     def spy(path, eid):
         loaded.append((path, eid))
         return real_load(path, eid)
 
-    monkeypatch.setattr(registry_mod, "load_thresholds", spy)
+    # the driver now loads a VERIFIED bundle (profile-checked), not a raw
+    # design_hash-only threshold load
+    monkeypatch.setattr(registry_mod, "load_verified_bundle", spy)
 
     cfg = _m8_config(tmp_path)
     outcome = _drive_ollama_local(ROOT, cfg, _far_deadline())
 
-    # the bundle came from the FROZEN registry entry, by the supported loader
     assert loaded == [(os.path.join(ROOT, "configs", "registry",
                                     "experiments.yaml"), EID)]
     assert len(calls) == 1
     call = calls[0]
-    assert call["execution_order"] == "interleaved"
-    assert call["record_execution_index"] is True
-    assert call["max_surviving_delta"] == 2
-    assert isinstance(call["max_surviving_delta"], int)
+    # b-003 / c-003: the frozen contract flows through a typed ExecutionPolicy,
+    # NOT as loose kwargs the driver could forget
+    ep = call["execution_policy"]
+    assert ep is not None
+    assert ep.retries_per_unit == 0            # zero-retry tombstone contract
+    assert ep.max_surviving_delta == 2
+    assert isinstance(ep.max_surviving_delta, int)
+    assert ep.execution_order == "interleaved"
+    assert ep.record_execution_index is True
     assert call["expected_digests"] == {MODEL: DIGEST}
     spec = call["spec"]
+    assert spec["experiment_id"] == EID       # lets run_sweep detect policy-req
     assert spec["arbitration"] == "planner_priority"
     assert spec["temperature"] == 0.7
     assert spec["scenarios"] == M8_SCENARIOS
@@ -192,22 +202,25 @@ def test_config_without_execution_order_refuses(tmp_path, monkeypatch):
     assert calls == []
 
 
+class _HollowBundle:
+    """A verified-bundle stand-in whose frozen design carries no dropout bound —
+    ExecutionPolicy.from_verified_bundle must refuse before any sweep."""
+    experiment_id = EID
+    retries_per_unit = 0
+    max_surviving_delta = None
+
+
 def test_registry_bundle_without_dropout_bound_refuses(tmp_path,
                                                        monkeypatch):
-    """A registry entry that cannot supply max_surviving_delta must refuse:
+    """A verified bundle that cannot supply max_surviving_delta must refuse:
     run_sweep skips the balance gate without the bound, so running would
-    silently unbound differential dropout."""
+    silently unbound differential dropout. The refusal now fires when the
+    ExecutionPolicy is built from the bundle."""
     calls = []
     _install_recorder(monkeypatch, calls)
 
-    def hollow_bundle(path, eid):
-        return {"bootstrap_iterations": 10000, "bootstrap_seed": 20260719,
-                "confidence": 0.95, "min_detectable_effect": 0.25,
-                "sham_equivalence_margin": 0.25,
-                "permutation_iterations": 10000,
-                "permutation_seed": 20260719, "alpha": 0.05}
-
-    monkeypatch.setattr(registry_mod, "load_thresholds", hollow_bundle)
+    monkeypatch.setattr(registry_mod, "load_verified_bundle",
+                        lambda path, eid: _HollowBundle())
     with pytest.raises(RunnerRefusal) as exc:
         _drive_ollama_local(ROOT, _m8_config(tmp_path), _far_deadline())
     assert "max_surviving_delta" in str(exc.value)
@@ -215,18 +228,19 @@ def test_registry_bundle_without_dropout_bound_refuses(tmp_path,
 
 
 def test_tampered_registry_refuses(tmp_path, monkeypatch):
-    """load_thresholds refusing (design_hash no longer reconstructs) must
-    surface as a driver refusal, never as invented defaults."""
+    """load_verified_bundle refusing (design_hash no longer reconstructs OR the
+    frozen profile disagrees) must surface as a driver refusal, never as
+    invented defaults or a silently weaker (self-rehashed) design."""
     calls = []
     _install_recorder(monkeypatch, calls)
 
     def raising(path, eid):
         raise SchemaError(f"{eid}: the frozen design was mutated")
 
-    monkeypatch.setattr(registry_mod, "load_thresholds", raising)
+    monkeypatch.setattr(registry_mod, "load_verified_bundle", raising)
     with pytest.raises(RunnerRefusal) as exc:
         _drive_ollama_local(ROOT, _m8_config(tmp_path), _far_deadline())
-    assert "frozen threshold bundle unavailable" in str(exc.value)
+    assert "verified frozen bundle unavailable" in str(exc.value)
     assert calls == []
 
 
@@ -257,6 +271,7 @@ def test_non_policy_config_keeps_the_historical_path(tmp_path, monkeypatch):
     assert linted == []        # no preflight outside the policy-required set
     assert len(calls) == 1
     call = calls[0]
+    assert call["execution_policy"] is None     # no mandatory policy off-path
     assert call["execution_order"] == "blocked"
     assert call["record_execution_index"] is None
     assert call["max_surviving_delta"] is None
