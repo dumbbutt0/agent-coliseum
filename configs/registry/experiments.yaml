@@ -243,7 +243,7 @@ experiments:
   generalization_level: L2
   interaction_mode: sequential_history
   manifest: null
-  design_hash: ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd
+  design_hash: 431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533
   planned_design:
     hypothesis: 'OPERATIVE H0 (the ONE canonical null; null_form: swap_invariance) -- Operative confirmatory null (within-unit
       joint swap invariance): for every matched experimental unit i, the joint distribution of the paired terminal outcomes

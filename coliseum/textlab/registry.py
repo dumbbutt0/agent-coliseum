@@ -167,6 +167,17 @@ M8_STOPPING_RULE = {
     "matched_units_per_condition": 48,
 }
 
+# a-006 B-2: the load-bearing DECISION RULE and MODEL REGIME must be anchored in
+# code, exactly (not just marker-linted). A self-rehash that alters primary_event
+# (the ordered decision rule / analysis identity) or switches interaction_mode
+# (the agent regime) would otherwise pass the design_hash-only load. The exact
+# primary_event is pinned by its sha256 here; interaction_mode is pinned as an
+# exact value in M8_FROZEN_PROFILE; both are enforced on the verified-bundle load
+# path. Changing the decision rule is a deliberate audited code change that
+# recomputes this sha — the property design_hash reconstruction alone cannot give.
+M8_PRIMARY_EVENT_SHA256 = (
+    "3e2fde4cd014d1d5b76b779566c87a5ff2a77316f6b3ca389bc6787b2fbc1a98")
+
 # Audit a-004 finding 1: the fitness criteria that declare the finite-sample
 # design fit to run were invented inside the un-hashed simulation script (a
 # power floor of merely 'CP lower bound > 0.05', and a type-I check in the
@@ -381,6 +392,11 @@ M8_FROZEN_PROFILE = {
     # neither execute unnoticed nor share the agent_regime_id.
     "decoder_controls": dict(M8_DECODER_CONTROLS),
     "arbitration": "planner_priority",
+    # a-006 B-2: the interaction mode is a load-bearing regime dimension (it
+    # changes the agent's prompt/history behaviour). Pinned independently of the
+    # self-derived hash so a self-rehash cannot switch sequential_history to
+    # independent_vignettes on the verified-bundle load path.
+    "interaction_mode": "sequential_history",
     # a-005 finding 1: the analysis timing / stopping rule, pinned independently
     # of the self-derived design_hash exactly like every other load-bearing
     # value. A mutate+rehash that reversed the stopping rule fails against this.
@@ -490,7 +506,8 @@ def _config_profile_view(cfg: dict) -> dict:
         "admissibility_policy", "thresholds", "max_surviving_delta",
         "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
         "model_digests", "null_form", "null_statement", "stopping_rule",
-        "retries_per_unit", "decoder_controls") if k in cfg}
+        "retries_per_unit", "interaction_mode", "decoder_controls")
+        if k in cfg}
     if "seeds" in cfg:
         view["scenario_seeds"] = cfg["seeds"]
     return view
@@ -655,6 +672,24 @@ def load_verified_bundle(registry_path: str,
             "verified-bundle load path (a design_hash that reconstructs does "
             "NOT license a weakened bound; the profile is anchored in audited "
             "code) — " + "; ".join(prof))
+    # a-006 B-2: exact-anchor the decision rule and run the semantic frozen-policy
+    # lint on the hot path, so a self-rehash that alters primary_event (the rule /
+    # analysis identity) or the regime is refused here — not just marker-linted
+    # elsewhere. Applies only to the policy-required experiments the anchor covers.
+    if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+        pe = pd.get("primary_event") or ""
+        got = hashlib.sha256(pe.encode("utf-8")).hexdigest()
+        if got != M8_PRIMARY_EVENT_SHA256:
+            raise SchemaError(
+                f"{experiment_id}: primary_event sha256 {got[:16]}… != the "
+                f"code-anchored {M8_PRIMARY_EVENT_SHA256[:16]}… — the frozen "
+                "decision rule / analysis identity was altered; a design_hash "
+                "that reconstructs does NOT license a changed rule")
+        policy_issues = _lint_frozen_policy(experiment_id, pd)
+        if policy_issues:
+            raise SchemaError(
+                f"{experiment_id}: frozen-policy lint failed on the verified-"
+                "bundle load path — " + "; ".join(policy_issues))
     return VerifiedBundle(
         experiment_id=experiment_id,
         design_hash=entry["design_hash"],
