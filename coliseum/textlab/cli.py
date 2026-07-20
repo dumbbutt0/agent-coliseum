@@ -513,6 +513,11 @@ def cmd_smoke_pack(args):
                   sort_keys=True)
         fh.write("\n")
     manifest_path = os.path.join(args.out_root, "manifest.smoke.jsonl")
+    # a-006 B-0/C-0/E-0: the smoke pack exercises the SAME frozen execution
+    # contract the live pack will face. It must carry the experiment identity and
+    # be driven by a verified ExecutionPolicy (zero-retry tombstones), never loose
+    # kwargs — otherwise a smoke resume could re-roll a failed unit and the
+    # "operational validation" would not validate the contract it claims to.
     spec = {"models": models,
             "scenarios": list(pd["scenarios"]),
             "seeds": list(pd["scenario_seeds"]),
@@ -522,16 +527,20 @@ def cmd_smoke_pack(args):
             "interaction": pd["interaction_mode"],
             "config_dir": args.config_dir,
             "out_root": args.out_root,
-            "manifest": manifest_path}
-    # the frozen balance bound travels with the thresholds bundle; a smoke
-    # pack exercises the same gate the live pack will face
-    max_delta = load_thresholds(args.registry,
-                                args.experiment_id).get("max_surviving_delta")
+            "manifest": manifest_path,
+            "experiment_id": args.experiment_id,
+            "registry_path": args.registry}
+    from .registry import load_verified_bundle
     try:
-        result = sweep.run_sweep(spec, execution_order="interleaved",
-                                 expected_digests=digests,
-                                 max_surviving_delta=max_delta,
-                                 progress=print)
+        _vb = load_verified_bundle(args.registry, args.experiment_id)
+        policy = sweep.ExecutionPolicy.from_verified_bundle(
+            _vb, execution_order="interleaved", record_execution_index=True)
+    except SchemaError as e:
+        sys.exit(f"SMOKE-PACK REFUSED: verified frozen bundle / execution "
+                 f"policy unavailable ({e})")
+    try:
+        result = sweep.run_sweep(spec, expected_digests=digests,
+                                 execution_policy=policy, progress=print)
     except Exception as e:
         sys.exit(f"SMOKE-PACK FAILED: {e.__class__.__name__}: {e} "
                  f"(marker {marker_path} remains; evidence is NOT "

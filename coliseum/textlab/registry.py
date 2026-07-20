@@ -567,6 +567,34 @@ class VerifiedBundle:
         return self.planned_design.get("stopping_rule")
 
 
+def protected_scenarios(registry_path: str) -> dict:
+    """scenario_id -> owning experiment_id for every scenario that belongs to a
+    POLICY_REQUIRED experiment (a-006 E-1 / B-0). Running ANY of these scenarios
+    requires the registered experiment identity + a verified ExecutionPolicy, so
+    a generic/anonymous caller (e.g. the human sweep auto-discovering every YAML)
+    cannot relabel a protected sweep as ordinary by omitting experiment_id. The
+    map is derived from the frozen designs, never hardcoded, so it tracks the
+    registry rather than a stale literal list."""
+    out: dict = {}
+    for eid in POLICY_REQUIRED_EXPERIMENTS:
+        try:
+            pd = _frozen_design(registry_path, eid)
+        except (SchemaError, OSError):
+            # a design that will not load cannot silently drop its protection;
+            # its scenarios stay protected under the eid so the core refuses.
+            entry = None
+            try:
+                entry = _find_entry(registry_path, eid)
+            except Exception:
+                continue
+            pd = entry.get("planned_design") if isinstance(entry, dict) else None
+            if not isinstance(pd, dict):
+                continue
+        for s in pd.get("scenarios") or []:
+            out[s] = eid
+    return out
+
+
 def load_verified_bundle(registry_path: str,
                          experiment_id: str) -> VerifiedBundle:
     """Load a frozen design and verify it against the audited numeric profile.

@@ -67,7 +67,16 @@ class ExecutionPolicy:
                              ) -> "ExecutionPolicy":
         """Build the policy from an audited VerifiedBundle. `retries_per_unit`
         and `max_surviving_delta` come from the profile-checked frozen design;
-        the caller supplies only the (config-declared) execution order."""
+        the caller supplies only the (config-declared) execution order. A
+        duck-typed stand-in is refused (a-006 B-1): only a genuine profile-checked
+        VerifiedBundle can source the frozen contract."""
+        from coliseum.textlab.registry import VerifiedBundle
+        if not isinstance(bundle, VerifiedBundle):
+            raise SweepAborted(
+                f"ExecutionPolicy.from_verified_bundle requires a genuine "
+                f"registry.VerifiedBundle, got {type(bundle).__name__} — a "
+                "duck-typed or forged bundle can never source the frozen "
+                "execution contract")
         rpu = bundle.retries_per_unit
         if rpu is None or isinstance(rpu, bool) or rpu != 0:
             raise SweepAborted(
@@ -548,12 +557,70 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     a conflicting value."""
     say = progress or (lambda *_a, **_k: None)
 
-    # STRUCTURAL execution-policy enforcement (b-003 / c-003). Resolve the frozen
-    # contract from the typed policy when present, and REQUIRE it for a
-    # policy-required experiment so the permissive default can never run live.
-    from coliseum.textlab.registry import POLICY_REQUIRED_EXPERIMENTS
+    # STRUCTURAL execution-policy enforcement (b-003 / c-003 / a-006 B-0/B-1/E-1).
+    # Policy-requiredness is decided by BOTH the declared experiment_id AND
+    # SCENARIO MEMBERSHIP, so a generic/anonymous caller cannot relabel a
+    # protected M8 sweep as ordinary by omitting the identity. When required, the
+    # ExecutionPolicy is MANDATORY and is RE-VERIFIED against a freshly loaded
+    # frozen authority, so a forged/weakened policy (or a duck-typed one) is
+    # refused before any provider contact.
+    from coliseum.textlab.registry import (POLICY_REQUIRED_EXPERIMENTS,
+                                           protected_scenarios,
+                                           load_verified_bundle)
     experiment_id = spec.get("experiment_id")
-    policy_required = experiment_id in POLICY_REQUIRED_EXPERIMENTS
+    registry_path = spec.get("registry_path", "configs/registry/experiments.yaml")
+    spec_scenarios = list(spec.get("scenarios") or [])
+    try:
+        protmap = protected_scenarios(registry_path)
+    except Exception:
+        protmap = {}
+    protected_owners = {protmap[s] for s in spec_scenarios if s in protmap}
+    policy_required = (experiment_id in POLICY_REQUIRED_EXPERIMENTS
+                       or bool(protected_owners))
+
+    if policy_required:
+        # a protected scenario may never run without its registered identity
+        if experiment_id not in POLICY_REQUIRED_EXPERIMENTS:
+            raise SweepAborted(
+                f"protected scenario(s) {sorted(s for s in spec_scenarios if s in protmap)} "
+                f"belong to {sorted(protected_owners)} but the spec has "
+                f"experiment_id={experiment_id!r} — a generic or anonymous sweep "
+                "(e.g. YAML auto-discovery) may NOT run a policy-required M8 "
+                "scenario; supply the registered experiment identity, a verified "
+                "ExecutionPolicy, and owner authorization")
+        if protected_owners and experiment_id not in protected_owners:
+            raise SweepAborted(
+                f"experiment_id {experiment_id!r} does not own the protected "
+                f"scenarios {sorted(protected_owners)}")
+        if execution_policy is None:
+            raise SweepAborted(
+                f"{experiment_id}: a policy-required live sweep must be driven by "
+                "a frozen ExecutionPolicy (execution_policy=...); run_sweep "
+                "refuses the permissive default so a failed unit can never be "
+                "re-rolled and the balance gate can never be silently skipped")
+        # RE-VERIFY the supplied policy against the frozen authority (B-1): a
+        # forged ExecutionPolicy (weakened dropout bound, blocked order,
+        # suppressed index, nonzero retry) or a duck-typed object is refused.
+        try:
+            vb = load_verified_bundle(registry_path, experiment_id)
+        except Exception as exc:
+            raise SweepAborted(
+                f"{experiment_id}: cannot load the verified frozen bundle to "
+                f"authenticate the ExecutionPolicy ({exc})")
+        expected = {"retries_per_unit": 0,
+                    "max_surviving_delta": vb.max_surviving_delta,
+                    "execution_order": "interleaved",
+                    "record_execution_index": True}
+        for k, want in expected.items():
+            got = getattr(execution_policy, k, None)
+            if got != want or (isinstance(got, bool) is not isinstance(want, bool)):
+                raise SweepAborted(
+                    f"{experiment_id}: ExecutionPolicy.{k}={got!r} != the frozen "
+                    f"authority value {want!r} — a policy-required sweep will not "
+                    "accept a forged, weakened, or duck-typed execution policy "
+                    "(the frozen contract is re-verified against the audited "
+                    "profile, not trusted from the caller)")
+
     if execution_policy is not None:
         # the typed policy is the authority; a conflicting loose kwarg is a
         # caller bug, not a silent override.
@@ -576,12 +643,6 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
         max_surviving_delta = execution_policy.max_surviving_delta
         execution_order = execution_policy.execution_order
         record_execution_index = execution_policy.record_execution_index
-    elif policy_required:
-        raise SweepAborted(
-            f"{experiment_id}: a policy-required live sweep must be driven by a "
-            "frozen ExecutionPolicy (execution_policy=...); run_sweep refuses "
-            "the permissive default so a failed unit can never be re-rolled and "
-            "the balance gate can never be silently skipped")
 
     if retries_per_unit is not None and (isinstance(retries_per_unit, bool)
                                          or retries_per_unit != 0):
