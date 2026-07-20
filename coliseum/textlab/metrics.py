@@ -783,8 +783,25 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
 #
 # All five refusals are typed and PRE-STATISTICS: no distance, quantile or
 # verdict is computed or emitted on any refusal path.
+#
+# ORDER_REPORT_VERSION 4 -> 5 (a-005 owner decision, still pre-execution): the
+# decision-rule ARITHMETIC is unchanged — same paired permutation, same marginal
+# TV(A,B) statistic, same clauses and quantile comparison. What changes is the
+# CLAIM the report is entitled to make, and therefore its OUTPUT CONTRACT.
+# Repair item 1 above (SHARP NULL) is SUPERSEDED: the operative null is now the
+# DISTRIBUTIONAL (population-marginal) null. a-005 reproduced that marginal TV is
+# blind to balanced unit-level effects, so a sharp CLAIM riding a marginal
+# STATISTIC was a mismatch; the owner narrowed the claim to the statistic. The
+# report now carries `null_form: "distributional"`, a `per_unit_claim_limitation`
+# (marginals only; cancelling unit effects out of scope; a non-rejection is not
+# per-unit invariance), and the emitted verdicts are renamed
+# `distributional_order_effect_observed` / `no_distributional_order_effect_observed`
+# so a v4 (sharp-claim) report can never be mistaken for a v5 one. The paired
+# permutation still supplies the reference distribution under exchangeability
+# (which implies marginal equality) — we do NOT claim it is exact for bare
+# marginal equality; the claim is capped at the distributional level.
 # METRICS_VERSION again stays "1" — no METRICS-v1 definition moved.
-ORDER_REPORT_VERSION = "4"
+ORDER_REPORT_VERSION = "5"
 
 # Required keys. Both argument dicts are validated up front and fail closed:
 # an order-sensitivity statistic computed without declared bounds is exactly the
@@ -1271,13 +1288,18 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
        TV_null = TV(A|S1, A|S2) over the frozen sampler-seed partition.
     5. NULL MODEL — a PAIRED PERMUTATION null over matched units yields the
        decision quantiles q_AB and q_AC at the `1 - alpha` percentile. The
-       operative null is the SHARP unit-level null (see `null_form` in the
-       report); a rejection licenses the unit-level conclusion only, never a
-       marginal one. The percentile bootstrap is RETAINED, but only for
+       operative null is the DISTRIBUTIONAL (population-marginal) null (see
+       `null_form` in the report); the within-unit permutation supplies the
+       reference distribution under exchangeability, which implies marginal
+       equality, so it is a valid level-alpha reference for the marginal TV(A,B)
+       statistic. A rejection licenses a marginal-distribution difference only,
+       NEVER a per-unit claim; a non-rejection licenses only "no distributional
+       order effect observed at MDE" and never per-unit invariance. The
+       percentile bootstrap is RETAINED, but only for
        reporting INTERVALS on the observed distances; it decides nothing.
        TV_null likewise decides nothing — see `_order_permutation_null` for why
        the split-half floor was unfit to calibrate a 48-vs-48 statistic.
-    6. VERDICT — at ORDER_REPORT_VERSION 4 the rule is evaluated in this order,
+    6. VERDICT — at ORDER_REPORT_VERSION 5 the rule is evaluated in this order,
        and no distance, quantile or verdict may be computed once any admission
        clause refuses:
        (0) evidence admission — replay attestation for every admitted run;
@@ -1293,8 +1315,10 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
            detected contamination of the margin size, so neither a positive nor
            a null claim has its control warrant;
        (3) TV(A,B) > q_AB (with the clause-2 warrant held) ->
-           order_effect_observed — stated as the SHARP unit-level conclusion;
-       (4) q_AB <= min_detectable_effect -> no_order_effect_observed;
+           distributional_order_effect_observed — a marginal-distribution
+           difference only, never a per-unit conclusion;
+       (4) q_AB <= min_detectable_effect ->
+           no_distributional_order_effect_observed (not per-unit invariance);
        (5) otherwise -> inconclusive. The sensitivity requirement is
            ASYMMETRIC: it gates clause 4 ONLY. A clause-5 inconclusive is NOT
            evidence of absence.
@@ -1490,18 +1514,22 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         # was judged under, even if the surrounding document is edited
         "policy_hash": config_hash(admissibility_policy),
         "thresholds_hash": config_hash(thresholds),
-        # v4 (audit 001814 finding 0): the operative null is the SHARP unit-level
-        # null. A rejection licenses only the unit-level conclusion; the report
-        # says so in its own words, and no verdict language may claim "the
-        # distribution changed".
-        "null_form": "sharp",
-        "marginal_claim_limitation": (
-            "the operative null is the sharp unit-level null — for every "
-            "matched effective unit, presentation order made no difference to "
-            "the terminal action chosen at that unit; a rejection does NOT "
-            "establish that the marginal terminal-action distributions "
-            "P(Y|A) and P(Y|B) differ, which would require dependence/sampling "
-            "assumptions this design does not make"),
+        # v5 (a-005 owner decision): the operative null is the DISTRIBUTIONAL
+        # (population-marginal) null. A rejection licenses only a marginal-
+        # distribution difference; a non-rejection licenses only "no
+        # distributional order effect observed at MDE". The report says so in
+        # its own words, and no verdict language may claim per-unit invariance
+        # or a sharp/per-unit conclusion.
+        "null_form": "distributional",
+        "per_unit_claim_limitation": (
+            "the operative null is the distributional (population-marginal) "
+            "null — presentation order does not change the marginal terminal-"
+            "action distribution P(Y|A)=P(Y|B). A rejection evidences a "
+            "difference between those marginals only and does NOT identify "
+            "which units changed; a non-rejection does NOT establish per-unit "
+            "invariance, because balanced cancelling unit-level effects can "
+            "keep the marginals equal. Heterogeneous / per-unit order effects "
+            "are OUT OF SCOPE for this experiment's claim"),
         # v4 (audit 001823 finding 2): the frozen measured probe's identity.
         "terminal_dp_id": terminal_dp_id,
         # v4 (audit 001820 finding 0): the replay gate's recorded result — every
@@ -1759,7 +1787,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         tv_ac = out["tv_distances"]["A|C"]
         # RETAINED, DIAGNOSTIC ONLY. TV_null and its bootstrap interval describe
         # within-condition stability across the frozen sampler-seed halves. They
-        # GATE NOTHING at ORDER_REPORT_VERSION 4 and appear in no branch of the
+        # GATE NOTHING at ORDER_REPORT_VERSION 5 and appear in no branch of the
         # rule below — do not reintroduce them into a verdict without
         # re-characterising the design, since comparing a 24-vs-24 distance
         # against a 48-vs-48 statistic is the exact defect v2 exists to remove.
@@ -1768,7 +1796,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             "tv_null_upper": (out["bootstrap"]["null"]["upper"]
                               if "null" in out["bootstrap"] else None),
             "note": ("within-condition stability diagnostic; does not gate any "
-                     "verdict at order_report_version 4"),
+                     "verdict at order_report_version 5"),
         }
         sem = thresholds["sham_equivalence_margin"]
         out["decision_inputs"] = {"tv_ab": tv_ab,
@@ -1779,17 +1807,17 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                                   "sham_equivalence_margin": sem,
                                   "alpha": alpha,
                                   "confidence": confidence}
-        # Preregistered decision rule, verbatim, at ORDER_REPORT_VERSION 4.
+        # Preregistered decision rule, verbatim, at ORDER_REPORT_VERSION 5.
         # Clauses 2-5; clauses 0-1 (evidence admission, refusal, n floor,
         # surviving-count spread, matched-unit grid) have already been enforced
         # above, before any statistic was computed.
         #
         # The sensitivity requirement is ASYMMETRIC and appears ONLY in clause 4.
         # It is not a precondition and must not be restored as one: q_AB is the
-        # rejection threshold itself, so exceeding it rejects the sharp null at
-        # alpha and is a valid positive regardless of whether a smaller effect
-        # would also have been resolvable. See the ORDER_REPORT_VERSION 2 -> 3
-        # block above.
+        # rejection threshold itself, so exceeding it rejects the distributional
+        # null at alpha and is a valid positive regardless of whether a smaller
+        # effect would also have been resolvable. See the ORDER_REPORT_VERSION
+        # 2 -> 3 block above.
         #
         # The SHAM is evaluated FIRST, in BOTH its parts (v4, audit 001814
         # finding 1): a failed sham voids the order claim outright, and a sham
@@ -1811,7 +1839,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             # size. With the warrant missing, no verdict better than
             # inconclusive is reachable — neither the positive (clause 3) nor
             # the null (clause 4) has its control warrant.
-            rejected = ("the A/B comparison did reject its sharp null "
+            rejected = ("the A/B comparison did reject its distributional null "
                         f"(TV(A,B)={tv_ab} > q_AB={q_ab}), but "
                         if tv_ab > q_ab else "")
             out["verdict"] = "inconclusive"
@@ -1824,33 +1852,39 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                 "observed sham shift at the design's own effect bound must "
                 "never be labelled null")
         elif tv_ab > q_ab:
-            # Clause 3. A rejection WITH the sham warrant. Stated as the SHARP
-            # unit-level conclusion only (v4, audit 001814 finding 0) — never
-            # as a marginal-distribution claim.
-            out["verdict"] = "order_effect_observed"
+            # Clause 3. A rejection WITH the sham warrant. Stated as the
+            # DISTRIBUTIONAL (population-marginal) conclusion only (a-005 owner
+            # decision) — the statistic is marginal TV(A,B), so a rejection
+            # evidences a difference between the marginal terminal-action
+            # distributions; it does NOT license any per-unit claim.
+            out["verdict"] = "distributional_order_effect_observed"
             out["verdict_reason"] = (
                 f"observed TV(A,B)={tv_ab} exceeds its paired permutation "
-                f"quantile q_AB={q_ab}, rejecting at alpha={alpha} the SHARP "
-                "unit-level null that presentation order made no difference to "
-                "any matched unit's chosen terminal action; this does not "
-                "establish that the marginal terminal-action distributions "
-                f"differ. The sham warrant holds: TV(A,C)={tv_ac} <= "
-                f"q_AC={q_ac} and q_AC < sham_equivalence_margin={sem}. The "
-                f"sensitivity requirement (q_AB <= min_detectable_effect={mde}) "
-                "constrains only a null claim and does not bear on a rejection")
+                f"quantile q_AB={q_ab}, rejecting at alpha={alpha} the "
+                "distributional null: the marginal terminal-action "
+                "distribution under order A differs from that under order B. "
+                "This is a population-level (marginal) claim only and does not "
+                "identify which units changed or in which direction. The sham "
+                f"warrant holds: TV(A,C)={tv_ac} <= q_AC={q_ac} and q_AC < "
+                f"sham_equivalence_margin={sem}. The sensitivity requirement "
+                f"(q_AB <= min_detectable_effect={mde}) constrains only a null "
+                "claim and does not bear on a rejection")
         elif q_ab <= mde:
             # Clause 4. The ONLY branch the sensitivity requirement gates: a null
             # claim asserts "no effect at or above min_detectable_effect", which
             # is unsupportable unless the test could have resolved one that size.
-            out["verdict"] = "no_order_effect_observed"
+            out["verdict"] = "no_distributional_order_effect_observed"
             out["verdict_reason"] = (
                 f"admissibility policy satisfied, effective n met, sham null "
                 f"with its equivalence warrant (TV(A,C)={tv_ac} <= q_AC={q_ac} "
                 f"< sham_equivalence_margin={sem}), and observed "
                 f"TV(A,B)={tv_ab} does not exceed q_AB={q_ab}, which is itself "
-                f"at or below min_detectable_effect={mde}; the sharp unit-level "
-                "null was not rejected and the design could have resolved an "
-                "effect of the smallest size it claims")
+                f"at or below min_detectable_effect={mde}; no distributional "
+                "order effect was observed at the experiment's detectable-"
+                "effect threshold and the design could have resolved a marginal "
+                "effect of the smallest size it claims. This does NOT establish "
+                "per-unit invariance: balanced cancelling unit-level effects "
+                "can leave the marginals equal (out of scope for this claim)")
         else:
             # Clause 5. Non-rejection without the sensitivity warrant to assert
             # absence.
@@ -1858,7 +1892,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             out["verdict_reason"] = (
                 f"this pack neither rejected nor earned the right to assert "
                 f"absence: observed TV(A,B)={tv_ab} does not exceed its paired "
-                f"permutation quantile q_AB={q_ab}, so the sharp unit-level "
+                f"permutation quantile q_AB={q_ab}, so the distributional "
                 f"null was not rejected; and q_AB exceeds "
                 f"min_detectable_effect={mde}, so the test could not have "
                 f"resolved an effect of the smallest size this design claims, "

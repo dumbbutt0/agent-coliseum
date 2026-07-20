@@ -74,25 +74,46 @@ THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
                   "min_detectable_effect", "sham_equivalence_margin",
                   "power_target", "type_i_criterion")
 
-# ------------------------------------------------- the ONE canonical null (a-004)
+# ------------------------------------------------- the ONE canonical null (a-005)
 #
-# Audit a-004 finding 0: the candidate froze contradictory marginal and sharp
-# nulls — the registry hypothesis stated marginal P(Y|A)=P(Y|B) while the
-# primary_event and preregistration adopted a sharp per-unit null, and the
-# committed operating-characteristics study charged iid equal-marginal packs
-# (which violate the sharp null in every generated trial) as sharp-null type-I
-# arms. There is now exactly ONE canonical, machine-readable null statement,
-# anchored here in audited code and mirrored VERBATIM in planned_design
-# (null_form + null_statement, both design-hashed), the hypothesis, the
-# primary_event, the preregistration document, the committed experiment
-# config, the operating-characteristics script and its committed artifact.
-# Marginal equality P(Y|A)=P(Y|B) is a stated CONSEQUENCE of this null, never
-# the operative hypothesis, and no marginal claim is licensed by a rejection.
-M8_NULL_FORM = "sharp"
+# Owner decision 2026-07-19 (resolving a-004 vs a-005): the FIRST live M8
+# experiment tests the DISTRIBUTIONAL (population-level) null, NOT the sharp/
+# per-unit null. a-004 had frozen a sharp unit-level null; a-005 then reproduced
+# that the aggregate TV(A,B) statistic is BLIND to balanced unit-level effects
+# (a fully discordant cancelling pack leaves the sharp null false at every unit
+# yet emits the successful-null verdict), so the sharp CLAIM and the marginal
+# STATISTIC were mismatched. The owner narrowed the claim to the statistic: the
+# operative null is now marginal equality P(Y|A)=P(Y|B) of the population
+# terminal-action distribution, and the replicated per-unit design is a SEPARATE
+# later preregistered experiment.
+#
+# There is exactly ONE canonical, machine-readable null statement, anchored here
+# in audited code and mirrored VERBATIM in planned_design (null_form +
+# null_statement, both design-hashed), the hypothesis, the primary_event, the
+# preregistration document, the committed experiment config, the operating-
+# characteristics script and its committed artifact.
+#
+# CLAIM CEILING (the whole point of the narrowing): a rejection supports ONLY a
+# distributional/marginal difference, never a per-unit claim; a non-rejection
+# supports ONLY "no distributional order effect observed at the detectable
+# threshold" and EXPLICITLY does not establish per-unit invariance — balanced
+# cancelling unit-level effects keep the marginals equal while the sharp null is
+# false (the permanent cancellation guardrail fixture pins exactly this case).
+# Heterogeneous / cancelling unit-level effects are OUT OF SCOPE for this
+# experiment's claim. See M8_CLAIM_SCOPE below and the preregistration.
+M8_NULL_FORM = "distributional"
 M8_NULL_STATEMENT = (
-    "Sharp (unit-level) null: for every matched effective unit (variant_id, "
-    "scenario_seed, sampler_seed), presentation order made no difference to "
-    "the terminal action chosen at that unit.")
+    "Distributional (population-level) null: across the frozen 48-unit matched "
+    "grid, presentation order does not change the population distribution of "
+    "terminal actions — the marginal terminal-action distribution under order A "
+    "equals the marginal terminal-action distribution under order B.")
+# The claim-scope caveat is design-hashed prose (mirrored into notes and the
+# preregistration) and is enforced by lint: a design that omits it can be read
+# as licensing the per-unit / sharp claims the narrowing removed.
+M8_CLAIM_SCOPE = (
+    "Claim scope: only the marginal terminal-action distribution is tested. "
+    "Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a "
+    "non-rejection does not establish per-unit invariance.")
 
 # Audit a-004 finding 1: the fitness criteria that declare the finite-sample
 # design fit to run were invented inside the un-hashed simulation script (a
@@ -103,7 +124,7 @@ M8_NULL_STATEMENT = (
 # committed characterisation must MEET them before execution.
 M8_POWER_TARGET = 0.8
 M8_TYPE_I_CRITERION = (
-    "CP-95 upper bound of sharp-null rejection rate <= alpha")
+    "CP-95 upper bound of distributional-null rejection rate <= alpha")
 # M8 audit repair R4: the null model is a PAIRED PERMUTATION null, so its
 # parameters must be frozen inside planned_design exactly like the bootstrap
 # parameters were. A design that omits them cannot state a decision quantile at
@@ -181,7 +202,16 @@ PERMUTATION_RULE_MARKERS = ("permutation", "q_AB")
 # registry-loaded max_surviving_delta enforced before any statistic) and the
 # clause-2 sham-adequacy warrant (q_AC < sham_equivalence_margin, strict): a
 # sham NON-rejection needs a warrant exactly as a null claim does.
-ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 4"
+# FIFTH change (owner a-005 decision, still pre-execution): ORDER_REPORT_VERSION
+# bumps 4 -> 5. The decision-rule ARITHMETIC is unchanged (same paired
+# permutation, same TV(A,B) statistic, same clauses/quantile comparison); what
+# changes is the OUTPUT CONTRACT — the emitted verdict vocabulary is renamed to
+# distributional terms (distributional_order_effect_observed /
+# no_distributional_order_effect_observed) and null_form becomes
+# "distributional", so a v4 (sharp-claim) report can never be mistaken for a v5
+# (distributional-claim) one. The version tracks the claim the report is
+# entitled to make, which materially changed.
+ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 5"
 
 # literal markers the clause-0 EVIDENCE-ADMISSION block must carry (matched
 # case-sensitively, like the callable name). A primary_event that drops any of
@@ -259,8 +289,8 @@ M8_FROZEN_PROFILE = {
         # a-004 finding 1: the design-fitness criteria are FROZEN bounds, not
         # script inventions. power_target is the CP-95 LOWER bound the
         # measured power at min_detectable_effect must reach; type_i_criterion
-        # is the UPPER-bound direction the sharp-null rejection rate must
-        # satisfy (the superseded lower-bound direction tested only whether
+        # is the UPPER-bound direction the distributional-null rejection rate
+        # must satisfy (the superseded lower-bound direction tested only whether
         # excess above alpha was demonstrated — the wrong question).
         "power_target": M8_POWER_TARGET,
         "type_i_criterion": M8_TYPE_I_CRITERION,
@@ -615,18 +645,29 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "(0, 0.5) — a decision quantile at or above the "
                           "median is not a test")
 
-    # a-004 finding 0: ONE null everywhere. The design must declare its null
-    # form machine-readably, the declared form must be the sharp unit-level
-    # null the paired permutation test is exact under, and the ONE canonical
+    # a-005 (owner decision): ONE null everywhere, and it is the DISTRIBUTIONAL
+    # null. The design must declare its null form machine-readably; the declared
+    # form must be the frozen distributional form; and the ONE canonical
     # statement must appear VERBATIM in both the hypothesis and the decision
     # rule — a design whose surfaces can answer different hypotheses has no
     # auditable null at all.
+    #
+    # Note on the reference distribution (kept honest — an auditor will probe
+    # this): the within-unit paired permutation supplies the null REFERENCE
+    # distribution under exchangeability. Exchangeability (the sharp null)
+    # implies marginal equality, so that reference is a valid level-alpha test
+    # of marginal separation via the TV(A,B) statistic. The CLAIM is capped at
+    # the distributional level (see M8_CLAIM_SCOPE): a rejection evidences a
+    # marginal difference, a non-rejection evidences only "no distributional
+    # order effect observed at MDE" and never per-unit invariance. We do NOT
+    # assert the permutation test is exact for bare marginal equality.
     nf = pd.get("null_form")
-    if nf != "sharp":
-        issues.append(f"{eid}: planned_design null_form {nf!r} != 'sharp' — "
-                      "the paired permutation test is exact under the sharp "
-                      "unit-level null, not under marginal equality, and the "
-                      "operative null must be declared machine-readably")
+    if nf != M8_NULL_FORM:
+        issues.append(f"{eid}: planned_design null_form {nf!r} != "
+                      f"{M8_NULL_FORM!r} — the first live M8 experiment tests "
+                      "the distributional (population-marginal) null per the "
+                      "owner a-005 decision; the operative null must be "
+                      "declared machine-readably and match the frozen form")
     ns = pd.get("null_statement")
     if not isinstance(ns, str) or not ns.strip():
         issues.append(f"{eid}: planned_design missing 'null_statement' (the "
@@ -644,6 +685,21 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
             issues.append(f"{eid}: primary_event does not contain the "
                           "canonical null_statement VERBATIM — the decision "
                           "rule must test exactly the declared null")
+
+    # a-005 (owner decision): the claim-scope caveat is design-hashed prose. It
+    # must appear VERBATIM in planned_design.notes so a rejection can never be
+    # read as licensing a per-unit claim and a non-rejection can never be read
+    # as per-unit invariance. Dropping it re-opens exactly the over-claim the
+    # distributional narrowing was made to prevent.
+    if eid in POLICY_REQUIRED_EXPERIMENTS:
+        notes = pd.get("notes") or ""
+        if M8_CLAIM_SCOPE not in notes:
+            issues.append(f"{eid}: planned_design.notes does not contain the "
+                          "canonical M8_CLAIM_SCOPE caveat VERBATIM — the "
+                          "distributional claim ceiling (marginals only; "
+                          "cancelling unit-level effects out of scope; a "
+                          "non-rejection is not per-unit invariance) must be "
+                          "frozen in the design, not left to prose elsewhere")
 
     # differential provider dropout is observationally identical to an order
     # effect (the survivors in the affected condition are a biased subsample),

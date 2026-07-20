@@ -245,20 +245,23 @@ experiments:
   manifest: null
   design_hash: e30fd3184bb07afba6707ccdf1f3447e62fe9f5510dcde668ae6117fc110c9ea
   planned_design:
-    hypothesis: 'OPERATIVE H0 (the ONE canonical null; null_form: sharp) -- Sharp (unit-level) null: for every
-      matched effective unit (variant_id, scenario_seed, sampler_seed), presentation order made no difference to
-      the terminal action chosen at that unit. H1: the negation -- for at least one matched unit, presentation
-      order changed the terminal action chosen at that unit. Y is the terminal final_action of the live stochastic
-      decider huihui_ai/qwen2.5-abliterate:7b-instruct at the frozen d_partner probe; A is the developmental order,
-      B the identical admitted experience multiset in a permuted presentation order, C the sham control (A''s order;
-      agent-facing wording and formatting only). The sharp null implies equality of the marginal terminal-action
-      distributions P(Y|A) = P(Y|B); that marginal equality is a stated CONSEQUENCE of H0, never the operative
-      null, and a rejection licenses only the unit-level conclusion, never a marginal one. Unlike Phase 1, no answer
-      is known in advance -- Phase 1 calibrated the instrument on scripted rules with pre-declared outcomes; Phase
-      2 is a discovery experiment in which the null is a perfectly good outcome. A failed sham voids the order claim.'
-    null_form: sharp
-    null_statement: 'Sharp (unit-level) null: for every matched effective unit (variant_id, scenario_seed, sampler_seed),
-      presentation order made no difference to the terminal action chosen at that unit.'
+    hypothesis: 'OPERATIVE H0 (the ONE canonical null; null_form: distributional) -- Distributional (population-level)
+      null: across the frozen 48-unit matched grid, presentation order does not change the population distribution
+      of terminal actions — the marginal terminal-action distribution under order A equals the marginal terminal-action
+      distribution under order B. H1: the negation -- presentation order changes the population distribution of terminal
+      actions, i.e. the marginal terminal-action distributions under A and B differ. Y is the terminal final_action
+      of the live stochastic decider huihui_ai/qwen2.5-abliterate:7b-instruct at the frozen d_partner probe; A is the
+      developmental order, B the identical admitted experience multiset in a permuted presentation order, C the sham
+      control (A''s order; agent-facing wording and formatting only). CLAIM SCOPE: only the marginal terminal-action
+      distribution is tested. Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a non-rejection
+      does not establish per-unit invariance. The replicated per-unit design is a SEPARATE future preregistered
+      experiment. Unlike Phase 1, no answer is known in advance -- Phase 1 calibrated the instrument on scripted rules
+      with pre-declared outcomes; Phase 2 is a discovery experiment in which the null is a perfectly good outcome. A
+      failed sham voids the order claim.'
+    null_form: distributional
+    null_statement: 'Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order
+      does not change the population distribution of terminal actions — the marginal terminal-action distribution under
+      order A equals the marginal terminal-action distribution under order B.'
     models:
     - huihui_ai/qwen2.5-abliterate:7b-instruct
     model_digests:
@@ -352,33 +355,37 @@ experiments:
       permutation_seed: 20260719
       alpha: 0.05
       power_target: 0.8
-      type_i_criterion: CP-95 upper bound of sharp-null rejection rate <= alpha
+      type_i_criterion: CP-95 upper bound of distributional-null rejection rate <= alpha
     max_surviving_delta: 2
     depends_on: m7-scrambled-history-gate
     primary_event: 'ANALYSIS IDENTITY (frozen): the Phase-2 analysis callable is metrics.order_sensitivity_report
-      at ORDER_REPORT_VERSION 4, consuming the admissibility_policy and the thresholds frozen in THIS registry entry
+      at ORDER_REPORT_VERSION 5, consuming the admissibility_policy and the thresholds frozen in THIS registry entry
       (bootstrap_iterations / bootstrap_seed / confidence / min_detectable_effect / sham_equivalence_margin / permutation_iterations
       / permutation_seed / alpha / power_target / type_i_criterion / noise_floor_split) together with the frozen
       max_surviving_delta. The callable
-      version is 4 because the DECISION RULE changed again: version 2 replaced the split-half noise floor with a
+      version is 5 because the CLAIM the report may make changed: version 2 replaced the split-half noise floor with a
       PAIRED PERMUTATION null; version 3 corrected the sensitivity requirement from a symmetric precondition gating
       BOTH branches to an asymmetric requirement attaching ONLY to the null branch; version 4 adds the mandatory
-      clause (0) evidence-admission requirements and the clause (2) sham-control adequacy warrant -- so any emitted
+      clause (0) evidence-admission requirements and the clause (2) sham-control adequacy warrant; version 5 (owner
+      a-005 decision) narrows the operative null from sharp/per-unit to DISTRIBUTIONAL (population-marginal) -- the
+      decision-rule arithmetic is unchanged but the emitted verdict vocabulary and claim ceiling change, so any emitted
       verdict stays traceable to the exact rule that produced it. NULL MODEL: for each of the 48 matched effective
       units (variant_id, scenario_seed, sampler_seed) present in every condition, the terminal actions of the two
       compared conditions are exchanged with probability one half, the total-variation distance is recomputed, and
       the procedure repeats for permutation_iterations under permutation_seed; the decision quantile is the 1 -
-      alpha percentile of that null. The operative null is the ONE canonical SHARP null of this design (null_form:
-      sharp, stated verbatim) -- Sharp (unit-level) null: for every matched effective unit (variant_id, scenario_seed, sampler_seed),
-      presentation order made no difference to the terminal action chosen at that unit. -- and the test is exact
-      under the within-pair exchangeability that sharp null supplies, NOT under marginal equality alone; a rejection
-      licenses only the unit-level conclusion, and marginal equality P(Y|A) = P(Y|B) is a stated consequence of
-      the null, never the operative hypothesis. Let q_AB and q_AC be the 1 - alpha quantiles of the paired permutation
+      alpha percentile of that null. The operative null is the ONE canonical DISTRIBUTIONAL null of this design (null_form:
+      distributional, stated verbatim) -- Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order
+      does not change the population distribution of terminal actions — the marginal terminal-action distribution under
+      order A equals the marginal terminal-action distribution under order B. -- The within-unit paired permutation supplies
+      the reference distribution under exchangeability, which implies marginal equality, so it is a valid level-alpha reference
+      for the marginal TV(A,B) statistic; we do NOT assert the test is exact for bare marginal equality. A rejection licenses
+      a marginal-distribution difference only, never a per-unit claim; a non-rejection licenses only ''no distributional order
+      effect observed at the detectable threshold'' and never per-unit invariance. Let q_AB and q_AC be the 1 - alpha quantiles of the paired permutation
       nulls for A vs B and for A vs C respectively. A percentile bootstrap (bootstrap_iterations under bootstrap_seed
       at confidence) is retained for REPORTING intervals on the observed distances only and decides nothing. DESIGN-FITNESS
       CRITERIA (frozen in thresholds; audit a-004 finding 1): power_target and type_i_criterion are the pre-registered
       acceptance bounds of the committed operating-characteristics artifact -- the CP-95 LOWER bound of the measured
-      power at min_detectable_effect must reach power_target, and the CP-95 UPPER bound of the sharp-null rejection
+      power at min_detectable_effect must reach power_target, and the CP-95 UPPER bound of the distributional-null rejection
       rate must not exceed alpha (the criterion string is frozen as a threshold value; a lower-bound non-excess
       check is the superseded wrong direction). They gate design fitness BEFORE execution: a characterisation that
       misses either bound blocks live execution, and they decide no run-time verdict. The Phase-1 terminal-distribution
@@ -406,9 +413,10 @@ experiments:
       the sham warrant is missing: a positive verdict is unreachable and the outcome is at most inconclusive past
       clause (3). The boundary case TV(A,C) = q_AC = sham_equivalence_margin is inconclusive under the strict inequality,
       never a positive. (3) else if the observed TV(A,B) exceeds q_AB AND the sham warrant of clause (2) holds,
-      the verdict is ORDER EFFECT OBSERVED. (4) else if the observed TV(A,B) does not exceed q_AB and q_AB is less
-      than or equal to min_detectable_effect the verdict is NO ORDER EFFECT OBSERVED, and the bound that null claim
-      is entitled to state is min_detectable_effect. (5) else the verdict is inconclusive. ASYMMETRY OF THE SENSITIVITY
+      the verdict is DISTRIBUTIONAL ORDER EFFECT OBSERVED (a marginal-distribution difference only, never a per-unit
+      claim). (4) else if the observed TV(A,B) does not exceed q_AB and q_AB is less
+      than or equal to min_detectable_effect the verdict is NO DISTRIBUTIONAL ORDER EFFECT OBSERVED, the bound that null claim
+      is entitled to state is min_detectable_effect, and it does NOT establish per-unit invariance. (5) else the verdict is inconclusive. ASYMMETRY OF THE SENSITIVITY
       REQUIREMENT (deliberate): the requirement q_AB <= min_detectable_effect attaches ONLY to the null branch,
       clause (4), and never invalidates a rejection. q_AB IS the rejection threshold of this test, so a clause (3)
       outcome means H0 was rejected at alpha, and that is a valid positive finding whether or not a smaller effect
@@ -459,9 +467,10 @@ experiments:
       SHARP null -- that for each matched effective unit, presentation order made no difference to that unit''s
       chosen terminal action -- and NOT by marginal equality of the A and B distributions, which does not logically
       imply it; the earlier phrasing here that claimed exchangeability was implied by H0 was FALSE and is removed
-      (audit 001828 finding 1). The sharp null IS the hypothesis (null_form + null_statement freeze it as the ONE
-      canonical null); it implies marginal equality, which is a stated consequence and never the operative null,
-      and a rejection licenses only the unit-level conclusion, never that the marginal distributions differ.
+      (audit 001828 finding 1). (As of the a-004 re-freeze the SHARP null WAS the hypothesis; the a-005 DISTRIBUTIONAL
+      RE-FRAMING at the end of these notes SUPERSEDES that -- the operative null is now the population-marginal null,
+      the within-unit permutation still supplies the reference distribution under exchangeability, and the claim is
+      capped at the distributional level; a non-rejection does not establish per-unit invariance.)
       The test uses the actual matched sample sizes so no size mismatch remains, consumes no additional live runs,
       and respects the pairing the design already guarantees. The rejected alternative of raising min_detectable_effect
       above the noise floor would have "worked" while admitting only enormous effects -- precisely the reinterpret-to-rescue
@@ -491,12 +500,14 @@ experiments:
       independent of design_hash, so a mutate-and-rehash edit of this entry or its config refuses against constants
       no registry or config edit can move. Nothing is weakened: every requirement is ADDED. No outcome exists, no
       live run has occurred and no model has been contacted. SCIENTIFIC RE-FREEZE (fifth audit repair, audit a-004,
-      still pre-execution; ORDER_REPORT_VERSION stays 4 -- the six-clause ordered rule is unchanged): ONE NULL EVERYWHERE
-      -- null_form: sharp and the canonical null_statement are frozen in this design, appear verbatim in the hypothesis,
-      the primary_event, the preregistration and the committed config, and are anchored in audited code (registry.M8_NULL_STATEMENT)
-      independent of the self-derived hash; every marginal-equality phrasing that read as the operative null is
-      removed, marginal equality being a stated consequence only. FROZEN FITNESS CRITERIA: power_target = 0.8 and
-      type_i_criterion (CP-95 upper bound of sharp-null rejection rate <= alpha) join thresholds -- the superseded
+      still pre-execution; ORDER_REPORT_VERSION was 4 -- the six-clause ordered rule is unchanged; SUPERSEDED by a-005):
+      ONE NULL EVERYWHERE -- a-004 froze null_form: sharp and its canonical null_statement across the hypothesis,
+      the primary_event, the preregistration and the committed config, anchored in audited code (registry.M8_NULL_STATEMENT)
+      independent of the self-derived hash. The a-005 DISTRIBUTIONAL RE-FRAMING below REPLACES that sharp null with the
+      population-marginal null (now the value anchored in registry.M8_NULL_STATEMENT), keeping the one-null-everywhere
+      discipline: the current canonical null is distributional, mirrored verbatim across exactly those same surfaces.
+      FROZEN FITNESS CRITERIA: power_target = 0.8 and
+      type_i_criterion (CP-95 upper bound of distributional-null rejection rate <= alpha) join thresholds -- the superseded
       script-invented criteria (a power floor of merely CP-lower > 0.05, and a type-I check bounding the LOWER confidence
       limit, which tests only whether excess above alpha was demonstrated and is the wrong direction) are void.
       The operating-characteristics arms now MECHANICALLY satisfy the declared null: each sharp-null trial generates
@@ -508,7 +519,31 @@ experiments:
       reliably detect, and an inconclusive there is expected, never rescued. sham_equivalence_margin is DELIBERATELY
       decoupled from min_detectable_effect and stays 0.25: enlarging the margin would WEAKEN the sham-adequacy warrant
       (q_AC < margin becomes easier to grant), so the margin never follows the detectable boundary upward. No outcome
-      exists, no live run has occurred and no model has been contacted.'
+      exists, no live run has occurred and no model has been contacted. DISTRIBUTIONAL RE-FRAMING (sixth change, owner
+      a-005 decision, still pre-execution; ORDER_REPORT_VERSION bumped 4 -> 5): the operative null is narrowed from
+      sharp/per-unit to DISTRIBUTIONAL (population-marginal). a-005 reproduced that the aggregate TV(A,B) statistic is
+      BLIND to balanced unit-level effects -- a fully discordant cancelling pack (24 units share->decline, 24 decline->share)
+      leaves the sharp null FALSE at every unit yet has equal A and B marginals, so a sharp CLAIM riding a marginal
+      STATISTIC was a mismatch. The owner narrowed the CLAIM to the statistic. This changes the claim vocabulary, not
+      the arithmetic: same paired permutation, same TV(A,B) statistic, same six-clause ordered rule and quantile
+      comparison, so the committed operating-characteristics numbers (power CP-95 lower bound at min_detectable_effect
+      >= power_target; type-I upper bound <= alpha, both characterised under the within-pair exchangeability reference)
+      are UNCHANGED and still met, and min_detectable_effect stays 0.35 now described as the DISTRIBUTIONAL detectable-effect
+      floor. The within-unit paired permutation supplies the reference distribution under exchangeability (which implies
+      marginal equality), a valid level-alpha reference for the marginal TV statistic; we do NOT claim the test is exact
+      for bare marginal equality. The emitted verdicts are renamed distributional_order_effect_observed /
+      no_distributional_order_effect_observed and null_form becomes distributional, so a v4 (sharp-claim) report can never
+      be mistaken for a v5 (distributional-claim) one. Claim scope: only the marginal terminal-action distribution is tested.
+      Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a non-rejection does not establish per-unit
+      invariance. The permitted null-result language is exactly "No distributional order effect was observed at the
+      experiment''s detectable-effect threshold"; the replicated per-unit design is a SEPARATE future preregistered
+      experiment. ANALYSIS TIMING / STOPPING RULE (frozen, a-005 finding 1): the analysis is performed EXACTLY ONCE, after
+      the complete 144-run (48 matched units per condition) pack has closed. There is NO interim analysis, NO early
+      stopping, NO adaptive continuation, and NO outcome-dependent addition or removal of units, seeds, scenarios or
+      conditions; the pack size and composition are fixed by this frozen design and a partial pack yields no verdict.
+      This complete-pack / no-interim / no-early-stopping timing is design-hashed here and mirrored into the committed
+      config, and its exact values are lint-enforced independently. No outcome exists, no live run has occurred and no
+      model has been contacted.'
   purpose: 'Phase 2 of the scrambled-history experiment: the LIVE-model counterpart of the Phase 1 scripted calibration
     gate. Does a real pinned model''s terminal action distribution change when an identical experience multiset
     is presented in a permuted order (A vs B), while the sham reorder control (A vs C) stays null?'
