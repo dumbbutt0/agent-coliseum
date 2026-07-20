@@ -345,6 +345,12 @@ M8_FROZEN_PROFILE = {
     # of the self-derived design_hash exactly like every other load-bearing
     # value. A mutate+rehash that reversed the stopping rule fails against this.
     "stopping_rule": dict(M8_STOPPING_RULE),
+    # c-003: the frozen one-effective-unit contract. retries_per_unit is a
+    # load-bearing execution bound (a nonzero value re-rolls a failed unit), so
+    # it is anchored here independently of the self-derived design_hash — a
+    # rehashed edit to a nonzero value fails on the verified-bundle load path,
+    # not only at ExecutionPolicy/run_sweep construction downstream.
+    "retries_per_unit": 0,
     "model_digests": {
         "huihui_ai/qwen2.5-abliterate:7b-instruct":
             "103482475c9b4d4032999dd5d7383478cad8b966ae6ae984d525"
@@ -444,7 +450,7 @@ def _config_profile_view(cfg: dict) -> dict:
         "admissibility_policy", "thresholds", "max_surviving_delta",
         "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
         "model_digests", "null_form", "null_statement", "stopping_rule",
-        "decoder_controls") if k in cfg}
+        "retries_per_unit", "decoder_controls") if k in cfg}
     if "seeds" in cfg:
         view["scenario_seeds"] = cfg["seeds"]
     return view
