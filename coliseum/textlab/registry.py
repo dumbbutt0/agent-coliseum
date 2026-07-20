@@ -115,6 +115,32 @@ M8_CLAIM_SCOPE = (
     "Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a "
     "non-rejection does not establish per-unit invariance.")
 
+# a-005 finding 1: the analysis timing / stopping rule must be FROZEN in the
+# design identity, not left to prose. A post-freeze edit that reversed it
+# (interim looks, outcome-dependent continuation) while preserving design_hash
+# and passing the lint would make outcome-dependent early stopping invisible.
+# It is pinned three ways: (1) a STRUCTURED stopping_rule block inside
+# planned_design (design-hashed) and mirrored into the config; (2) exact values
+# in M8_FROZEN_PROFILE, compared independently of the self-derived hash; and
+# (3) this canonical statement mirrored VERBATIM into planned_design.notes
+# (design-hashed) and the preregistration document (content-bound by test), so
+# mutating only the Markdown prose fails a binding rather than loading quietly.
+M8_STOPPING_STATEMENT = (
+    "Analysis timing (frozen): the analysis is performed exactly once, after "
+    "the complete 144-run pack has closed; there is no interim analysis, no "
+    "early stopping, no adaptive continuation, and no outcome-dependent "
+    "addition or removal of units, seeds, scenarios or conditions.")
+M8_STOPPING_RULE = {
+    "analysis_timing": "complete_pack",
+    "analyses_total": 1,
+    "interim_analyses": 0,
+    "early_stopping": False,
+    "adaptive_continuation": False,
+    "outcome_dependent_composition": False,
+    "pack_runs": 144,
+    "matched_units_per_condition": 48,
+}
+
 # Audit a-004 finding 1: the fitness criteria that declare the finite-sample
 # design fit to run were invented inside the un-hashed simulation script (a
 # power floor of merely 'CP lower bound > 0.05', and a type-I check in the
@@ -314,6 +340,10 @@ M8_FROZEN_PROFILE = {
     # neither execute unnoticed nor share the agent_regime_id.
     "decoder_controls": dict(M8_DECODER_CONTROLS),
     "arbitration": "planner_priority",
+    # a-005 finding 1: the analysis timing / stopping rule, pinned independently
+    # of the self-derived design_hash exactly like every other load-bearing
+    # value. A mutate+rehash that reversed the stopping rule fails against this.
+    "stopping_rule": dict(M8_STOPPING_RULE),
     "model_digests": {
         "huihui_ai/qwen2.5-abliterate:7b-instruct":
             "103482475c9b4d4032999dd5d7383478cad8b966ae6ae984d525"
@@ -412,7 +442,7 @@ def _config_profile_view(cfg: dict) -> dict:
     view = {k: cfg[k] for k in (
         "admissibility_policy", "thresholds", "max_surviving_delta",
         "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
-        "model_digests", "null_form", "null_statement",
+        "model_digests", "null_form", "null_statement", "stopping_rule",
         "decoder_controls") if k in cfg}
     if "seeds" in cfg:
         view["scenario_seeds"] = cfg["seeds"]
@@ -700,6 +730,26 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "cancelling unit-level effects out of scope; a "
                           "non-rejection is not per-unit invariance) must be "
                           "frozen in the design, not left to prose elsewhere")
+        if M8_STOPPING_STATEMENT not in notes:
+            issues.append(f"{eid}: planned_design.notes does not contain the "
+                          "canonical M8_STOPPING_STATEMENT VERBATIM — the "
+                          "complete-pack / no-interim / no-early-stopping "
+                          "analysis timing must be frozen in the design so a "
+                          "prose-only edit cannot reverse it (a-005 finding 1)")
+        # a-005 finding 1: the STRUCTURED stopping_rule must be present and
+        # exactly the frozen block. The profile comparison also pins it
+        # independently of the hash; this catches a missing/typed-wrong block
+        # at the design lint with a precise message.
+        sr = pd.get("stopping_rule")
+        if not isinstance(sr, dict):
+            issues.append(f"{eid}: planned_design missing structured "
+                          "'stopping_rule' block (a-005 finding 1: analysis "
+                          "timing must be design-hashed, not prose-only)")
+        elif sr != M8_STOPPING_RULE:
+            issues.append(f"{eid}: planned_design.stopping_rule {sr!r} != the "
+                          f"frozen {M8_STOPPING_RULE!r} — every field is pinned "
+                          "(complete_pack, one analysis, no interim / early "
+                          "stopping / adaptive / outcome-dependent composition)")
 
     # differential provider dropout is observationally identical to an order
     # effect (the survivors in the affected condition are a biased subsample),

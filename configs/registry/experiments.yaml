@@ -243,7 +243,7 @@ experiments:
   generalization_level: L2
   interaction_mode: sequential_history
   manifest: null
-  design_hash: e30fd3184bb07afba6707ccdf1f3447e62fe9f5510dcde668ae6117fc110c9ea
+  design_hash: ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd
   planned_design:
     hypothesis: 'OPERATIVE H0 (the ONE canonical null; null_form: distributional) -- Distributional (population-level)
       null: across the frozen 48-unit matched grid, presentation order does not change the population distribution
@@ -357,6 +357,15 @@ experiments:
       power_target: 0.8
       type_i_criterion: CP-95 upper bound of distributional-null rejection rate <= alpha
     max_surviving_delta: 2
+    stopping_rule:
+      analysis_timing: complete_pack
+      analyses_total: 1
+      interim_analyses: 0
+      early_stopping: false
+      adaptive_continuation: false
+      outcome_dependent_composition: false
+      pack_runs: 144
+      matched_units_per_condition: 48
     depends_on: m7-scrambled-history-gate
     primary_event: 'ANALYSIS IDENTITY (frozen): the Phase-2 analysis callable is metrics.order_sensitivity_report
       at ORDER_REPORT_VERSION 5, consuming the admissibility_policy and the thresholds frozen in THIS registry entry
@@ -537,12 +546,14 @@ experiments:
       Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a non-rejection does not establish per-unit
       invariance. The permitted null-result language is exactly "No distributional order effect was observed at the
       experiment''s detectable-effect threshold"; the replicated per-unit design is a SEPARATE future preregistered
-      experiment. ANALYSIS TIMING / STOPPING RULE (frozen, a-005 finding 1): the analysis is performed EXACTLY ONCE, after
-      the complete 144-run (48 matched units per condition) pack has closed. There is NO interim analysis, NO early
-      stopping, NO adaptive continuation, and NO outcome-dependent addition or removal of units, seeds, scenarios or
-      conditions; the pack size and composition are fixed by this frozen design and a partial pack yields no verdict.
-      This complete-pack / no-interim / no-early-stopping timing is design-hashed here and mirrored into the committed
-      config, and its exact values are lint-enforced independently. No outcome exists, no live run has occurred and no
+      experiment. ANALYSIS TIMING / STOPPING RULE (frozen, a-005 finding 1): Analysis timing (frozen): the analysis is performed
+      exactly once, after the complete 144-run pack has closed; there is no interim analysis, no early stopping, no
+      adaptive continuation, and no outcome-dependent addition or removal of units, seeds, scenarios or conditions.
+      The pack size and composition are fixed by this frozen design and a partial pack yields no verdict; the structured
+      stopping_rule block (analysis_timing complete_pack, analyses_total 1, interim_analyses 0, early_stopping false,
+      adaptive_continuation false, outcome_dependent_composition false, pack_runs 144, matched_units_per_condition 48)
+      is design-hashed and mirrored into the committed config, and its exact values are lint-enforced independently of
+      the self-derived hash. No outcome exists, no live run has occurred and no
       model has been contacted.'
   purpose: 'Phase 2 of the scrambled-history experiment: the LIVE-model counterpart of the Phase 1 scripted calibration
     gate. Does a real pinned model''s terminal action distribution change when an identical experience multiset
