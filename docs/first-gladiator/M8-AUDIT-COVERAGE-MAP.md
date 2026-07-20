@@ -13,7 +13,7 @@ declared before the first request is published, per the Director mandate.
 | Branch | `codex/first-gladiator-phase2-design` |
 | Worktree | `/tmp/agent-coliseum-phase2` |
 | Frozen design | `docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md` |
-| Design hash | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (current, post-a-005 distributional re-framing; supersedes the cycle-4 regime-frozen `e30fd318…`; the registry entry is authoritative) |
+| Design hash | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (post-a-005; the a-006 swap-invariance re-framing re-frames the prose surfaces but its `design_hash` recompute is a subsequent milestone, so this value still stands and the reconstruction lint reports exactly that one expected mismatch; the registry entry is authoritative) |
 | Candidate commit | *assigned at assembly; every request binds it exactly* |
 | Changed-path allowlist | `docs/first-gladiator/M8-CHANGED-PATH-ALLOWLIST.json` (machine-checked by `tests/test_m8_coverage_conformance.py`) |
 
@@ -30,7 +30,9 @@ mean no path can enter unaudited.
 the design hash; this map is not.** Hashes were issued and superseded across the
 repair cycles (`eb715c65…` → `71aeb718…` → `869982d3…` during cycle-1;
 `e889882e…` → `e30fd318…` at the cycle-4 decoder-regime freeze; then `e30fd318…`
-→ `ce8eff3e…` at the owner a-005 distributional re-framing — the value above).
+→ `ce8eff3e…` at the owner a-005 distributional re-framing — the value above. The
+owner a-006 swap-invariance re-framing re-frames the null across the prose
+surfaces but defers its `design_hash` recompute to a subsequent milestone).
 This table previously carried an earlier one — a stale copy in a non-canonical
 document, recorded here rather than silently corrected because it is the same
 class of defect as cycle 1's blocking Finding 1: an artifact asserting a design

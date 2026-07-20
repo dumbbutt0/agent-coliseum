@@ -905,17 +905,17 @@ def test_retries_per_unit_zero_dedups_identical_and_refuses_conflicting(tmp_path
         assert "retries_per_unit" in str(exc2.value)
 
 
-def test_diagnostics_note_and_report_version_are_v5(tmp_path):
-    """d-002 finding 1 (LOW): the emitted report identifies ORDER_REPORT_VERSION
-    5 consistently — the top-level version, the constant, and the diagnostics
-    note that previously read 'order_report_version 4'."""
+def test_diagnostics_note_and_report_version_are_v6(tmp_path):
+    """d-002 finding 1 (LOW), held through a-006: the emitted report identifies
+    ORDER_REPORT_VERSION 6 consistently — the top-level version, the constant,
+    and the diagnostics note that previously read 'order_report_version 5'."""
     dirs = _build(tmp_path, {"A": _mixed(0), "B": _mixed(16), "C": _mixed(0)})
     rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
-    assert ORDER_REPORT_VERSION == "5"
-    assert rep["order_report_version"] == "5"
+    assert ORDER_REPORT_VERSION == "6"
+    assert rep["order_report_version"] == "6"
     note = rep["per_agent"]["live"]["diagnostics"]["note"]
-    assert "order_report_version 5" in note
-    assert "order_report_version 4" not in note
+    assert "order_report_version 6" in note
+    assert "order_report_version 5" not in note
 
 
 # ------------------------------------------------------------- 9. replicates (F3)
@@ -1015,13 +1015,15 @@ def test_verdict_distributional_order_effect_states_the_marginal_claim(tmp_path)
     # the permutation null is what decided it, and it used the real matched n
     assert agent["permutation_null"]["A|B"]["matched_units"] == _N
     assert agent["permutation_null"]["A|B"]["iterations"] == 200
-    # a-005: the claim is the DISTRIBUTIONAL (population-marginal) conclusion,
-    # capped there — a marginal-distribution difference, never a per-unit claim
+    # a-006: the claim is the SWAP-INVARIANCE conclusion — the within-unit null
+    # is rejected (an order effect at some unit) and the marginal TV is the
+    # effect-size estimand, never a per-unit claim
     reason = agent["verdict_reason"]
-    assert "marginal" in reason and "population-level" in reason
-    assert "does not identify which units changed" in reason
-    assert rep["null_form"] == "distributional"
-    assert "marginal" in rep["per_unit_claim_limitation"]
+    assert "the within-unit swap-invariance null is rejected" in reason
+    assert "the marginal TV difference is the effect-size estimand" in reason
+    assert "not a per-unit claim" in reason
+    assert rep["null_form"] == "swap_invariance"
+    assert "marginal" in rep["claim_limitation"]
 
 
 def test_failed_sham_voids_a_large_ab_distance(tmp_path):
@@ -1178,10 +1180,11 @@ def test_report_is_self_describing(tmp_path):
     # branch only. 3 -> 4: the strict sham equivalence warrant and the clause-0
     # evidence-admission contract (replay attestation, frozen terminal probe,
     # surviving-count bound, matched-unit grid). 4 -> 5: the operative null
-    # narrowed to DISTRIBUTIONAL — the claim ceiling and verdict vocabulary
-    # changed. A consumer must be able to tell which rule produced a verdict;
-    # all five can disagree on identical evidence.
-    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "5"
+    # narrowed to DISTRIBUTIONAL. 5 -> 6: the operative null was REFINED to the
+    # within-unit SWAP-INVARIANCE null — the claim framing and three-layer
+    # separation changed. A consumer must be able to tell which rule produced a
+    # verdict; all six can disagree on identical evidence.
+    assert rep["order_report_version"] == ORDER_REPORT_VERSION == "6"
     assert rep["admissibility_version"] == DECISION_ADMISSIBILITY_VERSION
     assert rep["policy_version"] == "1"
     assert rep["admissibility_policy"] == policy
@@ -1189,11 +1192,12 @@ def test_report_is_self_describing(tmp_path):
     assert len(rep["policy_hash"]) == 64 and len(rep["thresholds_hash"]) == 64
     # METRICS-v1 definitions did not move: the new artifact carries its OWN version
     assert rep["metrics_version"] == METRICS_VERSION == "1"
-    # v5 self-description: the operative distributional null, the per-unit-claim
+    # v6 self-description: the operative swap-invariance null, the claim
     # limitation, the frozen probe, and the recorded replay gate
-    assert rep["null_form"] == "distributional"
-    assert "marginal" in rep["per_unit_claim_limitation"]
-    assert "P(Y|A)" in rep["per_unit_claim_limitation"]
+    assert rep["null_form"] == "swap_invariance"
+    assert "marginal" in rep["claim_limitation"]
+    assert "swap-invariance null" in rep["claim_limitation"]
+    assert "outside the confirmatory null" in rep["claim_limitation"].lower()
     assert rep["terminal_dp_id"] == TERMINAL
     assert rep["replay_verification"] == {"attestation_version": "1",
                                           "verified_run_n": 12}

@@ -266,7 +266,19 @@ PERMUTATION_RULE_MARKERS = ("permutation", "q_AB")
 # "distributional", so a v4 (sharp-claim) report can never be mistaken for a v5
 # (distributional-claim) one. The version tracks the claim the report is
 # entitled to make, which materially changed.
-ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 5"
+# SIXTH change (owner a-006 A-0 decision, still pre-execution): ORDER_REPORT_VERSION
+# bumps 5 -> 6. The decision-rule ARITHMETIC is again unchanged (same paired
+# permutation, same TV(A,B) statistic, same clauses/quantile comparison); what
+# changes is the OUTPUT CONTRACT's CLAIM FRAMING — the operative confirmatory null
+# is REFINED from the bare population-marginal ("distributional") null to the
+# within-unit JOINT SWAP-INVARIANCE null (Y_iA,Y_iB) =d (Y_iB,Y_iA) per unit,
+# subject to across-unit independence; null_form becomes "swap_invariance". The
+# marginal TV(A,B) is retained as the effect-size ESTIMAND (not the null). The
+# emitted verdict enum literals are DELIBERATELY unchanged (they name the
+# marginal-detectable outcome), but the report's null_form / claim-limitation /
+# verdict_reason wording is re-framed so a v5 (distributional-claim) report can
+# never be mistaken for a v6 (swap-invariance-claim) one.
+ANALYSIS_CALLABLE_VERSION_MARKER = "ORDER_REPORT_VERSION 6"
 
 # literal markers the clause-0 EVIDENCE-ADMISSION block must carry (matched
 # case-sensitively, like the callable name). A primary_event that drops any of

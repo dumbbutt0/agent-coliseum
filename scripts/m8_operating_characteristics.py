@@ -113,9 +113,9 @@ from coliseum.textlab.schema import canonical_json, config_hash  # noqa: E402
 # The characterisation is bound to the rule version it characterises: a bump
 # of ORDER_REPORT_VERSION is a different decision rule, and this committed
 # artifact must be regenerated under it, never inherited.
-assert ORDER_REPORT_VERSION == "5", (
+assert ORDER_REPORT_VERSION == "6", (
     f"ORDER_REPORT_VERSION is {ORDER_REPORT_VERSION!r}; this study "
-    "characterises rule version '5' — regenerate deliberately")
+    "characterises rule version '6' — regenerate deliberately")
 
 # ------------------------------------------------------------ the ONE null
 CANONICAL_NULL_STATEMENT = (

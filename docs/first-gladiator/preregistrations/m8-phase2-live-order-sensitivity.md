@@ -27,23 +27,28 @@ otherwise matched experience set moves a terminal action distribution.
 ## Hypothesis (primary, pre-registered — null first)
 
 **Operative H0 — the ONE canonical null of this design, stated verbatim
-(machine-readable as `planned_design.null_form: distributional` +
+(machine-readable as `planned_design.null_form: swap_invariance` +
 `planned_design.null_statement`, design-hashed, and anchored in audited code
 as `registry.M8_NULL_STATEMENT`):**
 
-> Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order does not change the population distribution of terminal actions — the marginal terminal-action distribution under order A equals the marginal terminal-action distribution under order B.
+> Operative confirmatory null (within-unit joint swap invariance): for every matched experimental unit i, the joint distribution of the paired terminal outcomes is invariant under exchanging presentation labels A and B — (Y_iA, Y_iB) =d (Y_iB, Y_iA) — subject to the preregistered across-unit independence / exchangeability-block assumptions. This implies equality of the population-marginal terminal-action distributions, but the within-pair permutation test is NOT claimed to be an exact test of bare population-marginal equality alone.
 
-**H1:** the negation — presentation order changes the population distribution of
-terminal actions, i.e. the marginal terminal-action distributions under A and B
-differ.
+**Across-unit independence assumption:** the 48 effective units (distinct
+`(variant_id, scenario_seed, sampler_seed)` triples) are mutually independent,
+and the test applies an independent within-unit A/B swap per unit.
+
+**H1:** the negation — for some matched unit i the joint distribution of the
+paired terminal outcomes is NOT invariant under exchanging the presentation
+labels A and B, i.e. presentation order changes the paired terminal-outcome
+distribution at some unit.
 
 This exact statement appears verbatim in the registry `hypothesis`, the
 registry `primary_event`, the committed experiment config, the
 operating-characteristics script, and the committed characterisation artifact.
 
-**Claim scope (a-005, frozen), stated verbatim:**
+**Three inferential layers stay separate (a-006, frozen), stated verbatim:**
 
-> Claim scope: only the marginal terminal-action distribution is tested. Heterogeneous or cancelling unit-level order effects are OUT OF SCOPE; a non-rejection does not establish per-unit invariance.
+> Claim scope: the permutation p-value tests ONLY the within-unit swap-invariance null; the population-marginal total-variation distance TV(P_A,P_B) is the effect-size ESTIMAND, not the null; and MDE 0.35 is demonstrated sensitivity under the specific simulated alternative families and operating conditions, not a universal detection guarantee. A rejection evidences that presentation order changes the paired terminal-outcome distribution at some unit; a non-rejection is 'no order effect detected at the threshold' and never establishes swap invariance, per-unit invariance, or marginal equality. A non-exchangeable A/B coupling can hold the marginals equal (TV=0) while violating swap invariance, so TV=0 is not evidence the null is true and such cancellation cases are OUTSIDE the confirmatory null.
 
 The replicated per-unit design is a SEPARATE future preregistered experiment.
 
@@ -53,25 +58,32 @@ probe identity; nothing else may be measured); `A` is the developmental order,
 control (A's order; agent-facing wording and formatting only).
 
 **What the permutation test supplies, on whose authority, and the a-004 → a-005
-supersession.** Audit a-004 first froze this design around a **sharp/per-unit**
-null *(that framing is SUPERSEDED and preserved here only for the audit trail)*.
+→ a-006 supersession.** Audit a-004 first froze this design around a
+**sharp/per-unit** null *(SUPERSEDED, preserved here only for the audit trail)*.
 The owner's a-005 decision then **narrowed the operative null to DISTRIBUTIONAL
-(population-marginal)**: a-005 reproduced that the aggregate `TV(A,B)` statistic
-is blind to balanced unit-level effects — a fully discordant cancelling pack (24
-units share→decline, 24 decline→share) leaves a sharp null false at every unit
-yet has exactly equal A and B marginals, so a sharp *claim* riding a marginal
-*statistic* was a mismatch. The owner narrowed the claim to the statistic. This
-changed the claim vocabulary and the claim ceiling, not the arithmetic. The
-within-unit paired permutation supplies the **reference distribution under
-exchangeability** (which implies marginal equality), a valid level-alpha
-reference for the marginal `TV(A,B)` statistic; the design does **not** claim
-the test is exact for bare marginal equality. A rejection evidences a
-**marginal-distribution difference only**, never a per-unit claim; a
-non-rejection evidences only "no distributional order effect observed at the
-detectable threshold" and never per-unit invariance (balanced cancelling
-unit-level effects keep the marginals equal — out of scope). An earlier registry
-note claiming exchangeability is "implied by H0" was **false** and was removed
-(audit 001828 finding 1).
+(population-marginal)** *(also SUPERSEDED)*: a-005 reproduced that the aggregate
+`TV(A,B)` statistic is blind to balanced unit-level effects — a fully discordant
+cancelling pack (24 units share→decline, 24 decline→share) leaves a sharp null
+false at every unit yet has exactly equal A and B marginals, so a sharp *claim*
+riding a marginal *statistic* was a mismatch. The owner's **a-006 A-0 decision**
+then **REFINES the operative confirmatory null to the within-unit JOINT
+SWAP-INVARIANCE null** and keeps the three inferential layers explicitly
+separate: the swap-invariance null is the inferential hypothesis (the permutation
+p-value), the marginal `TV(P_A,P_B)` is the effect-size ESTIMAND, and MDE 0.35 is
+demonstrated sensitivity under specific alternative families. Each refinement
+changed the claim framing, not the arithmetic. The within-unit paired permutation
+is finite-sample exact for the swap-invariance null (validity comes from
+invariance under the label swaps the test performs); that null **implies**
+marginal equality, so the permutation is a valid level-alpha reference for the
+marginal `TV(A,B)` statistic, but the design does **not** claim the test is exact
+for bare marginal equality. A rejection evidences that presentation order changes
+the paired terminal-outcome distribution at some unit; the marginal TV is the
+effect-size estimand, never a per-unit claim. A non-rejection is "no order effect
+detected at the threshold" and never establishes swap invariance, per-unit
+invariance, or marginal equality (a non-exchangeable coupling can hold TV=0 while
+violating the null — outside the confirmatory null). An earlier registry note
+claiming exchangeability is "implied by H0" was **false** and was removed (audit
+001828 finding 1).
 
 No stronger alternative is authorized at this stage.
 
@@ -293,19 +305,21 @@ yields no verdict.
    statistic. The design does **not** claim the test is exact for bare marginal
    equality: two conditions can share a marginal distribution while their
    outcomes are dependent within a unit in an asymmetric way, and under that
-   weaker hypothesis alone the test is not exact. The operative null is
-   therefore stated at the level the statistic actually resolves — the
-   **distributional (population-marginal)** null (audit a-005, which SUPERSEDED
-   the earlier sharp/per-unit framing).
+   weaker hypothesis alone the test is not exact. The operative confirmatory
+   null is therefore the **within-unit joint swap-invariance** null (audit
+   a-006, which REFINED the a-005 distributional framing, which had SUPERSEDED
+   the earlier sharp/per-unit framing), with the marginal `TV(A,B)` retained as
+   the effect-size ESTIMAND.
 
-   Because the statistic is the marginal `TV(A,B)`, the claim ceiling is the
-   marginal distribution and nothing finer: a rejection evidences a
-   **marginal-distribution difference only** and never identifies which units
-   changed; a non-rejection evidences only "no distributional order effect
-   observed at the detectable threshold" and does **not** establish per-unit
-   invariance, because balanced cancelling unit-level effects can leave the
-   marginals equal (out of scope). The result report must state this
-   distributional claim ceiling explicitly.
+   The three inferential layers stay separate: a rejection evidences that
+   presentation order changes the paired terminal-outcome distribution at some
+   unit (the swap-invariance null is rejected) and never identifies which units
+   changed — the marginal TV is the effect-size estimand, not a per-unit claim;
+   a non-rejection evidences only "no order effect detected at the threshold"
+   and does **not** establish swap invariance, per-unit invariance, or marginal
+   equality, because a non-exchangeable coupling can leave the marginals equal
+   (TV=0) while violating the null (outside the confirmatory null). The result
+   report must state this three-layer separation explicitly.
 
 ### Why the split-half noise floor was replaced
 
@@ -365,19 +379,23 @@ A refusal is an inconclusive result, never a number to be interpreted.
 ## Primary event (decision rule)
 
 The analysis callable is **`metrics.order_sensitivity_report`** at
-**`ORDER_REPORT_VERSION 5`** — the ONE version literal this document pins, and
+**`ORDER_REPORT_VERSION 6`** — the ONE version literal this document pins, and
 it appears nowhere in this document at any other value (audit a-004 finding 0
 found a 3-vs-4 disagreement here; corrected). The version has been bumped once
 per change to the decision rule or its claim ceiling, so any emitted verdict is
 traceable to the rule that produced it: v1 the bootstrap-bound comparison
 against a split-half floor; v2 the paired permutation null; v3 the corrected
 asymmetric sensitivity requirement; v4 the mandatory clause-0 evidence admission
-and the clause-2 sham-adequacy warrant; v5 (current, owner a-005) the operative
-null narrowed to **distributional** — the six-clause ordered rule and its
-arithmetic are unchanged, but the emitted verdict vocabulary
+and the clause-2 sham-adequacy warrant; v5 (owner a-005) the operative null
+narrowed to **distributional**; v6 (current, owner a-006) the operative
+confirmatory null REFINED to the within-unit **swap-invariance** null with the
+three inferential layers kept separate — the six-clause ordered rule and its
+arithmetic are unchanged, and the emitted verdict enum literals
 (`distributional_order_effect_observed` / `no_distributional_order_effect_observed`)
-and the claim ceiling change, so a v4 (sharp-claim) report can never be mistaken
-for a v5 (distributional-claim) one. The registry entry's
+are DELIBERATELY retained (they name the marginal-detectable outcome), but the
+`null_form`, claim limitation, and verdict reason wording change, so a v5
+(distributional-claim) report can never be mistaken for a v6 (swap-invariance)
+one. The registry entry's
 `primary_event` is the authoritative statement of the frozen rule, and the
 lint fails a design whose version marker disagrees with it, consuming the
 frozen `admissibility_policy` and `thresholds` loaded from this experiment's
@@ -388,7 +406,7 @@ candidate to return a clean null from wholly unparseable output. Naming it here
 would freeze the exact unsafe path this design exists to avoid.
 
 Let `q_AB` and `q_AC` be the `1 − alpha` quantiles of the paired permutation
-nulls for A vs B and A vs C. The rule (`ORDER_REPORT_VERSION 5`) is evaluated in
+nulls for A vs B and A vs C. The rule (`ORDER_REPORT_VERSION 6`) is evaluated in
 this order, and **no distance, quantile, or verdict may be computed or emitted
 once any admission clause refuses**:
 
@@ -420,12 +438,15 @@ once any admission clause refuses**:
    at most **inconclusive** past clause 3.
 3. Else if the observed `TV(A,B)` **exceeds** `q_AB` **and** the sham warrant of
    clause 2 holds: **distributional order effect observed**
-   (`distributional_order_effect_observed`) — a marginal-distribution difference
-   only, never a per-unit claim.
+   (`distributional_order_effect_observed`, enum literal retained) — the
+   within-unit swap-invariance null is rejected, so presentation order changes
+   the paired terminal-outcome distribution at some unit; the marginal TV is the
+   effect-size estimand, never a per-unit claim.
 4. Else if `TV(A,B) ≤ q_AB` and `q_AB ≤ min_detectable_effect`: **no
    distributional order effect observed**
-   (`no_distributional_order_effect_observed`) — this does **not** establish
-   per-unit invariance.
+   (`no_distributional_order_effect_observed`, enum literal retained) — no order
+   effect detected at the threshold; this does **not** establish swap
+   invariance, per-unit invariance, or marginal equality.
 5. Else: **inconclusive**.
 
 **`sham_equivalence_margin = 0.25`**, frozen in `planned_design.thresholds`
@@ -506,8 +527,11 @@ The criteria that declare this finite-sample design fit to run are **frozen in
 code** — they are never invented or adjusted inside the characterisation
 script (audit a-004 finding 1 blocked exactly that):
 
-- **`type_i_criterion` (frozen string): "CP-95 upper bound of distributional-null
-  rejection rate <= alpha".** The **upper** bound: only an upper confidence
+- **`type_i_criterion` (frozen string): "CP-95 upper bound of the
+  swap-invariance-null rejection rate <= alpha (finite-sample type-I control
+  under the within-pair exchangeability reference; equal-marginal arms that are
+  jointly exchangeable are charged as type-I, non-exchangeable equal-marginal
+  couplings are alternatives)".** The **upper** bound: only an upper confidence
   limit at or below `alpha` supports the claim "type-I error is at or below
   alpha". The superseded script-invented check bounded the *lower* limit,
   which tests only whether excess above alpha was *demonstrated* — the wrong
@@ -633,23 +657,23 @@ it defeat (5). Those require the separately preregistered follow-ups named below
 
 ## What may NOT be claimed
 
-**Maximum positive claim** *(capped at the distributional level per owner audit
-a-005; a rejection evidences a marginal-distribution difference only, never a
-per-unit claim)*:
+**Maximum positive claim** *(per owner audit a-006; a rejection of the
+swap-invariance null evidences an order effect at some unit, with the marginal
+TV as the effect-size estimand, never a per-unit claim)*:
 
 > Under the frozen live-model regime, the paired permutation test rejected the
-> distributional null: the population (marginal) distribution of terminal actions
-> under order A differs from that under order B. This is a population-level
-> (marginal) claim only — it does not identify which units changed or in which
+> within-unit swap-invariance null: presentation order changes the paired
+> terminal-outcome distribution at some unit. The marginal TV difference is the
+> effect-size estimand — this does not identify which units changed or in which
 > direction, and does not establish any per-unit order effect.
 
 **Maximum null claim** *(the permitted null-result language, verbatim)*:
 
-> No distributional order effect was observed at the experiment's
-> detectable-effect threshold.
+> No order effect was detected at the experiment's detectable-effect threshold.
 
-This does **not** establish per-unit invariance: balanced cancelling unit-level
-effects can leave the marginals equal (out of scope for this experiment's claim).
+This does **not** establish swap invariance, per-unit invariance, or marginal
+equality: a non-exchangeable coupling can leave the marginals equal (TV=0) while
+violating the swap-invariance null, which is outside the confirmatory null.
 
 **Maximum inconclusive claim:**
 

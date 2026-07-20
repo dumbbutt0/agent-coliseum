@@ -1,4 +1,4 @@
-# M8 C1-BUNDLE — the Director's scientific re-freeze (audit a-004, findings f0 + f1; distributional re-framing, owner a-005)
+# M8 C1-BUNDLE — the Director's scientific re-freeze (audit a-004, findings f0 + f1; distributional re-framing, owner a-005; swap-invariance re-framing, owner a-006)
 
 **Cluster C1 deliverable. Owner directive: any change to the surfaces frozen
 here invalidates every downstream artifact built on them** — evidence packs,
@@ -10,13 +10,13 @@ all be regenerated against the values below, never inherited across a change.
 | Field | Value |
 |---|---|
 | `experiment_id` | `m8-phase2-live-order-sensitivity` |
-| `design_hash` | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (current, post-a-005 distributional re-framing; supersedes `e30fd318…`) |
-| Rule version pinned by the design | `ORDER_REPORT_VERSION 5` |
-| `null_form` | `distributional` |
+| `design_hash` | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (post-a-005; pending recompute at the a-006 swap-invariance re-framing — see below) |
+| Rule version pinned by the design | `ORDER_REPORT_VERSION 6` |
+| `null_form` | `swap_invariance` |
 
 ## The ONE canonical null statement (verbatim, everywhere)
 
-> Distributional (population-level) null: across the frozen 48-unit matched grid, presentation order does not change the population distribution of terminal actions — the marginal terminal-action distribution under order A equals the marginal terminal-action distribution under order B.
+> Operative confirmatory null (within-unit joint swap invariance): for every matched experimental unit i, the joint distribution of the paired terminal outcomes is invariant under exchanging presentation labels A and B — (Y_iA, Y_iB) =d (Y_iB, Y_iA) — subject to the preregistered across-unit independence / exchangeability-block assumptions. This implies equality of the population-marginal terminal-action distributions, but the within-pair permutation test is NOT claimed to be an exact test of bare population-marginal equality alone.
 
 Anchored in audited code as `registry.M8_NULL_STATEMENT` and mirrored
 verbatim in: `planned_design.null_statement`, `planned_design.hypothesis`,
@@ -24,15 +24,19 @@ verbatim in: `planned_design.null_statement`, `planned_design.hypothesis`,
 (`configs/experiments/m8-phase2-live-order-sensitivity.experiment.json`),
 the preregistration document, `scripts/m8_operating_characteristics.py`
 (import-time asserted against the anchor), and the committed artifact's
-`null_statement` echo. The within-unit paired permutation supplies the
-reference distribution under exchangeability (which implies marginal equality),
-a valid level-alpha reference for the marginal `TV(A,B)` statistic — the design
-does **not** claim the test is exact for bare marginal equality. A rejection
-evidences a **marginal-distribution difference only**, never a per-unit claim; a
-non-rejection does **not** establish per-unit invariance (out of scope). The
-lint refuses a design whose hypothesis or decision rule does not contain the
-statement verbatim, whose `null_form` is not `distributional`, or whose surfaces
-disagree with the code anchor.
+`null_statement` echo. The within-unit paired permutation is finite-sample exact
+for the swap-invariance null; that null **implies** marginal equality, so the
+permutation is a valid level-alpha reference for the marginal `TV(A,B)`
+statistic — the design does **not** claim the test is exact for bare marginal
+equality. The three inferential layers stay separate: a rejection evidences that
+presentation order changes the paired terminal-outcome distribution at some unit
+(the marginal TV is the effect-size ESTIMAND, never a per-unit claim); a
+non-rejection is "no order effect detected at the threshold" and does **not**
+establish swap invariance, per-unit invariance, or marginal equality (a
+non-exchangeable coupling can hold TV=0 while violating the null — outside the
+confirmatory null). The lint refuses a design whose hypothesis or decision rule
+does not contain the statement verbatim, whose `null_form` is not
+`swap_invariance`, or whose surfaces disagree with the code anchor.
 
 ## Frozen numeric values (all design-hashed AND anchored in `registry.M8_FROZEN_PROFILE`)
 
@@ -42,7 +46,7 @@ disagree with the code anchor.
 | `confidence` | `0.95` |
 | `min_detectable_effect` | `0.35` (measured-honest; the smallest grid effect whose power CP-95 lower bound reached 0.8 — see below) |
 | `power_target` | `0.8` (CP-95 **lower** bound of power at the MDE must reach it) |
-| `type_i_criterion` | `"CP-95 upper bound of distributional-null rejection rate <= alpha"` (**upper** bound — the superseded lower-bound direction is banned by lint) |
+| `type_i_criterion` | `"CP-95 upper bound of the swap-invariance-null rejection rate <= alpha (finite-sample type-I control under the within-pair exchangeability reference; equal-marginal arms that are jointly exchangeable are charged as type-I, non-exchangeable equal-marginal couplings are alternatives)"` (**upper** bound — the superseded lower-bound direction is banned by lint) |
 | `sham_equivalence_margin` | `0.25` — **intentionally tighter than the MDE (0.35)**: see the asymmetry rationale below |
 | `permutation_iterations` / `permutation_seed` | `10000` / `20260719` |
 | `bootstrap_iterations` / `bootstrap_seed` | `10000` / `20260719` |
@@ -111,18 +115,21 @@ likely to slip — measured leakage `0.02`, CP-95 `[0.00548, 0.05041]`.
 
 ## Required literal for downstream clusters (C2 note)
 
-`coliseum/textlab/metrics.py` **must keep `ORDER_REPORT_VERSION = "5"`.**
+`coliseum/textlab/metrics.py` **must keep `ORDER_REPORT_VERSION = "6"`.**
 The a-004 re-freeze changed **no clause** of the six-clause ordered decision
 rule (it stayed at `4`); the owner **a-005** decision then narrowed the
-operative null to distributional — the arithmetic is unchanged but the emitted
-verdict vocabulary and claim ceiling changed, so the literal bumped `4 → 5`. The
-frozen design, its `design_hash`, the registry lint marker
+operative null to distributional (`4 → 5`); the owner **a-006 A-0** decision
+then REFINED the operative confirmatory null to the within-unit swap-invariance
+null — the arithmetic is again unchanged and the emitted verdict enum literals
+are retained, but the `null_form`, claim limitation, and verdict-reason wording
+changed, so the literal bumped `5 → 6`. The registry lint marker
 (`ANALYSIS_CALLABLE_VERSION_MARKER`), the preregistration's single version
-literal, and the committed artifact all now pin `5`. If any later cluster
-changes the decision rule or claim ceiling it must bump the literal, re-freeze
-every surface listed here, recompute `design_hash`, and regenerate the
-operating-characteristics artifact — the script asserts the version at import
-and will refuse to characterise a different rule silently.
+literal, and the committed config all now pin `6`; `design_hash` recompute and
+the operating-characteristics artifact regeneration are a subsequent milestone.
+If any later cluster changes the decision rule or claim ceiling it must bump the
+literal, re-freeze every surface listed here, recompute `design_hash`, and
+regenerate the operating-characteristics artifact — the script asserts the
+version at import and will refuse to characterise a different rule silently.
 
 The thresholds bundle served by `registry.load_thresholds` now carries two
 additional keys (`power_target`, `type_i_criterion`).
@@ -166,8 +173,21 @@ owner narrowed the operative null from sharp/per-unit to **distributional**
 ceiling, `type_i_criterion` wording) and added the structured `stopping_rule`
 block. The arithmetic and every numeric threshold are unchanged, so the
 operating-characteristics numbers are unchanged; the callable version bumped
-`4 → 5`. This moved `design_hash` `e30fd318…` → `ce8eff3e…` (the current hash in
-the identity table above).
+`4 → 5`. This moved `design_hash` `e30fd318…` → `ce8eff3e…`.
+
+**Subsequent change — owner a-006 A-0 swap-invariance re-framing.** The owner
+then REFINED the operative confirmatory null from the bare distributional
+(population-marginal) null to the **within-unit joint swap-invariance** null,
+keeping the three inferential layers explicitly separate (swap-invariance null =
+the inferential hypothesis; marginal `TV(P_A,P_B)` = the effect-size estimand;
+MDE 0.35 = demonstrated sensitivity). `null_form` becomes `swap_invariance`, the
+`null_statement`, `type_i_criterion` wording, claim limitation, and verdict-reason
+prose are re-framed, and the callable version bumped `5 → 6`. The arithmetic and
+every numeric threshold are again unchanged, so the operating-characteristics
+numbers are unchanged. The `design_hash` recompute (from `ce8eff3e…`) and the
+operating-characteristics artifact regeneration are a **subsequent milestone**;
+until then the registry entry still carries `ce8eff3e…` and the design-hash
+reconstruction lint reports exactly that one expected mismatch.
 
 Phase-1 evidence regenerates byte-identically: scripted and mock agents never
 carry these keys in their sampling dict (a key enters lineage only when present),
