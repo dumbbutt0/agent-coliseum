@@ -247,7 +247,7 @@ def cmd_replay_pack(args):
 
 
 def cmd_order_report(args):
-    """Frozen ORDER_REPORT_VERSION-4 analysis over a completed pack.
+    """Frozen ORDER_REPORT_VERSION-6 analysis over a completed pack.
 
     Order of refusals (each exits nonzero and writes NOTHING):
       1. smoke-marked out_root (a smoke pack is operational validation only);
@@ -261,6 +261,12 @@ def cmd_order_report(args):
                            load_thresholds, load_verified_bundle,
                            POLICY_REQUIRED_EXPERIMENTS)
     from .schema import SchemaError
+
+    # a-006 E-2: the operator docstring advertises a specific report contract; bind
+    # it to the emitted version so a future bump cannot leave the doc stale.
+    assert metrics_mod.ORDER_REPORT_VERSION == "6", (
+        "cmd_order_report docstring advertises ORDER_REPORT_VERSION-6 but "
+        f"metrics emits {metrics_mod.ORDER_REPORT_VERSION!r} — update both together")
 
     marker = os.path.join(args.out_root, SMOKE_MARKER_NAME)
     if os.path.exists(marker):
