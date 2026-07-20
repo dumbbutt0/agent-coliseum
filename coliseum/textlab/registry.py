@@ -506,10 +506,14 @@ def _config_profile_view(cfg: dict) -> dict:
         "admissibility_policy", "thresholds", "max_surviving_delta",
         "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
         "model_digests", "null_form", "null_statement", "stopping_rule",
-        "retries_per_unit", "interaction_mode", "decoder_controls")
+        "retries_per_unit", "decoder_controls")
         if k in cfg}
     if "seeds" in cfg:
         view["scenario_seeds"] = cfg["seeds"]
+    # a-006 B-2: the run config names the regime dimension "interaction"; the
+    # planned_design (and the frozen profile) call it "interaction_mode".
+    if "interaction" in cfg:
+        view["interaction_mode"] = cfg["interaction"]
     return view
 
 

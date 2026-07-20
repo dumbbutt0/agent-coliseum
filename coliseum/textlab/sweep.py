@@ -687,6 +687,74 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     def _deadline_hit():
         return deadline is not None and time.monotonic() > deadline
 
+    # ---- C-1 (a-006): PROVIDER-FREE resume of a FULLY-RESOLVED grid. Resuming a
+    # grid whose every planned unit is already a recorded success or a durable
+    # tombstone has nothing left to generate, so it must NOT construct an
+    # OllamaAgent or touch the network at all — the recorded rows were
+    # regime/digest-validated at generation time and the downstream analysis
+    # re-validates the regime, so a complete grid needs no fresh provider
+    # contact. To detect this WITHOUT weakening the "fleet preflight precedes any
+    # validating manifest_load / any generation" invariant on the partial path,
+    # a cheap read-only pre-scan (a raw NON-BLANK LINE COUNT of the existing
+    # ledgers — never the validating manifest_load, never a dir CREATE) gates the
+    # check: only when the ledgers ALREADY hold at least `total` rows do we pay
+    # for the full-validation load. A malformed or short manifest counts below
+    # `total` and falls straight through to the preflight, so a repulled model is
+    # still refused there before any manifest_load and before any compute.
+    total = (len(spec["models"]) * len(scenarios) * len(seeds)
+             * len(sampler_seeds))
+
+    def _nonblank_lines(p):
+        if not os.path.exists(p):
+            return 0
+        with open(p, encoding="utf-8") as fh:
+            return sum(1 for line in fh if line.strip())
+
+    tomb_ledger = _tombstone_path(manifest_path)
+    ledger_rows = _nonblank_lines(manifest_path) + (
+        _nonblank_lines(tomb_ledger) if retries_per_unit == 0 else 0)
+    if total > 0 and ledger_rows >= total:
+        try:
+            done0 = manifest_load(manifest_path, out_root)
+            tomb0 = (tombstone_load(manifest_path)
+                     if retries_per_unit == 0 else {})
+        except Exception:
+            # a malformed/short ledger cannot resolve the grid; defer to the
+            # normal preflight-first path, which surfaces the real error AFTER
+            # the fleet is validated (never masking a repulled model).
+            done0 = None
+        if done0 is not None and len(set(done0) | set(tomb0)) >= total:
+            say(f"sweep[{mode}|{interaction}]: all {total} planned units "
+                f"already resolved ({len(done0)} recorded, {len(tomb0)} "
+                "tombstoned) — resuming WITHOUT provider contact")
+            for row in done0.values():
+                cond = result._condition((row["model"], row["scenario"]))
+                result.skipped_resumed += 1
+                result.resumed[cond] += 1
+                result.surviving[cond] += 1
+            for row in tomb0.values():
+                # a durable typed failure re-registers as the same dropout; its
+                # tombstoned_resumed is counted even if the row predates the
+                # model/scenario schema (then it feeds only the balance gate).
+                result.tombstoned_resumed += 1
+                model = row.get("model")
+                scenario_name = row.get("scenario")
+                if model is None or scenario_name is None:
+                    continue
+                kind = row.get("failure_kind", "other")
+                cond = result._condition((model, scenario_name))
+                result.dropouts[cond][kind] += 1
+                result.execution_log.append(
+                    {"execution_index": len(result.execution_log),
+                     "model": model, "scenario": scenario_name,
+                     "scenario_seed": row.get("scenario_seed"),
+                     "sampler_seed": row.get("sampler_seed"),
+                     "status": "failed_tombstoned", "failure_kind": kind})
+            # the SAME fail-closed balance gate the normal path runs at the end
+            if max_surviving_delta is not None:
+                result.check_condition_balance(max_surviving_delta)
+            return result
+
     # ---- ATOMIC fleet preflight (audit blocker, cycle-2): probe and validate
     # the digest of EVERY configured model FIRST — before any filesystem touch
     # (no out_root/manifest dir creation, no manifest read) and before any

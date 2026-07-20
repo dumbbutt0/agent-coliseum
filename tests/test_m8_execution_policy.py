@@ -12,21 +12,26 @@ production paths, not merely available:
 All offline: no network, no live compute. The refusals fire on construction.
 """
 import copy
+import json
 import os
 
 import pytest
 import yaml
 
 import coliseum.textlab.registry as R
+import coliseum.textlab.runner as runner_mod
+import coliseum.textlab.sweep as sweep_mod
+from coliseum.textlab.agents import MockLLMAgent, make_agent as real_make_agent
 from coliseum.textlab.registry import (VerifiedBundle, load_verified_bundle,
                                         design_hash)
-from coliseum.textlab.sweep import ExecutionPolicy, SweepAborted, run_sweep
+from coliseum.textlab.sweep import (ExecutionPolicy, SweepAborted,
+                                     SweepUnbalanced, run_sweep)
 from coliseum.textlab.schema import SchemaError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY = os.path.join(ROOT, "configs", "registry", "experiments.yaml")
 EID = "m8-phase2-live-order-sensitivity"
-FROZEN_HASH = "ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd"
+FROZEN_HASH = "431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533"
 
 
 def _write_registry(tmp_path, mutate):
@@ -50,8 +55,9 @@ def test_verified_bundle_loads_the_frozen_design():
     assert vb.design_hash == FROZEN_HASH
     assert vb.retries_per_unit == 0
     assert vb.max_surviving_delta == 2
-    # the profile-checked null form travels with the verified bundle
-    assert vb.planned_design["null_form"] == "distributional"
+    # the profile-checked null form travels with the verified bundle (a-006 A-0
+    # re-froze it from 'distributional' to the swap-invariance null)
+    assert vb.planned_design["null_form"] == "swap_invariance"
 
 
 def test_verified_bundle_refuses_a_hash_mismatch(tmp_path):
@@ -100,6 +106,9 @@ def test_execution_policy_from_bundle_is_zero_retry():
 
 
 class _FakeBundle:
+    """A DUCK-TYPED stand-in: it exposes the same attributes a VerifiedBundle
+    would, but it is not a genuine profile-checked bundle. a-006 B-1 requires
+    from_verified_bundle to refuse it at the isinstance guard."""
     experiment_id = EID
 
     def __init__(self, rpu, msd=2):
@@ -107,18 +116,45 @@ class _FakeBundle:
         self.max_surviving_delta = msd
 
 
+def _genuine_bundle(**pd_over):
+    """A REAL registry.VerifiedBundle that PASSES the isinstance guard in
+    from_verified_bundle, with its frozen planned_design optionally overridden.
+    Used so the retries_per_unit / max_surviving_delta guards that fire AFTER
+    the type check are the thing under test, not the type check itself."""
+    vb = load_verified_bundle(REGISTRY, EID)
+    pd = dict(vb.planned_design)
+    pd.update(pd_over)
+    return VerifiedBundle(experiment_id=vb.experiment_id,
+                          design_hash=vb.design_hash, planned_design=pd,
+                          thresholds=vb.thresholds,
+                          admissibility_policy=vb.admissibility_policy)
+
+
 def test_execution_policy_refuses_nonzero_retry():
+    # a GENUINE VerifiedBundle whose frozen design carries a nonzero retry is
+    # refused by the rpu guard (which fires only after the type guard passes).
     with pytest.raises(SweepAborted) as exc:
-        ExecutionPolicy.from_verified_bundle(_FakeBundle(1),
-                                             execution_order="interleaved")
+        ExecutionPolicy.from_verified_bundle(
+            _genuine_bundle(retries_per_unit=1), execution_order="interleaved")
     assert "retries_per_unit" in str(exc.value)
 
 
 def test_execution_policy_refuses_missing_dropout_bound():
     with pytest.raises(SweepAborted) as exc:
-        ExecutionPolicy.from_verified_bundle(_FakeBundle(0, msd=None),
-                                             execution_order="interleaved")
+        ExecutionPolicy.from_verified_bundle(
+            _genuine_bundle(max_surviving_delta=None),
+            execution_order="interleaved")
     assert "max_surviving_delta" in str(exc.value)
+
+
+def test_execution_policy_refuses_a_duck_typed_bundle():
+    # a-006 B-1: only a genuine profile-checked VerifiedBundle can source the
+    # frozen contract — a duck-typed stand-in is refused at the isinstance guard
+    # BEFORE any of its (untrusted) attribute values are consulted.
+    with pytest.raises(SweepAborted) as exc:
+        ExecutionPolicy.from_verified_bundle(_FakeBundle(0),
+                                             execution_order="interleaved")
+    assert "requires a genuine" in str(exc.value)
 
 
 # -------------------------------------------------------------------- run_sweep
@@ -157,3 +193,215 @@ def test_run_sweep_nonpolicy_experiment_needs_no_policy(tmp_path):
         assert "ExecutionPolicy" not in str(exc.value)
     except Exception:
         pass  # any non-policy failure is acceptable; the gate did not fire
+
+
+def _poison_provider(monkeypatch, why):
+    """Make every provider seam raise if constructed/called, so a test can prove
+    a refusal fired BEFORE any provider contact."""
+    def _boom(*_a, **_k):
+        raise AssertionError(f"provider contacted but {why}")
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _boom)
+    monkeypatch.setattr(sweep_mod, "run_scenario", _boom)
+
+
+def test_run_sweep_refuses_a_forged_execution_policy(tmp_path, monkeypatch):
+    # a directly-constructed policy that weakens EVERY frozen bound. run_sweep
+    # re-verifies it against a freshly loaded frozen authority and refuses it
+    # BEFORE any provider contact (the poisoned seams never fire).
+    _poison_provider(monkeypatch, "a forged policy must be refused first")
+    forged = ExecutionPolicy(retries_per_unit=0, max_surviving_delta=999,
+                             execution_order="blocked",
+                             record_execution_index=False)
+    spec = _min_spec(tmp_path, registry_path=REGISTRY,
+                     models=["llama3.1:latest"])
+    with pytest.raises(SweepAborted) as exc:
+        run_sweep(spec, execution_policy=forged)
+    msg = str(exc.value)
+    assert "forged" in msg and "frozen authority" in msg
+    # the weakened dropout bound is what the re-verification caught
+    assert "max_surviving_delta" in msg
+
+
+def test_run_sweep_refuses_an_anonymous_protected_scenario(tmp_path,
+                                                           monkeypatch):
+    # a-006 E-1/B-0: a protected M8 scenario may not run without its registered
+    # experiment identity — an anonymous / YAML-auto-discovery spec is refused
+    # before any provider contact.
+    _poison_provider(monkeypatch, "an anonymous protected sweep must be refused")
+    spec = _min_spec(tmp_path, registry_path=REGISTRY,
+                     scenarios=["scramble_dev_m8"], models=["llama3.1:latest"])
+    del spec["experiment_id"]
+    with pytest.raises(SweepAborted) as exc:
+        run_sweep(spec)
+    msg = str(exc.value)
+    assert "scramble_dev_m8" in msg and "anonymous" in msg
+
+
+def test_load_verified_bundle_refuses_a_rehashed_primary_event(tmp_path):
+    # a-006 B-2: the decision rule / analysis identity is anchored by its
+    # sha256; a self-rehash that alters primary_event (recomputing design_hash so
+    # reconstruction passes) is refused on the verified-bundle load path.
+    def mutate(entry):
+        # a trailing newline changes the sha while leaving every required marker
+        # and phrase intact, so it is the sha anchor — not a content lint — that
+        # catches it.
+        entry["planned_design"]["primary_event"] += "\n"
+        entry["design_hash"] = design_hash(entry["planned_design"])
+    path = _write_registry(tmp_path, mutate)
+    with pytest.raises(SchemaError) as exc:
+        load_verified_bundle(path, EID)
+    assert "primary_event sha256" in str(exc.value)
+
+
+def test_load_verified_bundle_refuses_a_rehashed_interaction_mode(tmp_path):
+    # a-006 B-2: interaction_mode is a load-bearing regime dimension pinned in
+    # the audited profile; a self-rehash that switches it is refused against the
+    # profile (independently of the self-derived design_hash).
+    def mutate(entry):
+        entry["planned_design"]["interaction_mode"] = "independent_vignettes"
+        entry["design_hash"] = design_hash(entry["planned_design"])
+    path = _write_registry(tmp_path, mutate)
+    with pytest.raises(SchemaError) as exc:
+        load_verified_bundle(path, EID)
+    msg = str(exc.value)
+    assert "interaction_mode" in msg and "profile" in msg.lower()
+
+
+# ---------------- C-1 (a-006): provider-free resume of a fully-resolved grid ---
+#
+# Resuming a grid whose every planned unit is already a recorded success or a
+# durable tombstone must NOT construct an OllamaAgent or touch the network. A
+# partial grid (>=1 unresolved unit) must still enter the fleet preflight before
+# any genuinely-new generation. Both run OFFLINE — the fixture-backed mock stands
+# in for the two live seams, and the fully-resolved case poisons them to prove
+# zero contact.
+
+_FIXTURE = "steward_obedient"
+_CONDITIONS = ["scramble_dev", "scramble_perm", "scramble_sham"]
+_MODEL = "llama3.1:latest"
+_SCEN_DIR = os.path.join(ROOT, "configs", "scenarios")
+
+
+def _mk_mock(model):
+    a = MockLLMAgent(_FIXTURE)
+    a.model = model
+    a.agent_id = f"llm:ollama:{model}"
+    return a
+
+
+def _install_offline_ollama(monkeypatch):
+    """Swap the digest probe and the per-run agent factory for the fixture mock
+    — exactly the two live seams, and nothing else (run_scenario stays REAL so a
+    genuine resumable manifest with real evidence dirs is produced)."""
+    def _fake_probe(model, host=None):
+        p = _mk_mock(model)
+        p.host = host or "http://mock"
+        return p
+
+    def _fake_make_agent(spec):
+        if spec.startswith("llm:ollama:"):
+            return _mk_mock(spec.split("llm:ollama:", 1)[1])
+        return real_make_agent(spec)
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _fake_probe)
+    monkeypatch.setattr(runner_mod, "make_agent", _fake_make_agent)
+
+
+def _c1_spec(tmp_path, *, sampler_seeds, name="runs"):
+    out_root = str(tmp_path / name)
+    return {"models": [_MODEL], "scenarios": list(_CONDITIONS),
+            "seeds": [42, 1], "sampler_seeds": list(sampler_seeds),
+            "temperature": 0.7, "arbitration": "planner_priority",
+            "interaction": "independent_vignettes", "config_dir": _SCEN_DIR,
+            "out_root": out_root,
+            "manifest": os.path.join(out_root, "manifest.jsonl")}
+
+
+def _install_failing_real_runner(monkeypatch, calls, target):
+    """Wrap the REAL fixture-backed run_scenario so ONE cell fails (a live-only
+    timeout, durably tombstoned under retries_per_unit=0) while every other cell
+    writes a genuine evidence dir — yielding a FULLY-resolved grid."""
+    real_run_scenario = sweep_mod.run_scenario
+
+    def _failing(path, agent_spec, seed, **kw):
+        scenario = os.path.splitext(os.path.basename(path))[0]
+        ks = kw.get("sampler_seed")
+        calls.append((scenario, seed, ks))
+        if (scenario, seed, ks) == target:
+            raise TimeoutError("planner budget 120s exceeded")
+        return real_run_scenario(path, agent_spec, seed, **kw)
+
+    monkeypatch.setattr(sweep_mod, "run_scenario", _failing)
+
+
+def test_c1_fully_resolved_resume_makes_zero_provider_contact(tmp_path,
+                                                              monkeypatch):
+    """THE C-1 REGRESSION: a grid whose 12 units are all a recorded success or a
+    durable tombstone resumes WITHOUT constructing an OllamaAgent and WITHOUT any
+    run_scenario call, and still re-registers the tombstoned unit."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    spec = _c1_spec(tmp_path, sampler_seeds=[2001, 2002])
+
+    first = run_sweep(spec, retries_per_unit=0)
+    # 3 conditions x 2 scenario-seeds x 2 sampler-seeds = 12 units: 11 recorded
+    # successes + 1 durable tombstone -> the grid is fully resolved.
+    assert first.rows_written == 11 and first.tombstones_written == 1
+
+    # now POISON both live seams: any provider contact on resume is a failure.
+    n_after_first = len(calls)
+    _poison_provider(monkeypatch, "a fully-resolved resume must not contact it")
+
+    second = run_sweep(spec, retries_per_unit=0)
+    # zero OllamaAgent construction, zero run_scenario -> calls list is unchanged
+    assert calls[n_after_first:] == [], "run_scenario called on a resolved resume"
+    # provider-free resume constructs no probe, so no served digest is recorded
+    assert second.digests == {}
+    assert second.rows_written == 0
+    assert second.skipped_resumed == 11
+    assert second.tombstoned_resumed == 1
+    assert second.tombstones_written == 0
+    perm = (_MODEL, "scramble_perm")
+    assert second.dropouts[perm]["timeout"] == 1  # the typed failure survives
+
+
+def test_c1_fully_resolved_resume_runs_the_balance_gate(tmp_path, monkeypatch):
+    """The fast path still runs the SAME fail-closed balance gate the normal
+    path runs — reconstructed entirely from the ledgers, with the seams poisoned
+    so the gate's refusal cannot be an artefact of provider contact."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    spec = _c1_spec(tmp_path, sampler_seeds=[2001, 2002])
+    run_sweep(spec, retries_per_unit=0)  # build the resolved (imbalanced) grid
+
+    _poison_provider(monkeypatch, "the balance gate must run provider-free")
+    # scramble_perm survives 3 of 4, the others 4 of 4 -> a spread of 1; a bound
+    # of 0 must fail closed on the fast path, before any provider contact.
+    with pytest.raises(SweepUnbalanced):
+        run_sweep(spec, retries_per_unit=0, max_surviving_delta=0)
+    # a bound that admits the spread returns cleanly, still provider-free
+    ok = run_sweep(spec, retries_per_unit=0, max_surviving_delta=1)
+    assert ok.digests == {} and ok.tombstoned_resumed == 1
+
+
+def test_c1_partial_grid_still_enters_the_preflight(tmp_path, monkeypatch):
+    """A grid with >=1 unresolved unit must NOT take the provider-free fast path:
+    the fleet preflight (digest probe) runs and genuinely-new generation
+    proceeds. Proven by the served digest being recorded (preflight ran) and new
+    rows being written for the unresolved units."""
+    _install_offline_ollama(monkeypatch)
+    first = run_sweep(_c1_spec(tmp_path, sampler_seeds=[2001]), retries_per_unit=0)
+    assert first.rows_written == 6  # 3 x 2 x 1, all recorded
+
+    # resume over a LARGER grid: the 2002 sampler-seed units are unresolved.
+    second = run_sweep(_c1_spec(tmp_path, sampler_seeds=[2001, 2002]),
+                       retries_per_unit=0)
+    # preflight ran -> the served digest was probed and recorded
+    assert second.digests.get(_MODEL)
+    # the six already-recorded units are skipped, the six new ones generated
+    assert second.skipped_resumed == 6
+    assert second.rows_written == 6

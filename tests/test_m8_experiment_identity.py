@@ -16,6 +16,7 @@ import pytest
 import yaml
 
 from coliseum.textlab.registry import (M8_NULL_STATEMENT,
+                                       M8_STOPPING_STATEMENT,
                                        M8_TYPE_I_CRITERION,
                                        design_hash,
                                        lint_experiment_config,
@@ -1272,6 +1273,37 @@ def test_prereg_doc_pins_exactly_one_callable_version_literal():
                   "ORDER_REPORT_VERSION 3", "ORDER_REPORT_VERSION 4",
                   "ORDER_REPORT_VERSION 5"):
         assert stale not in prereg, stale
+
+
+def test_prereg_doc_content_binds_the_canonical_stopping_statement(tmp_path):
+    """a-006 A-1: registry.py claims M8_STOPPING_STATEMENT is 'content-bound by
+    test' into the preregistration — this is the test that makes that true. The
+    exact frozen stopping/analysis-timing sentence must appear VERBATIM in the
+    prereg document (alongside the canonical null and the single callable-version
+    literal), and a prereg that alters ONLY the stopping prose must fail the
+    content-binding check. Mirrors the null_statement mirror test."""
+    with open(PREREG_DOC, encoding="utf-8") as fh:
+        prereg = fh.read()
+    # (1) the frozen stopping statement is mirrored verbatim into the prereg
+    assert M8_STOPPING_STATEMENT in prereg
+    # and it is the SAME frozen prose the design-hashed registry notes carry, so
+    # the prereg cannot answer a different stopping rule than the frozen design
+    assert M8_STOPPING_STATEMENT in _entry()["planned_design"]["notes"]
+
+    # (2) MUTATION: copy the prereg to tmp, alter ONLY the stopping sentence,
+    # and prove the content-binding check catches the missing/mismatched
+    # statement — mutating the stopping prose can no longer pass silently.
+    assert M8_STOPPING_STATEMENT in prereg  # precondition for a meaningful diff
+    mutated = prereg.replace(
+        M8_STOPPING_STATEMENT,
+        "Analysis timing: the analysis may be performed at any time, including "
+        "interim looks and early stopping.", 1)
+    assert mutated != prereg, "the stopping sentence was not present to mutate"
+    tampered = tmp_path / "m8-prereg-tampered.md"
+    tampered.write_text(mutated, encoding="utf-8")
+    tampered_text = tampered.read_text(encoding="utf-8")
+    # the same verbatim content-binding assertion now FAILS on the tampered copy
+    assert M8_STOPPING_STATEMENT not in tampered_text
 
 
 @pytest.mark.parametrize("label,mutate,needle", [

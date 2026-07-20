@@ -1,6 +1,6 @@
 {
   "experiment_id": "m8-phase2-live-order-sensitivity",
-  "design_hash": "ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd",
+  "design_hash": "431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533",
   "prereg_doc": "docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md",
   "task_id": "m8-phase2-live-order-sensitivity",
   "driver": "ollama_local",
