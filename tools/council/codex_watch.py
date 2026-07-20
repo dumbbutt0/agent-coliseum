@@ -11,6 +11,7 @@ Usage (run by the Codex agent):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -25,6 +26,50 @@ from tools.council.schemas import (CouncilError, SchemaViolation,
                                    validate_verdict_event_payload)
 
 SENDER = "codex"
+
+# ---- one-time session binding (worker-pool attribution blocker) ----------
+# A submitting session proves WHICH claim/lease it is by presenting the
+# secret owner token of the live claim (or claim-resume) lock it operates
+# under. The launcher hands that token to its bounded child through this
+# environment variable; submit_verdict authenticates it against the on-disk
+# lock and records only its DOMAIN-SEPARATED HASH in the terminal event, so
+# the chain never reveals the secret and a bare codex-role event can never
+# carry a binding it did not earn.
+SESSION_BINDING_ENV = "COUNCIL_SESSION_BINDING"
+_SESSION_BINDING_DOMAIN = b"council:session-binding:v1\x00"
+# The AUDIT_CLAIMED event pins a COMMITMENT to the claim-lock owner token
+# (not the raw token): the chain stays the authenticated record of the
+# claim while the token itself remains a secret only the claiming session
+# (and the crash-recovery journal) holds.
+_CLAIM_TOKEN_DOMAIN = b"council:claim-token-commitment:v1\x00"
+
+
+def session_binding_hash(request_id: str, session_token: str) -> str:
+    """The public, chain-recordable binding of one session credential to one
+    request: sha256(domain || request_id || NUL || token). One-way, so the
+    terminal event proves the submitter held the token without exposing it;
+    one-time, because every claim/lease mints a fresh secrets token."""
+    return hashlib.sha256(
+        _SESSION_BINDING_DOMAIN + request_id.encode("utf-8") + b"\x00"
+        + session_token.encode("utf-8")).hexdigest()
+
+
+def claim_token_commitment(token: str) -> str:
+    return hashlib.sha256(
+        _CLAIM_TOKEN_DOMAIN + token.encode("utf-8")).hexdigest()
+
+
+def _pin_lock_holder(holder):
+    """The AUDIT_CLAIMED `lock_holder` pin, with the secret owner token
+    replaced by its commitment. Everything else about the holder (role,
+    pid, host, lease, kind) stays chain-visible for diagnostics."""
+    if not isinstance(holder, dict):
+        return holder
+    pinned = {k: v for k, v in holder.items() if k != "owner_token"}
+    token = holder.get("owner_token")
+    if isinstance(token, str) and token:
+        pinned["owner_token_sha256"] = claim_token_commitment(token)
+    return pinned
 
 
 def list_ready(root: str) -> list:
@@ -79,7 +124,8 @@ def claim(root: str, cfg, request_id: str) -> dict:
             root, cfg, "AUDIT_CLAIMED", SENDER, request_id,
             request["repository"], request["target_commit"],
             {"claimed_by": SENDER, "lock_file": f"locks/{request_id}.lock",
-             "lock_holder": locking.read_lock(root, request_id)})
+             "lock_holder": _pin_lock_holder(
+                 locking.read_lock(root, request_id))})
         t.mark("event")
         t.complete()
         return event, lock
@@ -102,16 +148,18 @@ def proven_owner_token(root: str, request_id: str,
     evidence, or ``None`` when ownership cannot be proven.
 
     `claim()` mints the token, journals it, acquires the lock with it, and
-    then pins the resulting lock body — token included — into the
-    codex-signed AUDIT_CLAIMED event's `lock_holder`. That hash-chained
-    event is therefore the authenticated record of who owns the claim lock
-    for the current audit cycle; the launcher already recovers the token
-    the same way (`codex_launcher.process_one`). We take the LAST such
+    then pins the resulting lock body — with the token replaced by its
+    COMMITMENT (`owner_token_sha256`) so the chain never reveals the
+    secret — into the codex-signed AUDIT_CLAIMED event's `lock_holder`.
+    That hash-chained event is therefore the authenticated record of who
+    owns the claim lock for the current audit cycle. We take the LAST such
     event so a re-audit cycle proves the CURRENT claim, never a stale one,
     and we additionally require the on-disk lock to still carry exactly
-    that token: if a different holder now owns the lock (a launcher resume
-    lease, or another worker's claim), the token proves nothing about the
-    lock sitting on disk and we must not touch it.
+    the committed token: if a different holder now owns the lock (a
+    launcher resume lease, or another worker's claim), the pin proves
+    nothing about the lock sitting on disk and we must not touch it.
+    Legacy chains whose pins carry the raw token are verified by direct
+    equality.
     """
     chain = events.read_chain(root) if chain is None else chain
     claimed = None
@@ -123,13 +171,22 @@ def proven_owner_token(root: str, request_id: str,
     if claimed is None:
         return None
     holder = claimed["payload"].get("lock_holder")
-    token = holder.get("owner_token") if isinstance(holder, dict) else None
-    if not isinstance(token, str) or not token:
+    if not isinstance(holder, dict):
         return None
     on_disk = locking.read_lock(root, request_id)
-    if not isinstance(on_disk, dict) or on_disk.get("owner_token") != token:
+    if not isinstance(on_disk, dict):
         return None
-    return token
+    disk_token = on_disk.get("owner_token")
+    if not isinstance(disk_token, str) or not disk_token:
+        return None
+    pinned_raw = holder.get("owner_token")          # legacy pin form
+    pinned_commit = holder.get("owner_token_sha256")  # committed pin form
+    if isinstance(pinned_raw, str) and pinned_raw:
+        return disk_token if disk_token == pinned_raw else None
+    if isinstance(pinned_commit, str) and pinned_commit:
+        return disk_token \
+            if claim_token_commitment(disk_token) == pinned_commit else None
+    return None
 
 
 def release_claim_lock(root: str, request_id: str,
@@ -172,19 +229,31 @@ _TERMINAL_VERDICT_TYPES = ("AUDIT_BLOCKED", "AUDIT_GO",
                            "RESULT_BLOCKED")
 
 
-def finalize_incomplete(root: str, cfg) -> list:
+def finalize_incomplete(root: str, cfg, only: str | None = None) -> list:
     """Idempotent artifact recovery (cycle-4 audit blocker): for every
     request whose chain says a terminal verdict is authoritative but whose
     artifacts are incomplete — verdict JSON missing/stale, request file
     still in claimed/, or a surviving claim lock — finish the cleanup FROM
     THE CHAIN without appending any event. The verdict payload is taken
     from the last terminal verdict event, so recovery can never invent or
-    duplicate a verdict. Returns the healed request ids. Invoked at
-    submit_verdict entry and at codex_watch startup."""
+    duplicate a verdict. Returns the healed request ids.
+
+    SCOPE IS AUTHORITY (worker-pool ownership blocker): a NORMAL
+    submission may finalize ONLY the request it is itself submitting —
+    `submit_verdict` passes ``only=<its own request_id>`` — because with
+    concurrent workers a global sweep would let request B's completion act
+    as the releasing session for request A's separately held LIVE claim
+    lock. The GLOBAL sweep (``only=None``) remains available exclusively
+    through the explicit recovery entry points: codex_watch startup and a
+    deliberate direct call. Cross-request lock clearance therefore happens
+    only on those independently invoked recovery paths, never as a side
+    effect of completing unrelated work."""
     chain = events.read_chain(root)
     requests = state_machine.project(chain)
     healed = []
     for rid, req in sorted(requests.items()):
+        if only is not None and rid != only:
+            continue
         if req["state"] not in _POST_VERDICT_STATES:
             continue
         last_verdict = None
@@ -282,15 +351,32 @@ def _inject_bindings(root, verdict, request, rid, result_audit) -> None:
 
 
 def submit_verdict(root: str, cfg, verdict: dict,
-                   result_audit: bool = False) -> dict:
+                   result_audit: bool = False,
+                   session_token: str | None = None) -> dict:
     """Append the verdict event (payload = the verdict), write
     verdicts/<id>.json, move claimed/ -> complete/, release the claim
-    lock, mirror to log.md. Any prior incomplete finalization is healed
-    first, so a retry after an artifact failure repairs the artifacts and
-    then refuses the duplicate."""
-    finalize_incomplete(root, cfg)
+    lock, mirror to log.md. Any prior incomplete finalization OF THIS
+    REQUEST is healed first, so a retry after an artifact failure repairs
+    the artifacts and then refuses the duplicate; other requests are never
+    touched by a normal submission (worker-pool ownership blocker).
+
+    SESSION BINDING (worker-pool attribution blocker): `session_token` —
+    defaulting to the ``COUNCIL_SESSION_BINDING`` environment variable the
+    launcher hands its bounded child — is the secret owner token of the
+    claim (or claim-resume) lock this session operates under. When
+    presented it is authenticated against the LIVE on-disk lock (fail
+    closed on any mismatch: a credential that cannot be authenticated is
+    never silently ignored) and its one-way `session_binding` hash is
+    recorded inside the hash-covered verdict payload, so the terminal
+    event carries an unforgeable proof of WHICH session produced it. A
+    submission without a credential appends an UNBOUND verdict — still
+    authoritative for the protocol, but no pool worker will ever adopt it
+    as its own success."""
+    if session_token is None:
+        session_token = os.environ.get(SESSION_BINDING_ENV) or None
     verdict = dict(verdict)
     rid = verdict["request_id"]
+    finalize_incomplete(root, cfg, only=rid)
 
     claimed_path = storage.safe_request_path(root, "claimed", rid)
     if not os.path.exists(claimed_path):
@@ -302,6 +388,15 @@ def submit_verdict(root: str, cfg, verdict: dict,
         raise SchemaViolation(
             f"audited_commit {verdict['audited_commit'][:12]} does not match "
             f"the request's target_commit {request['target_commit'][:12]}")
+    if session_token is not None:
+        holder = locking.read_lock(root, rid)
+        if not isinstance(holder, dict) or \
+                holder.get("owner_token") != session_token:
+            raise SchemaViolation(
+                f"session binding for {rid!r} does not match the live "
+                "claim/lease lock — this session cannot prove it is the "
+                "one the claim or lease was issued to; refusing to submit")
+        verdict["session_binding"] = session_binding_hash(rid, session_token)
 
     # H2 completion + H3: stamp the v2 schema_version AND the derivable
     # authority-context bindings from the verified request + chain, so the

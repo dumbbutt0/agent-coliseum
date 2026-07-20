@@ -6,9 +6,18 @@ release the claim lock with a tokenless `locking.Lock`, which
 lets whichever session finishes first delete another live worker's claim
 lock — the lock is the single claim authority, so that is a cross-worker
 primitive. Both call sites now recover the owner token from the
-codex-signed AUDIT_CLAIMED event (`payload.lock_holder.owner_token`) and
-release compare-and-delete; when ownership cannot be proven they touch
-nothing and leave the lock to the lease-expiry / logged stale-lock paths.
+codex-signed AUDIT_CLAIMED event (`payload.lock_holder`, which pins a
+COMMITMENT of the token, never the secret itself) and release
+compare-and-delete; when ownership cannot be proven they touch nothing and
+leave the lock to the lease-expiry / logged stale-lock paths.
+
+Pool-split ownership-002 f0: request-cycle proof alone is still not CALLER
+proof — a normal submission for request B used to run the GLOBAL
+finalize_incomplete sweep and thereby release request A's separately held
+LIVE lock with A's chain-proven token. A normal submission now finalizes
+ONLY its own request; the cross-request sweep survives exclusively behind
+the explicit recovery entry points (codex_watch startup / a direct
+finalize_incomplete call).
 """
 import json
 import os
@@ -50,6 +59,74 @@ def _replace_lock_with_other_worker(root, rid):
 
 def _healthy(root):
     return events.verify_chain(root).healthy
+
+
+# -------------------- cross-REQUEST release (pool-split ownership-002 f0)
+
+RID_A = "lockown-req-a"
+RID_B = "lockown-req-b"
+
+
+def test_submitting_request_b_leaves_request_a_lock_byte_intact(env):
+    """The verdict's minimum regression, through the PUBLIC submit API:
+    session A's request has its terminal event on the chain while A's
+    unexpired token-bearing claim lock is still LIVE; session B then
+    normally submits a DIFFERENT request. B must fully finalize while A's
+    lock survives byte-for-byte — completing request B is never the
+    releasing session for request A's live claim lock."""
+    root, repo, head, cfg = env
+    ctx_a = drive_to_claimed(root, cfg, repo, head, request_id=RID_A)
+    append(root, cfg, "AUDIT_GO", "codex", RID_A, repo, head)
+    lock_a_path = storage.lock_path(root, RID_A)
+    with open(lock_a_path, "rb") as fh:
+        lock_a_before = fh.read()
+    holder = locking.read_lock(root, RID_A)
+    assert holder["owner_token"] == ctx_a["lock"].owner_token
+    assert locking.lease_is_expired(holder) is False
+
+    drive_to_claimed(root, cfg, repo, head, request_id=RID_B)
+    codex_watch.submit_verdict(root, cfg, _signed(head, rid=RID_B))
+
+    # B fully finalized: verdict artifact, complete/, lock released
+    assert os.path.exists(storage.verdict_path(root, RID_B))
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID_B))
+    assert locking.read_lock(root, RID_B) is None
+    # ...while A's live lock is BYTE-FOR-BYTE intact
+    with open(lock_a_path, "rb") as fh:
+        assert fh.read() == lock_a_before, \
+            "request A's live claim lock was disturbed by B's submission"
+    # and B's submission swept none of A's other artifacts either
+    assert os.path.exists(storage.safe_request_path(root, "claimed", RID_A))
+    assert _healthy(root)
+
+    # cross-request recovery still exists — but ONLY behind the explicit,
+    # independently invoked recovery entry point
+    healed = codex_watch.finalize_incomplete(root, cfg)
+    assert RID_A in healed
+    assert locking.read_lock(root, RID_A) is None
+    assert os.path.exists(storage.safe_request_path(root, "complete", RID_A))
+    assert _healthy(root)
+
+
+def test_claim_event_pins_a_commitment_not_the_secret_token(env):
+    """The chain must AUTHENTICATE the claim without REVEALING the secret
+    owner token — a chain-visible token would let any chain reader act as
+    the claiming session (releasing its lock, or forging the session
+    binding the attribution fix relies on)."""
+    root, repo, head, cfg = env
+    ctx = drive_to_claimed(root, cfg, repo, head, request_id=RID)
+    claimed = [e for e in events.read_chain(root)
+               if e["event_type"] == "AUDIT_CLAIMED"
+               and e["request_id"] == RID][-1]
+    holder = claimed["payload"]["lock_holder"]
+    token = ctx["lock"].owner_token
+    assert "owner_token" not in holder
+    assert holder["owner_token_sha256"] == \
+        codex_watch.claim_token_commitment(token)
+    assert token not in json.dumps(claimed)  # secret never on the chain
+    # the commitment still proves ownership of the on-disk lock
+    assert codex_watch.proven_owner_token(root, RID) == token
+    locking.release(ctx["lock"])
 
 
 # ------------------------------------------------------- the normal path

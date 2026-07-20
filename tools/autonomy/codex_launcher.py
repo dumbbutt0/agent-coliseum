@@ -133,7 +133,8 @@ def launcher_failures(chain: list, rid: str) -> int:
 
 def _terminal_verdict_in(chain: list, rid: str, kind: str, commit: str,
                          anchor_index: int,
-                         claim_event_id: str | None = None) -> bool:
+                         claim_event_id: str | None = None,
+                         expected_binding: str | None = None) -> bool:
     """True iff `chain` holds the EXPECTED codex-signed terminal verdict for
     rid at the pinned commit AND that verdict is attributable to THIS
     worker's own session.
@@ -141,16 +142,24 @@ def _terminal_verdict_in(chain: list, rid: str, kind: str, commit: str,
     Presence in a chain suffix is NOT attribution (worker-pool blocker A2):
     with more than one launcher process a second worker could otherwise read
     the FIRST worker's verdict and report its own dead session as a success.
-    The binding is the exclusive claim this worker actually holds:
+    Two bindings compose, and BOTH must hold when supplied:
 
-    * a source audit takes the claim itself (`codex_watch.claim`), so its own
-      AUDIT_CLAIMED event id anchors the search — a verdict at or before that
-      event belongs to some other session, and if our claim is not in the
-      chain at all we can prove nothing and fail closed;
-    * a resume/result session has no AUDIT_CLAIMED of its own, so the anchor
-      is the chain position at which it took the exclusive claim-resume
-      lease; while that lease is held no other session for rid can be
-      auditing the request, so a later verdict is ours.
+    * the ORDERING anchor — a source audit takes the claim itself
+      (`codex_watch.claim`), so its own AUDIT_CLAIMED event id anchors the
+      search: a verdict at or before that event belongs to some other
+      session, and if our claim is not in the chain at all we can prove
+      nothing and fail closed; a resume/result session has no AUDIT_CLAIMED
+      of its own, so the anchor is the chain position at which it took the
+      exclusive claim-resume lease;
+    * the SESSION binding (pool-split attribution blocker) — ordering alone
+      cannot attribute the PRODUCER: a late, stale, duplicate, or foreign
+      Codex session can append a matching terminal event after our anchor.
+      `expected_binding` is the one-way hash of the one-time credential this
+      worker minted (its fresh claim token or continuation lease token);
+      only a terminal event whose hash-covered `session_binding` equals it
+      was submitted by the session holding OUR credential. A bare
+      post-anchor codex-role event — no binding, or someone else's — is
+      never adopted as this worker's success.
     """
     start = anchor_index
     if claim_event_id is not None:
@@ -166,6 +175,10 @@ def _terminal_verdict_in(chain: list, rid: str, kind: str, commit: str,
                 and event["sender"] == "codex" \
                 and event["event_type"] in EXPECTED_TERMINAL[kind] \
                 and event["target_commit"] == commit:
+            if expected_binding is not None and \
+                    event["payload"].get("session_binding") \
+                    != expected_binding:
+                continue  # someone else's verdict — never ours
             return True
     return False
 
@@ -270,11 +283,19 @@ def codex_argv(prompt: str, repo: str, council_root: str) -> list:
             "--add-dir", council_root, prompt]
 
 
-def codex_env(root: str, repo: str) -> dict:
+def codex_env(root: str, repo: str,
+              session_token: str | None = None) -> dict:
     """Minimal sanitized environment: auth home, a fixed PATH, and the
-    council coordinates. Nothing else from the parent leaks through."""
+    council coordinates. Nothing else from the parent leaks through.
+
+    `session_token` is the one-time session credential (the secret owner
+    token of the claim or claim-resume lock THIS worker minted before the
+    session): the bounded child presents it to codex_watch.submit_verdict,
+    which authenticates it against the live lock and records its one-way
+    `session_binding` hash in the terminal event — the proof process_one
+    later requires before calling the session a success."""
     home = os.environ.get("HOME", "/home/dummy")
-    return {
+    env = {
         "HOME": home,
         "PATH": os.pathsep.join([os.path.join(home, ".local", "bin"),
                                  "/usr/local/bin", "/usr/bin", "/bin"]),
@@ -284,6 +305,9 @@ def codex_env(root: str, repo: str) -> dict:
         "COUNCIL_REPO_ROOTS": repo,
         "COUNCIL_ROLE": SENDER,
     }
+    if session_token:
+        env[codex_watch.SESSION_BINDING_ENV] = session_token
+    return env
 
 
 def _log_paths(repo: str, rid: str, kind: str) -> tuple:
@@ -409,8 +433,9 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
                 kind: str, audit_timeout: float) -> str:
     """Launch one bounded Codex session and verify success from the chain
     alone: ONLY the expected codex-signed terminal verdict at the pinned
-    commit, attributable to THIS worker's own claim, counts.
-    Returns 'ok', 'failed', 'paused', or 'waiting'.
+    commit, carrying THIS worker's one-time session binding (and, for a
+    fresh source audit, sitting after this worker's own claim event),
+    counts. Returns 'ok', 'failed', 'paused', or 'waiting'.
 
     Worker-pool ordering (blocker A3): claimability is established BEFORE the
     expensive session. Every worker derives the same global work list, so all
@@ -467,6 +492,13 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
         except LockHeld:
             return "waiting"
     session_lock = claim_lock or resume_lock
+    # the one-time session binding (pool-split attribution blocker): the
+    # credential IS the secret token of the exact claim/lease taken above.
+    # It flows to the bounded child via the sanitized environment, through
+    # submit_verdict (which authenticates it against the live lock and
+    # records its hash in the terminal event), and back to the match below.
+    expected_binding = codex_watch.session_binding_hash(
+        rid, session_lock.owner_token)
 
     # the anchor is taken AFTER this worker owns the request, so nothing a
     # concurrent worker did earlier can be mistaken for this session's work
@@ -487,13 +519,15 @@ def process_one(cfg, root: str, chain: list, requests: dict, rid: str,
             _execute_bounded(codex_argv(prompt, repo, root), audit_timeout,
                              repo, STORAGE_CAP_MB, size_before, cwd=repo,
                              stdout=out, stderr=err,
-                             env=codex_env(root, repo))
+                             env=codex_env(root, repo,
+                                           session_lock.owner_token))
     except (RunnerRefusal, OSError) as exc:
         refusal = f"session did not complete: {exc}"
 
     chain_after = events.read_chain(root)
     if _terminal_verdict_in(chain_after, rid, kind, commit, pre_length,
-                            claim_event["event_id"] if claim_event else None):
+                            claim_event["event_id"] if claim_event else None,
+                            expected_binding=expected_binding):
         # The claim lock of a source audit is released by the child's submit
         # under proven ownership; the claim-resume lease can only be released
         # HERE (its token is in no AUDIT_CLAIMED event), so a successful

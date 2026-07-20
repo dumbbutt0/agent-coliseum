@@ -3,7 +3,10 @@
 Four properties make it safe to run N launcher processes at once:
 
 * A2 — a worker reports success ONLY for a terminal verdict attributable to
-  its own session (its own claim), never for one another worker produced.
+  its own session, never for one another worker produced: the ordering
+  anchor (its own claim event / lease position) AND the one-time session
+  binding (the hash of the credential it minted, authenticated by
+  submit_verdict and recorded in the terminal event) must both match.
 * A3 — claimability is established BEFORE the expensive session, so the loser
   of a claim race spawns no session and records no failure.
 * A4 — admission is by worker SLOT (`--workers N`), not a singleton; the
@@ -13,11 +16,13 @@ Four properties make it safe to run N launcher processes at once:
 
 No live agent is ever invoked: every session runs against a fake `codex`.
 """
+import json
 import os
 
 import pytest
 
 from tests.council_util import make_cfg, make_repo, make_root, make_verdict
+from tools.council.schemas import CouncilError
 from tests.test_autonomy_codex_launcher import (FAKE_NOOP,
                                                 FAKE_RESULT_APPROVED,
                                                 FAKE_RESUME_GO, _VERDICT_BODY,
@@ -238,6 +243,148 @@ def test_stale_snapshot_worker_cannot_claim_another_sessions_verdict(
     chain = events.read_chain(root)
     assert codex_launcher._terminal_verdict_in(
         chain, RID, "result_audit", head, len(chain)) is False
+
+
+# ------------- A2 end to end: session binding (pool-split attribution-001)
+
+def _expire_lock(root, rid):
+    lock_file = storage.lock_path(root, rid)
+    with open(lock_file, encoding="utf-8") as fh:
+        holder = json.load(fh)
+    holder["lease_expires_utc"] = "2000-01-01T00:00:00.000Z"
+    with open(lock_file, "w", encoding="utf-8") as fh:
+        json.dump(holder, fh)
+
+
+def _foreign_submit(root, codex_cfg, head, result_audit=False):
+    """This worker's bounded session, in which the CHILD emits nothing at
+    all while an independent session B bare-submits the same request (no
+    session credential) AFTER the worker's anchor — the verdict's neutral
+    concurrent fixture, made deterministic."""
+    def _run(*_args, **_kwargs):
+        codex_watch.submit_verdict(
+            root, codex_cfg,
+            make_verdict(head, RID,
+                         verdict="APPROVED" if result_audit else "GO"),
+            result_audit=result_audit)
+    return _run
+
+
+def _process_one(codex_cfg, root, kind):
+    chain = events.read_chain(root)
+    requests = state_machine.project(chain)
+    return codex_launcher.process_one(codex_cfg, root, chain, requests,
+                                      RID, kind, 60.0)
+
+
+def test_fresh_worker_never_adopts_a_foreign_post_anchor_verdict(
+        env, monkeypatch):
+    """Fresh source mode: worker A holds its own claim anchor, A's bounded
+    child emits nothing, session B submits the same request after the
+    anchor. A must return 'failed' (B's verdict carries no session
+    binding), NEVER 'ok'."""
+    root, repo, head, cfg = env
+    codex_cfg = make_cfg(repo, root, role="codex")
+    _publish_requested(root, cfg, repo, head)
+    monkeypatch.setattr(codex_launcher, "_execute_bounded",
+                        _foreign_submit(root, codex_cfg, head))
+
+    outcome = _process_one(codex_cfg, root, "source_audit")
+    assert outcome != "ok"
+    assert outcome == "failed"
+    assert len(_failure_events(root, RID)) == 1
+    # the foreign verdict landed post-anchor but is UNBOUND — that is
+    # exactly why it can never be this worker's success
+    verdicts = [e for e in events.read_chain(root)
+                if e["event_type"] == "AUDIT_GO"]
+    assert len(verdicts) == 1
+    assert "session_binding" not in verdicts[0]["payload"]
+
+
+def test_continuation_worker_never_adopts_a_foreign_post_anchor_verdict(
+        env, monkeypatch):
+    """Continuation (source resume) mode: worker A holds its exclusive
+    claim-resume lease anchor, its child emits nothing, session B submits
+    the same request. A returns 'failed', never 'ok', and A's own lease is
+    not stranded."""
+    root, repo, head, cfg = env
+    codex_cfg = make_cfg(repo, root, role="codex")
+    _publish_requested(root, cfg, repo, head)
+    codex_watch.claim(root, codex_cfg, RID)   # a prior session that died
+    _expire_lock(root, RID)                   # its lease has lapsed
+    monkeypatch.setattr(codex_launcher, "_execute_bounded",
+                        _foreign_submit(root, codex_cfg, head))
+
+    outcome = _process_one(codex_cfg, root, "source_audit_resume")
+    assert outcome != "ok"
+    assert outcome == "failed"
+    assert len(_failure_events(root, RID)) == 1
+    assert locking.read_lock(root, RID) is None   # own lease released
+
+
+def test_result_worker_never_adopts_a_foreign_post_anchor_verdict(
+        env, monkeypatch):
+    """Result mode: same property over the continuation/result lease."""
+    root, repo, head, cfg = env
+    codex_cfg = make_cfg(repo, root, role="codex")
+    _drive_to_result_audit(root, cfg, repo, head)
+    monkeypatch.setattr(
+        codex_launcher, "_execute_bounded",
+        _foreign_submit(root, codex_cfg, head, result_audit=True))
+
+    outcome = _process_one(codex_cfg, root, "result_audit")
+    assert outcome != "ok"
+    assert outcome == "failed"
+    assert len(_failure_events(root, RID)) == 1
+    assert locking.read_lock(root, RID) is None   # own lease released
+
+
+def test_submission_with_a_wrong_session_binding_is_rejected(env):
+    """The other permitted outcome of the verdict's fixture: a session
+    presenting a credential it cannot authenticate against the live claim
+    lock is REFUSED outright — fail closed, nothing lands, the real
+    claimant's lock survives."""
+    root, repo, head, cfg = env
+    codex_cfg = make_cfg(repo, root, role="codex")
+    _publish_requested(root, cfg, repo, head)
+    _event, lock = codex_watch.claim(root, codex_cfg, RID)
+
+    with pytest.raises(CouncilError):
+        codex_watch.submit_verdict(root, codex_cfg, make_verdict(head, RID),
+                                   session_token="f" * 32)
+    assert [e for e in events.read_chain(root)
+            if e["event_type"] == "AUDIT_GO"] == []
+    assert locking.read_lock(root, RID)["owner_token"] == lock.owner_token
+
+    # the RIGHT one-time credential submits, and the terminal event records
+    # exactly its binding — validated, hash-covered, never the raw secret
+    event = codex_watch.submit_verdict(root, codex_cfg,
+                                       make_verdict(head, RID),
+                                       session_token=lock.owner_token)
+    assert event["payload"]["session_binding"] == \
+        codex_watch.session_binding_hash(RID, lock.owner_token)
+    assert lock.owner_token not in json.dumps(event)
+    assert locking.read_lock(root, RID) is None
+
+
+def test_launcher_child_submits_with_the_workers_session_binding(
+        env, tmp_path, monkeypatch):
+    """End to end through a real bounded child: the one-time credential
+    minted with the worker's claim flows through the sanitized environment
+    into submit_verdict, and the terminal event carries the matching
+    session binding — the full claim -> lease -> submit -> terminal-event
+    -> process_one chain the verdict requires."""
+    root, repo, head, cfg = env
+    _install_fake_codex(tmp_path, monkeypatch, FAKE_GO_FROM_PROMPT)
+    _publish_requested(root, cfg, repo, head)
+    assert codex_launcher.main(["--once"]) == 0
+    assert _state(root) == "go"                  # attributed success
+    assert _failure_events(root) == []
+    verdicts = [e for e in events.read_chain(root)
+                if e["event_type"] == "AUDIT_GO"]
+    assert len(verdicts) == 1
+    binding = verdicts[0]["payload"]["session_binding"]
+    assert isinstance(binding, str) and len(binding) == 64
 
 
 # --------------------------------------------------------- A4: worker slots
