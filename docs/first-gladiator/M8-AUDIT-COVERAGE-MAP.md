@@ -13,8 +13,18 @@ declared before the first request is published, per the Director mandate.
 | Branch | `codex/first-gladiator-phase2-design` |
 | Worktree | `/tmp/agent-coliseum-phase2` |
 | Frozen design | `docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md` |
-| Design hash | `1f9c2ce645054142cb421986408a56d206046c2094b2ca6a240568213dea8272` |
+| Design hash | `e30fd3184bb07afba6707ccdf1f3447e62fe9f5510dcde668ae6117fc110c9ea` (cycle-4 regime-frozen final; the registry entry is authoritative) |
 | Candidate commit | *assigned at assembly; every request binds it exactly* |
+| Changed-path allowlist | `docs/first-gladiator/M8-CHANGED-PATH-ALLOWLIST.json` (machine-checked by `tests/test_m8_coverage_conformance.py`) |
+
+**Coverage completeness is now machine-enforced (audit e-002 finding 0 closure).**
+The prior cycle's map missed four runtime/operator/executor surfaces that reached
+the diff without declared ownership. The frozen allowlist enumerates every
+tracked path this candidate changes against the base, and the conformance test
+asserts `git diff --name-only <base> HEAD` equals it exactly — an undeclared
+surface now fails closed before publication. The five coverage sections below own
+the *audit dimensions*; the allowlist owns the *file set*, and the two together
+mean no path can enter unaudited.
 
 **The registry entry and the committed experiment manifest are authoritative for
 the design hash; this map is not.** Three hashes were issued and superseded

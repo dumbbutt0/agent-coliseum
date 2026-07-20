@@ -280,6 +280,30 @@ def test_order_report_refuses_smoke_marked_pack(tmp_path, monkeypatch):
 
 # ----------------------------------------------------------------- smoke-pack
 
+FAKE_HEAD = "f" * 40   # the candidate commit, injected via cli._git_head
+
+
+def _owner_authorization(tmp_path, experiment_id, design_hash_hex, digests,
+                         scale, run_count, name="owner-auth.json",
+                         overrides=None):
+    """Write a canonical smoke-authorization.v1 manifest; overrides let each
+    regression case corrupt exactly one binding."""
+    auth = {"authorization_version": "1",
+            "authorization_kind": "owner_experiment_execution",
+            "experiment_id": experiment_id,
+            "design_hash": design_hash_hex,
+            "candidate_commit": FAKE_HEAD,
+            "model_digests": dict(digests),
+            "run_count": run_count,
+            "scale": scale,
+            "budget": {"max_units": run_count}}
+    auth.update(overrides or {})
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(auth, fh, indent=2, sort_keys=True)
+    return path
+
+
 def test_smoke_pack_refuses_without_ollama_host(tmp_path, monkeypatch):
     out_root = str(tmp_path / "m8-smoke")
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
@@ -308,6 +332,7 @@ def test_smoke_pack_builds_scaled_spec_and_marker(tmp_path, monkeypatch,
                                                   capsys):
     out_root = str(tmp_path / "m8-smoke")
     monkeypatch.setenv("OLLAMA_HOST", "http://smoke-host:11434")
+    monkeypatch.setattr(cli, "_git_head", lambda: FAKE_HEAD)
     captured = {}
 
     def fake_run_sweep(spec, **kwargs):
@@ -318,8 +343,19 @@ def test_smoke_pack_builds_scaled_spec_and_marker(tmp_path, monkeypatch,
         return r
 
     monkeypatch.setattr(sweep_mod, "run_sweep", fake_run_sweep)
+    # the exact canonical owner authorization for THIS invocation, built
+    # from the live registry entry the command itself will verify against
+    from coliseum.textlab.registry import _find_entry
+    entry = _find_entry(REGISTRY, EID)
+    pd = entry["planned_design"]
+    run_count = (len(pd["models"]) * len(pd["scenarios"])
+                 * len(pd["scenario_seeds"])
+                 * len(list(pd["sampler_seeds"])[:3]))
+    auth = _owner_authorization(tmp_path, EID, entry["design_hash"],
+                                pd["model_digests"], 3, run_count)
     cli.main(["smoke-pack", "--experiment-id", EID, "--scale", "3",
-              "--out-root", out_root, "--registry", REGISTRY])
+              "--out-root", out_root, "--registry", REGISTRY,
+              "--authorization", auth])
     out = capsys.readouterr().out
     # digest-pinned models announced BEFORE any contact
     assert out.index(DIGEST) < out.index("rows written")
@@ -343,6 +379,166 @@ def test_smoke_pack_builds_scaled_spec_and_marker(tmp_path, monkeypatch,
     assert captured["kwargs"]["execution_order"] == "interleaved"
     assert captured["kwargs"]["expected_digests"] == {MODEL: DIGEST}
     assert captured["kwargs"]["max_surviving_delta"] == 2
+
+
+# ------------------------------------- smoke-pack authorization gate (B-002)
+#
+# Verdict first-gladiator-m8-phase2-b-002: smoke-pack may not initiate ANY
+# live provider contact (or filesystem mutation preparing one) without a
+# canonical owner experiment authorization binding design hash, candidate
+# commit, model digests, run count and budget. These tests use an INLINE
+# fixture registry (concurrent builders own the live one) and a trapped
+# run_sweep: of {absent, design-audit-only, stale, exact} only the exact
+# authorization may reach the sweep.
+
+FIX_EID = "m8-fixture-smoke-authz"
+FIX_MODEL = "fixture/model:tag"
+FIX_DIGEST = "d" * 64
+
+
+def _fixture_registry(tmp_path):
+    """A minimal self-consistent experiments registry written inline (YAML is
+    a JSON superset). Returns (registry_path, planned_design, design_hash)."""
+    from coliseum.textlab.registry import design_hash
+    pd = {"models": [FIX_MODEL],
+          "model_digests": {FIX_MODEL: FIX_DIGEST},
+          "scenarios": ["fix_dev", "fix_perm", "fix_sham"],
+          "scenario_seeds": [42, 1],
+          "sampler_seeds": [2001, 2002, 2003, 2004],
+          "temperature": 0.7,
+          "arbitration": "planner_priority",
+          "interaction_mode": "sequential_history",
+          "thresholds": {"permutation_seed": 20260719},
+          "max_surviving_delta": 2}
+    dh = design_hash(pd)
+    reg = {"registry_version": "1",
+           "experiments": [{"experiment_id": FIX_EID,
+                            "planned_design": pd, "design_hash": dh}]}
+    path = str(tmp_path / "fixture-experiments.yaml")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(reg, fh, indent=2, sort_keys=True)
+    return path, pd, dh
+
+
+def _authz_env(tmp_path, monkeypatch):
+    """Common harness: fixture registry, pinned HEAD, trapped run_sweep.
+    Returns (registry, pd, design_hash, out_root, sweep_calls, argv_base)."""
+    registry, pd, dh = _fixture_registry(tmp_path)
+    out_root = str(tmp_path / "m8-smoke")
+    monkeypatch.setenv("OLLAMA_HOST", "http://smoke-host:11434")
+    monkeypatch.setattr(cli, "_git_head", lambda: FAKE_HEAD)
+    calls = []
+
+    def trap(spec, **kwargs):
+        calls.append(spec)
+        r = sweep_mod.SweepResult()
+        r.rows_written = 0
+        return r
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", trap)
+    argv = ["smoke-pack", "--experiment-id", FIX_EID, "--scale", "2",
+            "--out-root", out_root, "--registry", registry]
+    return registry, pd, dh, out_root, calls, argv
+
+
+def _fixture_run_count(pd, scale):
+    return (len(pd["models"]) * len(pd["scenarios"])
+            * len(pd["scenario_seeds"])
+            * len(list(pd["sampler_seeds"])[:scale]))
+
+
+def _assert_refused_before_contact(excinfo, out_root, calls):
+    """A refused invocation exits nonzero, reaches no sweep, writes NOTHING —
+    not the marker, not the out_root itself."""
+    assert excinfo.value.code            # nonzero exit
+    assert "SMOKE-PACK REFUSED" in str(excinfo.value.code)
+    assert calls == []                   # run_sweep never reached
+    assert not os.path.exists(out_root)  # no filesystem mutation at all
+
+
+def test_smoke_pack_refuses_without_authorization(tmp_path, monkeypatch):
+    _, _, _, out_root, calls, argv = _authz_env(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)                   # no --authorization at all
+    _assert_refused_before_contact(e, out_root, calls)
+    msg = str(e.value.code)
+    assert "authorization" in msg
+    # the smoke marker's status is explicitly NOT contact authority
+    assert "never grants contact authority" in msg
+
+
+def test_smoke_pack_refuses_design_audit_only_artifact(tmp_path, monkeypatch):
+    _, pd, dh, out_root, calls, argv = _authz_env(tmp_path, monkeypatch)
+    # every binding correct EXCEPT the kind: a design-audit approval carrying
+    # the right design hash and commit still is not execution authority
+    auth = _owner_authorization(
+        tmp_path, FIX_EID, dh, pd["model_digests"], 2,
+        _fixture_run_count(pd, 2),
+        overrides={"authorization_kind": "design_audit"})
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv + ["--authorization", auth])
+    _assert_refused_before_contact(e, out_root, calls)
+    assert "NOT authority to contact the provider" in str(e.value.code)
+    # and a partial artifact missing the execution bindings also refuses
+    partial = str(tmp_path / "design-audit-note.json")
+    with open(partial, "w", encoding="utf-8") as fh:
+        json.dump({"authorization_kind": "design_audit",
+                   "experiment_id": FIX_EID, "design_hash": dh}, fh)
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv + ["--authorization", partial])
+    _assert_refused_before_contact(e, out_root, calls)
+    assert "missing required bindings" in str(e.value.code)
+
+
+def test_smoke_pack_refuses_stale_or_mismatched_authorization(tmp_path,
+                                                              monkeypatch):
+    _, pd, dh, out_root, calls, argv = _authz_env(tmp_path, monkeypatch)
+    run_count = _fixture_run_count(pd, 2)
+    stale_cases = {
+        "wrong-commit": dict(candidate_commit="0" * 40),
+        "wrong-design-hash": dict(design_hash="0" * 64),
+        "wrong-digests": dict(model_digests={FIX_MODEL: "0" * 64}),
+        "wrong-run-count": dict(run_count=run_count + 1),
+        "wrong-scale": dict(scale=3),
+        "budget-exceeded": dict(budget={"max_units": run_count - 1}),
+    }
+    for name, override in stale_cases.items():
+        auth = _owner_authorization(tmp_path, FIX_EID, dh,
+                                    pd["model_digests"], 2, run_count,
+                                    name=f"auth-{name}.json",
+                                    overrides=override)
+        with pytest.raises(SystemExit) as e:
+            cli.main(argv + ["--authorization", auth])
+        _assert_refused_before_contact(e, out_root, calls)
+        assert "does not bind this invocation" in str(e.value.code), name
+    # a HEAD that cannot be resolved fails CLOSED, never open
+    monkeypatch.setattr(cli, "_git_head", lambda: None)
+    auth = _owner_authorization(tmp_path, FIX_EID, dh, pd["model_digests"],
+                                2, run_count, name="auth-no-head.json")
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv + ["--authorization", auth])
+    _assert_refused_before_contact(e, out_root, calls)
+    assert "fails closed" in str(e.value.code)
+
+
+def test_smoke_pack_exact_authorization_reaches_sweep(tmp_path, monkeypatch,
+                                                      capsys):
+    _, pd, dh, out_root, calls, argv = _authz_env(tmp_path, monkeypatch)
+    auth = _owner_authorization(tmp_path, FIX_EID, dh, pd["model_digests"],
+                                2, _fixture_run_count(pd, 2))
+    cli.main(argv + ["--authorization", auth])
+    out = capsys.readouterr().out
+    # exactly one sweep, with the frozen fixture design scaled to 2 seeds
+    assert len(calls) == 1
+    spec = calls[0]
+    assert spec["sampler_seeds"] == [2001, 2002]
+    assert spec["scenarios"] == ["fix_dev", "fix_perm", "fix_sham"]
+    # digest printing survives the repair, before any contact
+    assert out.index(FIX_DIGEST) < out.index("rows written")
+    assert "claim_bearing: false" in out
+    marker = json.load(open(os.path.join(out_root, "SMOKE_MARKER.json"),
+                            encoding="utf-8"))
+    assert marker["claim_bearing"] is False
 
 
 # ------------------------------------------------------------- result package

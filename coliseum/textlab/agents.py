@@ -345,6 +345,32 @@ def _finite(value, default: float):
 REFLEX_BUDGET = {"num_predict": 80, "timeout_s": 30}
 PLANNER_BUDGET = {"num_predict": 350, "timeout_s": 120}
 
+# -- frozen decoder controls (audit b-002 finding f0) -------------------------
+# The model regime is not fully frozen unless EVERY decoder control that shapes
+# the output distribution is an EXPLICIT, SENT, and HASHED value. Left implicit,
+# a backend default (num_ctx, top_p, top_k, repeat_penalty, stop) lets two hosts
+# with, e.g., different effective context lengths execute and POOL under one
+# agent_regime_id — exactly the hole finding f0 reproduced. OllamaAgent folds
+# these into its sampling config, so they are sent on every request AND enter
+# spec_dict() → the lineage hash; the effective context length is additionally
+# RESOLVED against the backend (like think-mode/backend_version) before the
+# regime is hashed. registry.M8_FROZEN_PROFILE imports this mapping so the
+# design, config, and independent-profile lints pin exactly what the agent
+# sends — a single source of truth no config edit can drift from.
+#
+# temperature (0.7) is frozen separately in the sampling config and num_predict
+# in the reflex/planner budgets; those already enter the hash. This set is the
+# previously-implicit remainder. Values are chosen to comfortably fit the
+# sequential-history prompt plus the 350-token planner budget (num_ctx) and to
+# pin the sampler knobs to explicit values rather than backend defaults.
+M8_DECODER_CONTROLS = {
+    "num_ctx": 8192,
+    "top_p": 0.9,
+    "top_k": 40,
+    "repeat_penalty": 1.1,
+    "stop": [],
+}
+
 # -- seed probe (M8 Phase-2 prereg, "Sampling and effective units") -----------
 # A probe is only evidence if it can FAIL for the reason it claims to test. The
 # continuation here is genuinely underdetermined: there is no argmax answer a
@@ -799,18 +825,65 @@ class OllamaAgent(LLMAgent):
         self.backend_version = "unknown"  # resolved before hashing; "unknown" hashes distinctly
         self._fetch_digest()
 
+    def configure_sampling(self, sampling: dict | None, sampler_seed: int | None):
+        """Fold the frozen decoder controls (b-002 finding f0) into the SENT and
+        HASHED sampling config, so no output-distribution knob is left to a
+        backend default. The effective context length is a REQUEST here; its
+        backend-effective value is resolved in resolve_effective_config() before
+        the regime is hashed."""
+        super().configure_sampling(sampling, sampler_seed)
+        for k, v in M8_DECODER_CONTROLS.items():
+            self.sampling.setdefault(k, list(v) if isinstance(v, list) else v)
+        self.sampling = validate_sampling(self.sampling, sampler_seed)
+        self.requested_num_ctx = self.sampling.get("num_ctx")
+
     def resolve_effective_config(self) -> None:
         """Audit item 8: the regime must hash what the backend ACTUALLY does. The
         warmup call (already needed to keep cold-load out of measured latency) now
         doubles as the think-mode probe — a backend that rejects `think: false`
         400s here and flips think_param to "unsupported" BEFORE spec_dict() is
         hashed, so it can never share a regime with a backend that honored it.
-        Idempotent; the stochastic seed probe warms/resolves the same way."""
+
+        b-002 finding f0: the EFFECTIVE context length is resolved the same way,
+        before the hash. A host serving a build whose context capability is below
+        the requested num_ctx yields a smaller effective value → a different
+        agent_regime_id, so it can never pool with a host that honored the full
+        request. Idempotent; the stochastic seed probe warms/resolves the same
+        way."""
         if self.backend_version == "unknown":
             self.backend_version = self._backend_version()
+        if self.sampling.get("num_ctx") is not None:
+            self.sampling["num_ctx"] = self._effective_num_ctx(
+                self.sampling["num_ctx"])
         if not self._warm:
             self._post("ready?", 1, 300)
             self._warm = True
+
+    def _effective_num_ctx(self, requested: int) -> int:
+        """The context length the backend will ACTUALLY use for this model.
+        Ollama clamps options.num_ctx to the model's trained context length,
+        which /api/show reports as '<arch>.context_length'. Resolving it here
+        means a build with a smaller context capability cannot share a regime
+        with one that honors the full request. Unreachable/unknown → the
+        requested value (still explicit and sent, never a silent backend
+        default)."""
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                f"{self.host}/api/show",
+                data=json.dumps({"model": self.model}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                info = json.loads(resp.read())
+            model_info = info.get("model_info") or {}
+            caps = [v for k, v in model_info.items()
+                    if k.endswith("context_length")
+                    and isinstance(v, int) and not isinstance(v, bool)]
+            if caps:
+                return min(requested, caps[0])
+        except Exception:
+            pass
+        return requested
 
     @staticmethod
     def _classify_host(host: str) -> str:

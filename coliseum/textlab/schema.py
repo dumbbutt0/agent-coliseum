@@ -60,7 +60,15 @@ RUNNER_BEHAVIORAL_VERSION = "1"
 POINT_KINDS = ("decision", "exposure")
 
 DEFAULT_SAMPLING = {"mode": "deterministic", "temperature": 0}
-DECODING_KEYS = ("temperature", "top_p", "top_k", "repeat_penalty")
+# Every decoder control that shapes the output distribution (audit b-002
+# finding f0). num_ctx (effective context length) and stop join the sampler
+# knobs so that a control left implicit — falling back to a backend default —
+# can no longer let two hosts with different effective context lengths pool
+# under one agent_regime_id. A key enters a run's lineage only when it is
+# PRESENT in that run's sampling dict, so scripted/mock runs whose sampling
+# never carries these keys are byte-unchanged.
+DECODING_KEYS = ("temperature", "top_p", "top_k", "repeat_penalty",
+                 "num_ctx", "stop")
 
 
 class SchemaError(ValueError):
@@ -88,6 +96,26 @@ def validate_sampling(sampling: dict, sampler_seed) -> dict:
             raise SchemaError("stochastic sampling requires temperature > 0")
         if not isinstance(sampler_seed, int) or isinstance(sampler_seed, bool):
             raise SchemaError("stochastic sampling requires an explicit integer sampler_seed")
+    # b-002 finding f0: the added decoder controls are typed, so a frozen value
+    # cannot be substituted for an ill-typed one that would still hash cleanly.
+    for k in ("top_p", "repeat_penalty"):
+        if k in s:
+            v = s[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise SchemaError(f"{k} must be a number >= 0, got {v!r}")
+    if "top_k" in s:
+        v = s["top_k"]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise SchemaError(f"top_k must be a non-negative int, got {v!r}")
+    if "num_ctx" in s:
+        v = s["num_ctx"]
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            raise SchemaError(f"num_ctx must be a positive int (the effective "
+                              f"context length), got {v!r}")
+    if "stop" in s:
+        v = s["stop"]
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise SchemaError(f"stop must be a list of strings, got {v!r}")
     unknown = set(s) - {"mode"} - set(DECODING_KEYS)
     if unknown:
         raise SchemaError(f"unknown sampling keys: {sorted(unknown)}")

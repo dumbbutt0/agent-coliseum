@@ -197,48 +197,66 @@ LOOSE = POLICY(min_admissible_effective_n=1, max_non_decision_rate=0.5,
 
 # ------------------------------------------------- 1. THE DEFECT REPRODUCTION
 
-def test_parse_fallback_inflates_old_tv_and_is_excluded_by_new_report(tmp_path):
-    """F8, stated as a contrast.
+def test_parse_fallback_inflates_old_tv_and_new_report_refuses_the_pair(tmp_path):
+    """F8, stated as a contrast, AT v4 (audit d-002 finding 0).
 
     One B-condition unit's terminal node has `arbitration_winner: "fallback"` and
     therefore resolved to a deterministic action rather than a choice. The OLD
     comparator scores it as a real choice and reports TV(A,B) = 1/3 — an order
-    effect manufactured out of one malformed model reply. The NEW report excludes
-    it (non_decision_n == 1) and reports the honest distance, 0.0.
+    effect manufactured out of one malformed model reply. The NEW report does not
+    merely exclude the draw and press on with an unbalanced pair: a non-decision
+    on one side makes that matched pair INADMISSIBLE, so the report REFUSES
+    pre-statistics with a typed census — the fallback appears as a non-decision,
+    never in any distribution, and no distance/quantile/verdict is emitted.
     """
     dirs = _build(tmp_path, {
         "A": [(1, "share"), (2, "share"), (3, "share")],
-        # unit 2 of B is a fallback: the parser failed and the runner substituted
+        # unit 3 of B is a fallback: the parser failed and the runner substituted
         "B": [(1, "share"), (2, "share"), (3, "verify", "fallback")],
         "C": [(1, "share"), (2, "share"), (3, "share")],
     })
 
     old = scramble_terminal_distribution(dirs, CONDITIONS)["per_agent"]["live"]
-    assert old["tv_distances"]["A|B"] == pytest.approx(1 / 3)
+    assert old["tv_distances"]["A|B"] == pytest.approx(1 / 3)   # manufactured
     assert old["distributions"]["B"] == {"share": pytest.approx(2 / 3),
                                          "verify": pytest.approx(1 / 3)}
     assert old["effective_n"]["B"] == 3          # the fallback counted as evidence
 
-    new = _report(dirs, LOOSE, THRESH([1], [2, 3]))["per_agent"]["live"]
-    b = new["cells"]["B"]
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2, 3]))
+    msg = str(exc.value)
+    assert "matched_unit_grid" in msg
+    assert "live|A|B pairs 2 admissible matched units, not the 3" in msg
+    assert "never silently held fixed" in msg
+    body = exc.value.report
+    b = body["per_agent"]["live"]["cells"]["B"]
+    # the fallback is a NON-DECISION in the census, never a real choice
     assert b["non_decision_n"] == 1
     assert b["non_decision_reasons"] == {"parse_fallback_winner": 1}
     assert b["distribution"] == {"share": 1.0}   # the artifact contributes NOTHING
     assert b["admissible_effective_n"] == 2
-    assert new["tv_distances"]["A|B"] == 0.0     # the honest distance
-    assert new["verdict"] == "no_order_effect_observed"
+    # numbers never escape the refusal
+    for agent in body["per_agent"].values():
+        for key in ("tv_distances", "bootstrap", "permutation_null", "verdict"):
+            assert key not in agent
+    for leaked in ("tv_distances", "permutation_null", "q_ab", "verdict"):
+        assert leaked not in canonical_json(body)
 
 
 def test_non_admissible_terminal_is_never_repointed_at_an_earlier_decision(tmp_path):
     """The terminal probe is the FROZEN probe, full stop. Substituting the earlier
-    (admissible) node would be a second fabrication on top of the first."""
+    (admissible) node would be a second fabrication on top of the first. With one
+    B unit non-admissible the v4 report REFUSES (audit d-002 finding 0), and the
+    census it attaches proves 'expose' entered no distribution."""
     dirs = _build(tmp_path, {
         "A": [(1, "share"), (2, "share")],
         "B": [(1, "share"), (2, "verify", "fallback")],
         "C": [(1, "share"), (2, "share")],
     })
-    rep = _report(dirs, LOOSE, THRESH([1], [2]))
-    b = rep["per_agent"]["live"]["cells"]["B"]
+    with pytest.raises(SchemaError) as exc:
+        _report(dirs, LOOSE, THRESH([1], [2]))
+    assert "matched_unit_grid" in str(exc.value)
+    b = exc.value.report["per_agent"]["live"]["cells"]["B"]
     # "expose" is the earlier node's action; it must appear nowhere
     assert "expose" not in b["distribution"] and "expose" not in b["counts"]
     assert b["admissible_draw_n"] == 1 and b["non_decision_n"] == 1
@@ -797,6 +815,105 @@ def test_fully_matched_grid_reports_48_matched_units_for_both_comparisons(tmp_pa
     assert grid["matched_units"] == {"A|B": 48, "A|C": 48}
     assert agent["permutation_null"]["A|B"]["matched_units"] == 48
     assert agent["permutation_null"]["A|C"]["matched_units"] == 48
+
+
+def test_144_grid_with_one_fallback_refuses_and_emits_no_numbers(tmp_path):
+    """THE d-002 FINDING-0 REGRESSION: a full frozen 144-run grid with EXACTLY
+    one B terminal marked a parse fallback — non-decision rate 1/48 = 0.020833
+    (below max_non_decision_rate and its delta) and B admissible n = 47 (above
+    the floor), so it passes every rate/dropout/effective-n gate — must still
+    REFUSE pre-statistics: only 47 of the 48 matched A|B pairs are admissible.
+    Previously the report emitted a verdict while the permutation null silently
+    paired 47 and held the unmatched A action fixed. No tv_distances, bootstrap,
+    permutation_null, decision_inputs or verdict may be emitted, and the report
+    must NEVER claim a 48-unit grid it did not realize admissibly."""
+    dirs = _full_grid(tmp_path, lambda c, v, s: "share")
+    # mark exactly one B unit's terminal as a parse fallback (a non-decision)
+    dec = os.path.join(tmp_path, "B_v0_2001", "decisions.jsonl")
+    lines = [json.loads(l) for l in open(dec, encoding="utf-8") if l.strip()]
+    lines[-1]["data"]["arbitration_winner"] = "fallback"
+    with open(dec, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(json.dumps(x) for x in lines) + "\n")
+    att = _attest(dirs)          # re-attest over the mutated bytes
+
+    with pytest.raises(SchemaError) as exc:
+        order_sensitivity_report(
+            dirs, CONDITIONS, admissibility_policy=_GRID_POLICY,
+            thresholds=_grid_thresh(), replay_attestation=att,
+            terminal_dp_id=TERMINAL, surviving_counts={"A": 48, "B": 48, "C": 48})
+    msg = str(exc.value)
+    assert "matched_unit_grid" in msg
+    assert "live|A|B pairs 47 admissible matched units, not the 48" in msg
+    assert "never silently held fixed" in msg
+    body = exc.value.report
+    b = body["per_agent"]["live"]["cells"]["B"]
+    assert b["non_decision_n"] == 1 and b["admissible_effective_n"] == 47
+    assert b["non_decision_rate"] == round(1 / 48, 6)
+    for agent in body["per_agent"].values():
+        for key in ("tv_distances", "bootstrap", "permutation_null",
+                    "decision_inputs", "verdict"):
+            assert key not in agent
+    for leaked in ("tv_distances", "permutation_null", "q_ab", "verdict"):
+        assert leaked not in canonical_json(body)
+
+
+def test_retries_per_unit_zero_dedups_identical_and_refuses_conflicting(tmp_path):
+    """THE b-002 FINDING-1 (analysis side) REGRESSION: under the frozen
+    retries_per_unit=0 contract the report admits exactly ONE canonical
+    observation per effective unit. A single-attempt pack and the same pack with
+    an IDENTICAL duplicate run dir for one unit produce BYTE-IDENTICAL statistics
+    (the resume re-roll is discarded, never pooled); a CONFLICTING duplicate
+    REFUSES pre-statistics rather than reweighting the distribution. The general
+    (default) contract still aggregates replicates — the dedup is opt-in."""
+    base = {c: [(s, "share") for s in range(1, 5)] for c in ("A", "B", "C")}
+    dirs = _build(tmp_path, base)
+    policy = POLICY(min_admissible_effective_n=2)
+    th = THRESH([1, 2], [3, 4])
+
+    def _run(ds, **kw):
+        return order_sensitivity_report(
+            ds, CONDITIONS, admissibility_policy=policy, thresholds=th,
+            replay_attestation=_attest(ds), terminal_dp_id=TERMINAL, **kw)
+
+    single = _run(dirs, retries_per_unit=0)
+
+    # an IDENTICAL duplicate run dir for A's unit (v0, 42, 1)
+    dup = _mkrun(tmp_path, "A_dup", CONDITIONS["A"], "v0", 42, 1, "share")
+    dirs_dup = dirs + [dup]
+    deduped = _run(dirs_dup, retries_per_unit=0)
+    assert canonical_json(deduped) == canonical_json(single)    # byte-identical
+    assert deduped["replay_verification"]["verified_run_n"] == 12
+
+    # under the DEFAULT (general replicate) contract the duplicate instead POOLS
+    default = _run(dirs_dup)
+    assert default["per_agent"]["live"]["cells"]["A"]["admissible_draw_n"] == 5
+
+    # a CONFLICTING duplicate (same unit, different terminal action) refuses
+    conflict = _mkrun(tmp_path, "A_conflict", CONDITIONS["A"], "v0", 42, 1, "verify")
+    with pytest.raises(SchemaError) as exc:
+        _run(dirs + [conflict], retries_per_unit=0)
+    assert "duplicate_effective_unit" in str(exc.value)
+    for leaked in ("tv_distances", "permutation_null", "verdict"):
+        assert leaked not in str(exc.value)
+
+    # unsupported retry counts are refused (only 0 or None are contract-legal)
+    for bad in (1, 2, True):
+        with pytest.raises(SchemaError) as exc2:
+            _run(dirs, retries_per_unit=bad)
+        assert "retries_per_unit" in str(exc2.value)
+
+
+def test_diagnostics_note_and_report_version_are_v4(tmp_path):
+    """d-002 finding 1 (LOW): the emitted report identifies ORDER_REPORT_VERSION
+    4 consistently — the top-level version, the constant, and the diagnostics
+    note that previously read 'order_report_version 3'."""
+    dirs = _build(tmp_path, {"A": _mixed(0), "B": _mixed(16), "C": _mixed(0)})
+    rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
+    assert ORDER_REPORT_VERSION == "4"
+    assert rep["order_report_version"] == "4"
+    note = rep["per_agent"]["live"]["diagnostics"]["note"]
+    assert "order_report_version 4" in note
+    assert "order_report_version 3" not in note
 
 
 # ------------------------------------------------------------- 9. replicates (F3)

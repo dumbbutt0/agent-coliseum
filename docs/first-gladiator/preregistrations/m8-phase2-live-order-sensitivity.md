@@ -26,12 +26,23 @@ otherwise matched experience set moves a terminal action distribution.
 
 ## Hypothesis (primary, pre-registered — null first)
 
-**Operative H0 (sharp / unit-level):** for every matched effective unit
-`(variant_id, scenario_seed, sampler_seed)`, the presentation order of the
-experience set made no difference to the terminal action chosen at that unit.
+**Operative H0 — the ONE canonical null of this design, stated verbatim
+(machine-readable as `planned_design.null_form: sharp` +
+`planned_design.null_statement`, design-hashed, and anchored in audited code
+as `registry.M8_NULL_STATEMENT`):**
 
-**H1:** the negation — for at least some units, presentation order changed the
-terminal action.
+> Sharp (unit-level) null: for every matched effective unit (variant_id, scenario_seed, sampler_seed), presentation order made no difference to the terminal action chosen at that unit.
+
+**H1:** the negation — for at least one matched unit, presentation order
+changed the terminal action chosen at that unit.
+
+This exact statement appears verbatim in the registry `hypothesis`, the
+registry `primary_event`, the committed experiment config, the
+operating-characteristics script, and the committed characterisation
+artifact. There is no second operative null: marginal equality
+`P(Y|A) = P(Y|B)` is a stated **consequence** of H0, never the hypothesis
+under test, and no marginal claim is licensed by any outcome (audit a-004
+finding 0).
 
 `Y` is the terminal `final_action` at the **`d_partner`** probe (frozen terminal
 probe identity; nothing else may be measured); `A` is the developmental order,
@@ -150,6 +161,29 @@ Consequences, stated plainly:
 | Reflex budget | `{num_predict: 80, timeout_s: 30}` |
 | Planner budget | `{num_predict: 350, timeout_s: 120}` |
 | Temperature | `0.7` (stochastic — see Sampling) |
+| Context length | `num_ctx = 8192` — **sent explicitly** and the **effective** value resolved by `resolve_effective_config()` before the regime is hashed (see below) |
+| `top_p` | `0.9` (explicit — never a backend default) |
+| `top_k` | `40` (explicit) |
+| `repeat_penalty` | `1.1` (explicit) |
+| `stop` | `[]` (explicit empty set — the model is never truncated by an unfrozen stop) |
+
+**Every decoder control is explicit, sent, and hashed (audit b-002 finding
+f0).** A model regime is not frozen if any output-distribution knob is left to a
+backend default: finding f0 reproduced two hosts with the same digest and backend
+version but a **different effective context length** executing and pooling under
+one `agent_regime_id`. The frozen decoder controls above (`num_ctx`, `top_p`,
+`top_k`, `repeat_penalty`, `stop`) are folded into `OllamaAgent`'s sampling
+config (`agents.M8_DECODER_CONTROLS`), emitted on **every** request, and enter
+`spec_dict()` → the agent block of the behavioral_config → `agent_regime_id`, so
+varying any one of them yields a different regime id. The **effective** context
+length is additionally **resolved before the hash**, exactly as think-mode and
+`backend_version` are: `resolve_effective_config()` clamps `num_ctx` to the
+model's `/api/show` context capability, so a host serving a build with a smaller
+context cannot silently pool with one that honors the full request. The values
+are pinned identically in `planned_design.decoder_controls` (design-hashed), the
+committed config, and `registry.M8_FROZEN_PROFILE` (audited code); both
+provenance lints refuse omission or substitution of any control independently of
+`design_hash`.
 
 **Model selection, and why.** The draft manifest carried `gemma3:latest` @
 `a2af6cc3…`. Both candidates are available and both digests verify:
@@ -234,24 +268,27 @@ analysis, no early stopping, no post-hoc threshold movement.
    **`alpha = 0.05`**. A percentile bootstrap (same iterations and seed) is
    retained for reporting intervals on the observed distances.
 
-   **The operative null is the sharp null, and that is stronger than the
-   marginal statement above.** A paired permutation test is exact under
-   *within-pair exchangeability* — that for each matched unit, the condition
-   label carries no information about that unit's terminal action. Equality of
-   the A and B **marginal** distributions, as `H0` is written, does **not**
-   logically imply it: two conditions can share a marginal distribution while
-   their outcomes are dependent within a unit in an asymmetric way, and under
-   that weaker hypothesis alone the test is not exact.
+   **The null the test is exact under is exactly the null this design
+   declares — the canonical sharp null, and nothing weaker.** A paired
+   permutation test is exact under *within-pair exchangeability* — that for
+   each matched unit, the condition label carries no information about that
+   unit's terminal action — and the sharp null supplies it. Equality of the A
+   and B **marginal** distributions does **not** logically imply it: two
+   conditions can share a marginal distribution while their outcomes are
+   dependent within a unit in an asymmetric way, and under that weaker
+   hypothesis alone the test is not exact. That is why marginal equality is
+   nowhere the operative null of this design (audit a-004 finding 0 removed
+   every phrasing that read as if it were).
 
-   This design adopts the sharp null as operative, which is the scientifically
-   natural reading here rather than a convenience: the matched unit fixes the
-   variant, the scenario seed and the sampler seed, so the sharp null says
-   precisely "for this unit, presentation order made no difference to what was
-   chosen" — the thing the experiment is actually asking. The sharp null implies
-   the marginal null, so `H0` as stated remains the correct **claim-level**
-   summary and nothing in the claim ceiling widens. The exactness guarantee,
-   however, rests on the sharp null, and the result report must say so rather
-   than implying exactness under marginal equality alone.
+   The sharp null is also the scientifically natural reading rather than a
+   convenience: the matched unit fixes the variant, the scenario seed and the
+   sampler seed, so the canonical statement says precisely "for this unit,
+   presentation order made no difference to what was chosen" — the thing the
+   experiment is actually asking. The sharp null **implies** marginal
+   equality, so that marginal equality is a stated consequence of H0 and the
+   claim ceiling stays at the unit level; a rejection licenses only the
+   unit-level conclusion, and the result report must state exactness under
+   the sharp null, never under marginal equality alone.
 
 ### Why the split-half noise floor was replaced
 
@@ -267,16 +304,18 @@ than the statistic it is meant to calibrate, purely because it is computed on
 half the data. The bias is a property of the split, not of the evidence.
 
 Simulation at the frozen n=48 over the 4-action menu measured the null's upper
-bound at ≈0.49 — about **twice** `min_detectable_effect = 0.25`. The
+bound at ≈0.49 — well above the design's sub-0.5 resolving-power ceiling. The
 sensitivity precondition therefore refused every arm, including one with a
 genuine effect at TV(A,B)=0.6: **false-positive rate 0.000, power 0.000.** A
 design that cannot detect an effect of any size is not conservative, it is
 inert.
 
 A paired permutation null fixes the cause rather than the symptom. It is exact
-under the exchangeability implied by H0, it uses the actual matched sample
-sizes so no size mismatch exists, it consumes no additional live runs, and it
-respects the pairing the design already guarantees. The rejected alternatives
+under the within-pair exchangeability that the canonical **sharp** H0
+supplies (marginal equality alone would not supply it — see the hypothesis
+section), it uses the actual matched sample sizes so no size mismatch exists,
+it consumes no additional live runs, and it respects the pairing the design
+already guarantees. The rejected alternatives
 are recorded to show the choice was not the convenient one: raising
 `min_detectable_effect` above the noise floor would have "worked" while
 admitting only enormous effects — the reinterpret-to-rescue move this
@@ -309,14 +348,19 @@ A refusal is an inconclusive result, never a number to be interpreted.
 ## Primary event (decision rule)
 
 The analysis callable is **`metrics.order_sensitivity_report`** at
-**`ORDER_REPORT_VERSION 3`**. The version has been bumped once per change to the
-decision rule, so any emitted verdict is traceable to the rule that produced it:
-v1 the bootstrap-bound comparison against a split-half floor; v2 the paired
-permutation null; v3 the corrected asymmetric sensitivity requirement. The
-registry entry's `primary_event` is the authoritative statement of the frozen
-rule, and the lint fails a design whose version marker disagrees with it,
-consuming the frozen `admissibility_policy` and `thresholds` loaded from this
-experiment's registry entry. The Phase-1 comparator
+**`ORDER_REPORT_VERSION 4`** — the ONE version literal this document pins, and
+it appears nowhere in this document at any other value (audit a-004 finding 0
+found a 3-vs-4 disagreement here; corrected). The version has been bumped once
+per change to the decision rule, so any emitted verdict is traceable to the
+rule that produced it: v1 the bootstrap-bound comparison against a split-half
+floor; v2 the paired permutation null; v3 the corrected asymmetric sensitivity
+requirement; v4 (current) the mandatory clause-0 evidence admission and the
+clause-2 sham-adequacy warrant. The a-004 scientific re-freeze changes **no**
+clause of the rule, so the version stays 4. The registry entry's
+`primary_event` is the authoritative statement of the frozen rule, and the
+lint fails a design whose version marker disagrees with it, consuming the
+frozen `admissibility_policy` and `thresholds` loaded from this experiment's
+registry entry. The Phase-1 comparator
 `metrics.scramble_terminal_distribution` is **explicitly NOT the Phase-2 analysis
 path** — it admits parse fallbacks as decisions and is demonstrated in this
 candidate to return a clean null from wholly unparseable output. Naming it here
@@ -359,9 +403,16 @@ once any admission clause refuses**:
    effect observed**.
 5. Else: **inconclusive**.
 
-**`sham_equivalence_margin = 0.25`** (equal to `min_detectable_effect`), frozen
-in `planned_design.thresholds` and covered by `design_hash`. The audit's pinned
-boundary case — `TV(A,C) = q_AC = 0.25` with decisive A/B separation — is
+**`sham_equivalence_margin = 0.25`**, frozen in `planned_design.thresholds`
+and covered by `design_hash`. The margin is **deliberately decoupled from
+`min_detectable_effect`** (audit a-004): the two bounds answer different
+questions — the MDE is what the A/B test can resolve, the margin is what the
+sham comparison must have been able to detect — and enlarging the margin
+would *weaken* the sham-adequacy warrant (`q_AC < margin` becomes easier to
+grant). The margin therefore never follows the detectable boundary upward; it
+stays at 0.25, the smallest contamination scale this program has ever claimed
+to police, whatever value the MDE freezes at. The audit's pinned boundary
+case — `TV(A,C) = q_AC = 0.25` with decisive A/B separation — is
 **inconclusive** under the strict inequality, never a positive.
 
 ### The sensitivity requirement is asymmetric, and deliberately so
@@ -422,30 +473,108 @@ it, and that the protection no longer costs valid rejections.
 The requirement therefore attaches to clause 4 alone. It governs what a
 *non*-rejection is entitled to assert, never whether a rejection counts.
 
-### Frozen operating characteristics
+### Frozen operating characteristics and fitness criteria (audit a-004)
 
-`min_detectable_effect = 0.25` — a shift of a quarter of the terminal probability
-mass is the smallest difference this design claims to resolve, and correspondingly
-the tightest null it is entitled to assert. It is declared **before** any outcome
-exists and is covered by `design_hash`.
+The criteria that declare this finite-sample design fit to run are **frozen in
+`planned_design.thresholds`, covered by `design_hash`, and anchored in audited
+code** — they are never invented or adjusted inside the characterisation
+script (audit a-004 finding 1 blocked exactly that):
 
-The false-positive rate under H0 and the power at the `min_detectable_effect`
-boundary must be characterised by simulation at the frozen `n = 48` units per
-condition **using the exact frozen decision parameters — including
+- **`type_i_criterion` (frozen string): "CP-95 upper bound of sharp-null
+  rejection rate <= alpha".** The **upper** bound: only an upper confidence
+  limit at or below `alpha` supports the claim "type-I error is at or below
+  alpha". The superseded script-invented check bounded the *lower* limit,
+  which tests only whether excess above alpha was *demonstrated* — the wrong
+  direction, and it is banned by lint.
+- **`power_target = 0.8`.** The measured power at `min_detectable_effect` must
+  reach this value at its Clopper-Pearson 95% **lower** bound.
+
+**How `min_detectable_effect` is frozen (method, declared before the value):**
+the committed characterisation runs the frozen procedure's power curve at
+`n = 48` across the effect grid `0.25 / 0.35 / 0.5 / 0.75 / 1.0` (total
+variation from the graded base; the 1.0 endpoint uses disjoint supports since
+TV = 1.0 is unreachable from a full-support base), and
+`min_detectable_effect` is the **smallest grid effect whose measured power's
+CP-95 lower bound reaches `power_target`** under the exact frozen procedure.
+The artifact's `mde_selection` block recomputes that choice from the
+committed run, so the frozen value regenerates from the artifact alone.
+`power_target` is never shrunk to rescue a smaller boundary.
+
+**Measured result (committed artifact, 10000-iteration null, 400 trials per
+charged arm).** The rule yielded:
+
+| Effect (TV) | Measured power | CP-95 interval | Meets `power_target = 0.8`? |
+|---|---|---|---|
+| 0.25 | 0.800 | [0.757, 0.838] | **no** — lower bound 0.757 < 0.8 |
+| **0.35** | **0.9925** | **[0.978, 0.998]** | **yes — frozen MDE** |
+| 0.50 | 1.000 | [0.991, 1.000] | yes |
+| 0.75 | 1.000 | [0.991, 1.000] | yes |
+| 1.00 | 1.000 | [0.991, 1.000] | yes |
+
+So **`min_detectable_effect` is frozen at `0.35`** — the honest smallest grid
+effect the design reliably resolves. The point estimate at 0.25 was exactly
+0.80, but its lower confidence bound fell short of the target, and neither the
+value nor `power_target` was adjusted to make 0.25 pass. **Effects between
+`0.25` and `0.35` total variation are real possibilities this design cannot
+reliably detect at `n = 48`; an inconclusive outcome in that band is expected
+and is not a null result.** The four sharp-null type-I arms all measured
+`0/400` (CP-95 upper bound `0.0092 <= alpha = 0.05`).
+
+**The sham-equivalence margin is intentionally tighter than the MDE.**
+`sham_equivalence_margin = 0.25 < min_detectable_effect = 0.35`: the sham
+control must exclude surface-form contamination at a **finer** resolution
+(0.25) than the order effect the design claims to detect (0.35). This is the
+scientifically conservative direction — raising the margin to 0.35 to "match"
+the MDE would *weaken* the sham warrant (`q_AC < margin` becomes easier to
+grant) — so the two bounds are deliberately decoupled.
+
+**The null arms must mechanically satisfy the canonical sharp null** (audit
+a-004 finding 0): a sharp-null H0 trial generates each matched unit's
+terminal action **once** and copies it across A/B/C exactly — the design
+declares no condition-independent noise, so none is applied — and every
+generated schedule is verified **unit-by-unit before analysis** to satisfy
+the canonical statement; named alternative arms are verified to violate it on
+their declared axis. Under seeded per-unit decoding this is the faithful
+model, not a convenience: if order (or the sham rewording) truly makes no
+difference to a unit's computation, the realized terminal action is
+identical. A structural consequence, stated honestly: under the sharp null
+the observed pack is condition-invariant by the null itself, so the
+false-rejection rate is exactly zero and the frozen type-I bound holds
+mechanically — the exactness of the paired permutation test under its own
+null, exercised end-to-end rather than assumed.
+
+**The former iid equal-marginal "H0" arms are relabeled, not deleted**: A, B,
+C drawn iid from one distribution makes the *pair* distribution exchangeable
+— so the test still rejects near or below `alpha` for that broader family,
+reported as robustness context — but every such pack **violates** the sharp
+null (the audit measured 27–44 discordant units per pack), so those rates
+are never charged as sharp-null type-I. The dependent shared-latent two-mode
+process from audit 001828 finding 1 is characterised in both halves: sharp
+null true within mode (charged type-I) and sharp null false with equal
+marginals (the separating case, reported as correct detection).
+
+**Power is characterised with the sham axis sharply null** (`C` copied from
+`A`, verified): under the unified null form that is what "the sham is truly
+null" means. The exchangeability-context arms show the design's behavior
+when the sham axis is null only in distribution — the warrant frequently
+refuses and the pack goes inconclusive, which is conservative, never
+anti-conservative. The sham-gate's residual process-level leakage over a
+contaminated-at-MDE sham is reported with its CI as context; the frozen
+fitness criteria are exactly `type_i_criterion` and `power_target`, and the
+absolute observation-level sham guarantees (the boundary pack never
+promotes; every positive carries the warrant) are pinned deterministically
+in the test suite.
+
+The characterisation uses the exact frozen decision parameters — including
 `permutation_iterations = 10000` and `bootstrap_iterations = 10000`, never
-substituted smaller values — with enough outer trials to bound the type-I
-criterion and with confidence intervals reported, not point estimates** (audit
-001828 finding 3). The null families characterised must include **dependent
-processes satisfying only the sharp null's negation-space honestly** — in
-particular the pack-level shared-latent two-mode process from audit 001828
-finding 1, which must not emit `order_effect_observed` above the frozen type-I
-bound *when the sharp null is true within each mode*, and whose behavior under
-sharp-null violation must be reported for what it is. The characterisation is
-committed as an artifact produced by the same frozen threshold bundle the
-production path loads; a CI regression asserts that binding. A design whose
-simulated false-positive rate materially exceeds `1 - confidence`, or whose
-power at the boundary is negligible, is not fit to run and must be corrected
-**before** execution rather than reinterpreted after.
+substituted smaller values — with 400 outer trials per charged arm and exact
+Clopper-Pearson intervals reported, not point estimates (audit 001828
+finding 3). It is committed as an artifact produced by the same frozen
+threshold bundle the production path loads; a CI regression asserts echo and
+hash equality, recomputes every interval and criterion from the tallies, and
+fails if the exact `n = 48` characterisation misses any frozen target. A
+design that misses them is not fit to run and must be corrected **before**
+execution rather than reinterpreted after.
 
 Phase 1's exact thresholds (ε = τ = 0) are **not** carried over. Zero thresholds
 are coherent only for a deterministic decider whose terminal action is a

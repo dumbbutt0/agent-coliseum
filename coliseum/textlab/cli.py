@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 
 from .graph_export import write_graphs
@@ -195,6 +196,19 @@ def cmd_dataset_export(args):
 
 SMOKE_MARKER_NAME = "SMOKE_MARKER.json"
 ATTESTATION_NAME = "replay_attestation.json"
+# Canonical owner experiment authorization (smoke-authorization.v1). Live
+# provider contact — and any filesystem mutation preparing one — is gated on a
+# manifest carrying EXACTLY these bindings, each verified against the live
+# registry and the candidate commit at invocation time. The non-claim-bearing
+# smoke marker governs ANALYSIS refusal only; it never grants contact
+# authority, so a design-audit approval (or no artifact at all) refuses
+# before anything is written and before run_sweep is ever reached.
+SMOKE_AUTHORIZATION_VERSION = "1"
+SMOKE_AUTHORIZATION_KIND = "owner_experiment_execution"
+SMOKE_AUTHORIZATION_FIELDS = (
+    "authorization_version", "authorization_kind", "experiment_id",
+    "design_hash", "candidate_commit", "model_digests", "run_count",
+    "scale", "budget")
 # Frozen m8 condition mapping (Director contract): labels A/B/C bind to the
 # planned_design scenario list IN ORDER — dev, perm, sham.
 _CONDITION_LABELS = ("A", "B", "C")
@@ -320,12 +334,117 @@ def cmd_order_report(args):
     print("wrote", out_path)
 
 
+def _git_head() -> str | None:
+    """The candidate commit at invocation. Fail-closed at the caller: None
+    (no git, detached failure, empty output) REFUSES — it is never treated
+    as a match."""
+    try:
+        p = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                           text=True, timeout=10)
+    except Exception:
+        return None
+    out = p.stdout.strip()
+    return out if p.returncode == 0 and out else None
+
+
+def _verify_smoke_authorization(auth_path, *, experiment_id,
+                                expected_design_hash, expected_digests,
+                                expected_scale, expected_run_count):
+    """Verify a canonical owner experiment authorization manifest against the
+    LIVE registry design identity and the candidate commit at invocation.
+
+    Every failure sys.exits nonzero BEFORE any filesystem mutation and before
+    run_sweep is ever reached. Absent / unreadable / design-audit-only /
+    stale / mismatched manifests all refuse; only the exact binding passes.
+    """
+    if not auth_path:
+        sys.exit("SMOKE-PACK REFUSED: no --authorization manifest — live "
+                 "provider contact requires a canonical owner experiment "
+                 "authorization binding design_hash, candidate_commit, "
+                 "model_digests, run_count and budget; the non-claim-bearing "
+                 "smoke marker governs analysis only and never grants "
+                 "contact authority")
+    try:
+        with open(auth_path, encoding="utf-8") as fh:
+            auth = json.load(fh)
+    except OSError as e:
+        sys.exit(f"SMOKE-PACK REFUSED: authorization manifest unreadable: {e}")
+    except ValueError as e:
+        sys.exit(f"SMOKE-PACK REFUSED: authorization manifest is not valid "
+                 f"JSON: {e}")
+    if not isinstance(auth, dict):
+        sys.exit("SMOKE-PACK REFUSED: authorization manifest must be a JSON "
+                 "object")
+    missing = [k for k in SMOKE_AUTHORIZATION_FIELDS if k not in auth]
+    if missing:
+        sys.exit("SMOKE-PACK REFUSED: authorization manifest is missing "
+                 f"required bindings {missing} — a partial artifact (e.g. a "
+                 "design-audit approval) is not owner execution authority")
+    problems = []
+    if auth["authorization_version"] != SMOKE_AUTHORIZATION_VERSION:
+        problems.append(f"authorization_version "
+                        f"{auth['authorization_version']!r} != "
+                        f"{SMOKE_AUTHORIZATION_VERSION!r}")
+    if auth["authorization_kind"] != SMOKE_AUTHORIZATION_KIND:
+        problems.append(f"authorization_kind {auth['authorization_kind']!r} "
+                        f"!= {SMOKE_AUTHORIZATION_KIND!r} — a design-audit "
+                        "(or any other) approval is NOT authority to contact "
+                        "the provider")
+    if auth["experiment_id"] != experiment_id:
+        problems.append(f"experiment_id {auth['experiment_id']!r} != "
+                        f"{experiment_id!r}")
+    if auth["design_hash"] != expected_design_hash:
+        problems.append(f"design_hash {str(auth['design_hash'])[:16]}… does "
+                        f"not match the live registry's reconstructed design "
+                        f"hash {expected_design_hash[:16]}… — STALE or "
+                        "foreign authorization")
+    head = _git_head()
+    if head is None:
+        sys.exit("SMOKE-PACK REFUSED: cannot resolve the candidate commit "
+                 "(git HEAD) — the commit binding cannot be verified, so the "
+                 "authorization fails closed")
+    if auth["candidate_commit"] != head:
+        problems.append(f"candidate_commit {str(auth['candidate_commit'])[:12]}"
+                        f"… != current HEAD {head[:12]}… — STALE "
+                        "authorization for another candidate")
+    if auth["model_digests"] != expected_digests:
+        problems.append(f"model_digests {auth['model_digests']!r} do not "
+                        f"exactly match the frozen design's "
+                        f"{expected_digests!r}")
+    if auth["scale"] != expected_scale:
+        problems.append(f"scale {auth['scale']!r} != invoked --scale "
+                        f"{expected_scale}")
+    if auth["run_count"] != expected_run_count:
+        problems.append(f"run_count {auth['run_count']!r} != the "
+                        f"{expected_run_count} units this invocation would "
+                        "execute")
+    budget = auth["budget"]
+    if not isinstance(budget, dict) or isinstance(
+            budget.get("max_units"), bool) or not isinstance(
+            budget.get("max_units"), int) or budget["max_units"] < 1:
+        problems.append("budget must be an object with a positive integer "
+                        "max_units")
+    elif expected_run_count > budget["max_units"]:
+        problems.append(f"run_count {expected_run_count} exceeds the "
+                        f"authorized budget max_units {budget['max_units']}")
+    if problems:
+        sys.exit("SMOKE-PACK REFUSED: authorization does not bind this "
+                 "invocation: " + "; ".join(problems))
+    return auth
+
+
 def cmd_smoke_pack(args):
     """Scaled-down operational-validation pack: the frozen planned_design with
     only the first --scale sampler seeds, run interleaved, marked NOT
-    claim-bearing. Never contacts a silently-defaulted local host."""
+    claim-bearing. Never contacts a silently-defaulted local host, and NEVER
+    initiates live provider contact (or writes anything preparing one)
+    without a canonical owner experiment authorization (--authorization)
+    whose bindings — design_hash, candidate_commit, model_digests,
+    run_count/scale, budget — verify against the live registry and git HEAD.
+    The smoke marker's non-claim-bearing status governs analysis refusal
+    only; it is never a substitute for that authority."""
     from . import sweep
-    from .registry import _frozen_design, load_thresholds
+    from .registry import _frozen_design, design_hash, load_thresholds
 
     if not os.environ.get("OLLAMA_HOST"):
         sys.exit("SMOKE-PACK REFUSED: OLLAMA_HOST is not set — a smoke pack "
@@ -342,6 +461,17 @@ def cmd_smoke_pack(args):
     if args.scale < 1 or not sampler_seeds:
         sys.exit("SMOKE-PACK REFUSED: --scale must select at least one "
                  "frozen sampler seed")
+    # the exact grid this invocation would execute — the run-count binding
+    expected_run_count = (len(models) * len(pd["scenarios"])
+                          * len(pd["scenario_seeds"]) * len(sampler_seeds))
+    # owner authorization gate: verified BEFORE any filesystem mutation
+    # (marker, out_root) and before run_sweep can be reached
+    _verify_smoke_authorization(
+        args.authorization, experiment_id=args.experiment_id,
+        expected_design_hash=design_hash(pd), expected_digests=digests,
+        expected_scale=args.scale, expected_run_count=expected_run_count)
+    print(f"authorization : {args.authorization} "
+          f"({expected_run_count} units within owner budget)")
     print("smoke-pack will contact these digest-pinned models "
           "(operational validation only, claim_bearing: false):")
     for m in models:
@@ -535,7 +665,9 @@ def main(argv=None):
                    help="report path (default <out-root>/order_report.json)")
 
     s = sub.add_parser("smoke-pack", help="scaled-down operational-validation "
-                       "pack (never claim-bearing; requires OLLAMA_HOST)")
+                       "pack (never claim-bearing; requires OLLAMA_HOST and a "
+                       "canonical owner --authorization manifest before any "
+                       "live contact)")
     s.set_defaults(fn=cmd_smoke_pack)
     s.add_argument("--experiment-id", required=True)
     s.add_argument("--scale", type=int, required=True,
@@ -544,6 +676,14 @@ def main(argv=None):
                    help="must be labeled 'smoke' (e.g. logs/runs/m8-smoke)")
     s.add_argument("--registry", default="configs/registry/experiments.yaml")
     s.add_argument("--config-dir", default="configs/scenarios")
+    s.add_argument("--authorization", default=None,
+                   help="REQUIRED owner experiment authorization manifest "
+                        "(JSON) binding authorization_kind="
+                        "owner_experiment_execution, experiment_id, "
+                        "design_hash (live registry), candidate_commit "
+                        "(git HEAD), model_digests, run_count, scale, and "
+                        "budget.max_units; absent/stale/design-audit-only "
+                        "manifests refuse before anything is written")
 
     s = sub.add_parser("result-package", help="close an analyzed pack into a "
                        "self-verifying result_package.json")

@@ -15,7 +15,9 @@ import os
 import pytest
 import yaml
 
-from coliseum.textlab.registry import (design_hash,
+from coliseum.textlab.registry import (M8_NULL_STATEMENT,
+                                       M8_TYPE_I_CRITERION,
+                                       design_hash,
                                        lint_experiment_config,
                                        lint_experiments_registry,
                                        load_admissibility_policy,
@@ -27,6 +29,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY = os.path.join(ROOT, "configs", "registry", "experiments.yaml")
 CONFIG = os.path.join(ROOT, "configs", "experiments",
                       "m8-phase2-live-order-sensitivity.experiment.json")
+PREREG_DOC = os.path.join(ROOT, "docs", "first-gladiator", "preregistrations",
+                          "m8-phase2-live-order-sensitivity.md")
+OC_SCRIPT = os.path.join(ROOT, "scripts", "m8_operating_characteristics.py")
 
 EID = "m8-phase2-live-order-sensitivity"
 M7_ID = "m7-scrambled-history-gate"
@@ -89,6 +94,14 @@ def test_design_hash_reconstructs_from_planned_design():
 
 def test_frozen_design_values():
     pd = _entry()["planned_design"]
+    # a-004 finding 0: the ONE canonical null, machine-readable and verbatim
+    assert pd["null_form"] == "sharp"
+    assert pd["null_statement"] == M8_NULL_STATEMENT
+    assert pd["null_statement"] in pd["hypothesis"]
+    assert pd["null_statement"] in pd["primary_event"]
+    # marginal equality is a stated CONSEQUENCE, never the operative null
+    assert "CONSEQUENCE" in pd["hypothesis"]
+    assert "never the operative" in pd["hypothesis"]
     assert pd["models"] == [MODEL]
     assert pd["model_digests"] == {MODEL: DIGEST}
     assert pd["scenarios"] == SCENARIOS
@@ -156,10 +169,12 @@ def test_primary_event_freezes_the_successor_analysis_callable():
     assert "ORDER_REPORT_VERSION 3" not in pe
     # the Phase-1 comparator may not be the frozen path
     assert "scramble_terminal_distribution" not in pe
-    # and the frozen bounds it consumes are named in the identity
+    # and the frozen bounds it consumes are named in the identity — including
+    # the a-004 fitness criteria, which gate design fitness before execution
     for k in ("min_detectable_effect", "max_surviving_delta",
               "noise_floor_split", "bootstrap_seed", "sham_equivalence_margin",
-              "permutation_iterations", "permutation_seed", "alpha"):
+              "permutation_iterations", "permutation_seed", "alpha",
+              "power_target", "type_i_criterion"):
         assert k in pe, k
 
 
@@ -209,28 +224,36 @@ def test_new_bounds_are_frozen_with_the_right_types():
     msd = pd["max_surviving_delta"]
     assert msd == 2
     assert isinstance(msd, int) and not isinstance(msd, bool) and msd >= 0
+    # a-004: the HONEST measured MDE — 0.35, the smallest grid effect whose
+    # measured power CP-95 lower bound reached power_target (0.25 measured
+    # 0.757 < 0.8 and was NOT kept to look better)
     mde = pd["thresholds"]["min_detectable_effect"]
-    assert mde == 0.25
+    assert mde == 0.35
     assert isinstance(mde, float) and 0 < mde <= 1
 
 
 def test_new_bounds_load_through_the_single_thresholds_bundle():
     """Every bound the execution/report path needs comes out of ONE frozen
     read. A bound the caller has to assemble separately is a bound the caller
-    can omit — which is exactly how the balance gate got skipped."""
+    can omit — which is exactly how the balance gate got skipped. The a-004
+    fitness criteria travel in the SAME bundle: production loaders expose
+    them, so the characterisation cannot invent its own."""
     bundle = load_thresholds(REGISTRY, EID)
-    assert bundle["min_detectable_effect"] == 0.25
+    assert bundle["min_detectable_effect"] == 0.35
     assert bundle["sham_equivalence_margin"] == 0.25
     assert bundle["max_surviving_delta"] == 2
     assert bundle["bootstrap_iterations"] == 10000
     assert bundle["bootstrap_seed"] == 20260719
     assert bundle["confidence"] == 0.95
     assert bundle["noise_floor_split"] == {"S1": S1, "S2": S2}
+    assert bundle["power_target"] == 0.8
+    assert bundle["type_i_criterion"] == M8_TYPE_I_CRITERION
     assert set(bundle) == {"bootstrap_iterations", "bootstrap_seed",
                            "confidence", "min_detectable_effect",
                            "sham_equivalence_margin",
                            "permutation_iterations", "permutation_seed",
-                           "alpha", "noise_floor_split", "max_surviving_delta"}
+                           "alpha", "noise_floor_split", "max_surviving_delta",
+                           "power_target", "type_i_criterion"}
 
 
 @pytest.mark.parametrize("label,mutate,needle", [
@@ -435,16 +458,22 @@ def test_load_thresholds_returns_frozen_values():
     `max_surviving_delta` is joined in for the same reason (audit repair R1c):
     it bounds differential provider DROPOUT, a property of execution rather
     than of the bootstrap, but the report path must not be able to obtain the
-    other bounds without it."""
+    other bounds without it. The a-004 fitness criteria (power_target,
+    type_i_criterion) ride in the same bundle so the committed
+    characterisation is judged against registry-served values, never
+    script-local ones."""
     assert load_thresholds(REGISTRY, EID) == {
         "bootstrap_iterations": 10000,
         "bootstrap_seed": 20260719,
         "confidence": 0.95,
-        "min_detectable_effect": 0.25,
+        "min_detectable_effect": 0.35,
         "sham_equivalence_margin": 0.25,
         "permutation_iterations": 10000,
         "permutation_seed": 20260719,
         "alpha": 0.05,
+        "power_target": 0.8,
+        "type_i_criterion":
+            "CP-95 upper bound of sharp-null rejection rate <= alpha",
         "max_surviving_delta": 2,
         "noise_floor_split": {
             "S1": [2001, 2002, 2003, 2004, 2005, 2006,
@@ -535,6 +564,19 @@ def test_loaders_refuse_a_tampered_design(tmp_path):
          "permutation_seed", 999)),
     ("alpha",
      lambda e: e["planned_design"]["thresholds"].__setitem__("alpha", 0.2)),
+    # a-004: the canonical null and the fitness criteria are design-hashed too
+    ("null_form",
+     lambda e: e["planned_design"].__setitem__("null_form", "marginal")),
+    ("null_statement",
+     lambda e: e["planned_design"].__setitem__(
+         "null_statement", "the distributions look about the same")),
+    ("power_target",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "power_target", 0.5)),
+    ("type_i_criterion",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "type_i_criterion",
+         "CP-95 lower bound of sharp-null rejection rate <= alpha")),
 ])
 def test_moving_a_frozen_quantity_breaks_design_hash(tmp_path, label, mutate):
     """Post-hoc threshold movement is mechanically detectable: every one of
@@ -686,13 +728,16 @@ def test_primary_event_expresses_the_six_clause_ordered_rule():
 
 
 def test_sham_equivalence_margin_is_frozen_with_the_right_type():
+    """a-004: the margin is DELIBERATELY decoupled from min_detectable_effect.
+    Enlarging the margin weakens the sham-adequacy warrant (q_AC < margin
+    becomes easier to grant), so it stays at 0.25 — the smallest
+    contamination scale this program has claimed to police — whatever value
+    the MDE freezes at. It must never silently follow the MDE upward."""
     th = _entry()["planned_design"]["thresholds"]
     sem = th["sham_equivalence_margin"]
     assert sem == 0.25
     assert isinstance(sem, float) and not isinstance(sem, bool)
-    # equal to min_detectable_effect by design (the prereg freezes both at
-    # the same resolving power)
-    assert sem == th["min_detectable_effect"]
+    assert sem <= th["min_detectable_effect"]
 
 
 @pytest.mark.parametrize("label,mutate,needle", [
@@ -852,7 +897,7 @@ def test_config_agrees_with_the_registry_entry():
     assert "order_sensitivity_report" in cfg["primary_event"]
     assert "scramble_terminal_distribution" not in cfg["primary_event"]
     assert cfg["max_surviving_delta"] == pd["max_surviving_delta"] == 2
-    assert cfg["thresholds"]["min_detectable_effect"] == 0.25
+    assert cfg["thresholds"]["min_detectable_effect"] == 0.35
     # audit repair R4: both files also mirror the permutation null's parameters
     assert cfg["thresholds"]["permutation_iterations"] == 10000
     assert cfg["thresholds"]["permutation_seed"] == 20260719
@@ -1094,6 +1139,30 @@ def _set_thresh(key, val):
          MODEL, "e" * 64),
      lambda c: c["model_digests"].__setitem__(MODEL, "e" * 64),
      "model_digests"),
+    # a-004 finding 1: the fitness criteria are profile-anchored — weakening
+    # the power target or flipping the type-I direction refuses on the code
+    # profile even after a clean rehash+mirror
+    ("power_target 0.8 -> 0.5",
+     lambda e: _set_thresh("power_target", 0.5)(e["planned_design"]),
+     _set_thresh("power_target", 0.5), "power_target"),
+    ("type_i_criterion direction flipped to lower-bound",
+     lambda e: _set_thresh(
+         "type_i_criterion",
+         "CP-95 lower bound of sharp-null rejection rate <= alpha")(
+             e["planned_design"]),
+     _set_thresh("type_i_criterion",
+                 "CP-95 lower bound of sharp-null rejection rate <= alpha"),
+     "type_i_criterion"),
+    # a-004 finding 0: the canonical null is profile-anchored the same way
+    ("null_form re-declared marginal",
+     lambda e: e["planned_design"].__setitem__("null_form", "marginal"),
+     lambda c: c.__setitem__("null_form", "marginal"), "null_form"),
+    ("null_statement weakened",
+     lambda e: e["planned_design"].__setitem__(
+         "null_statement", "the A and B distributions are equal"),
+     lambda c: c.__setitem__(
+         "null_statement", "the A and B distributions are equal"),
+     "null_statement"),
 ])
 def test_rehash_and_mirror_attack_fails_both_lints(tmp_path, label,
                                                    reg_mutate, cfg_mutate,
@@ -1118,13 +1187,166 @@ def test_profile_constant_matches_the_shipped_design():
     pd = _entry()["planned_design"]
     for key in ("max_surviving_delta", "sampler_seeds", "noise_floor_split",
                 "scenario_seeds", "temperature", "arbitration",
-                "model_digests"):
+                "model_digests", "null_form", "null_statement"):
         assert pd[key] == M8_FROZEN_PROFILE[key], key
     for k, v in M8_FROZEN_PROFILE["admissibility_policy"].items():
         assert pd["admissibility_policy"][k] == v, k
     for k, v in M8_FROZEN_PROFILE["thresholds"].items():
         assert pd["thresholds"][k] == v, k
     assert M8_FROZEN_PROFILE["model_digests"] == {MODEL: DIGEST}
+    # a-004: the profile anchors the canonical null and both fitness criteria
+    assert M8_FROZEN_PROFILE["null_form"] == "sharp"
+    assert M8_FROZEN_PROFILE["null_statement"] == M8_NULL_STATEMENT
+    assert M8_FROZEN_PROFILE["thresholds"]["power_target"] == 0.8
+    assert M8_FROZEN_PROFILE["thresholds"]["type_i_criterion"] == \
+        M8_TYPE_I_CRITERION
+
+
+# --------------------- a-004 finding 0: ONE null everywhere, mechanically
+
+def test_canonical_null_statement_is_mirrored_across_every_surface():
+    """The exact canonical statement — not a paraphrase — appears in the
+    registry hypothesis, the registry primary_event, the committed config,
+    the preregistration document, and the operating-characteristics script.
+    A surface that answers a different hypothesis is unauditable."""
+    pd = _entry()["planned_design"]
+    cfg = _config()
+    assert pd["null_statement"] == M8_NULL_STATEMENT
+    assert cfg["null_form"] == "sharp"
+    assert cfg["null_statement"] == M8_NULL_STATEMENT
+    assert M8_NULL_STATEMENT in pd["hypothesis"]
+    assert M8_NULL_STATEMENT in pd["primary_event"]
+    assert M8_NULL_STATEMENT in cfg["primary_event"]
+    with open(PREREG_DOC, encoding="utf-8") as fh:
+        prereg = fh.read()
+    assert M8_NULL_STATEMENT in prereg
+    with open(OC_SCRIPT, encoding="utf-8") as fh:
+        script = fh.read()
+    # the statement is line-wrapped in source; compare whitespace-normalized.
+    # The script ALSO asserts runtime equality against the audited anchor at
+    # import time (CANONICAL_NULL_STATEMENT == M8_NULL_STATEMENT), which the
+    # operating-characteristics test module exercises by importing it.
+    assert M8_NULL_STATEMENT in " ".join(script.split())
+
+
+def test_the_marginal_null_is_nowhere_the_operative_hypothesis():
+    """The a-004 blocker: the registry hypothesis stated marginal
+    P(Y|A)=P(Y|B) while the rule tested the sharp null. The hypothesis now
+    leads with the canonical sharp statement, and every mention of marginal
+    equality in the frozen surfaces marks it a consequence, never the
+    operative null."""
+    pd = _entry()["planned_design"]
+    hyp = pd["hypothesis"]
+    # the hypothesis leads with the canonical sharp null
+    assert hyp.index("Sharp (unit-level) null") < hyp.index("P(Y|A)")
+    assert "CONSEQUENCE" in hyp and "never the operative" in hyp
+    # the old marginal-first hypothesis phrasing is gone
+    assert "is unchanged A vs B" not in hyp
+    assert "never the operative hypothesis" in pd["primary_event"]
+
+
+def test_prereg_doc_pins_exactly_one_callable_version_literal():
+    """a-004 finding 0 evidence: the prereg simultaneously named
+    ORDER_REPORT_VERSION 3 and 4. One literal now, everywhere."""
+    with open(PREREG_DOC, encoding="utf-8") as fh:
+        prereg = fh.read()
+    assert "ORDER_REPORT_VERSION 4" in prereg
+    for stale in ("ORDER_REPORT_VERSION 1", "ORDER_REPORT_VERSION 2",
+                  "ORDER_REPORT_VERSION 3", "ORDER_REPORT_VERSION 5"):
+        assert stale not in prereg, stale
+
+
+@pytest.mark.parametrize("label,mutate,needle", [
+    ("null_form omitted",
+     lambda e: e["planned_design"].pop("null_form"), "null_form"),
+    ("null_form marginal",
+     lambda e: e["planned_design"].__setitem__("null_form", "marginal"),
+     "null_form"),
+    ("null_statement omitted",
+     lambda e: e["planned_design"].pop("null_statement"), "null_statement"),
+    ("null_statement empty",
+     lambda e: e["planned_design"].__setitem__("null_statement", "  "),
+     "null_statement"),
+])
+def test_a_design_without_the_canonical_null_fails_the_lint(tmp_path, label,
+                                                            mutate, needle):
+    path = _rehashed(tmp_path, mutate)
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any(needle in i for i in issues), f"{label}: {issues}"
+
+
+def test_a_hypothesis_that_paraphrases_the_null_fails_the_lint(tmp_path):
+    """VERBATIM means verbatim: a hypothesis restating the null in different
+    words is a second null. The lint requires the canonical statement itself
+    inside both the hypothesis and the decision rule."""
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"].__setitem__(
+            "hypothesis",
+            "H0: order does not matter for any unit; H1: it does."))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any("hypothesis does not contain the canonical" in i
+               for i in issues), issues
+
+
+def test_a_rule_that_drops_the_canonical_null_fails_the_lint(tmp_path):
+    pe = _entry()["planned_design"]["primary_event"]
+    stripped = pe.replace(M8_NULL_STATEMENT, "the null of this design")
+    assert M8_NULL_STATEMENT not in stripped
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"].__setitem__(
+            "primary_event", stripped))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any("primary_event does not contain the" in i for i in issues), \
+        issues
+
+
+# ------------- a-004 finding 1: fitness criteria frozen, honest directions
+
+@pytest.mark.parametrize("label,mutate,needle", [
+    ("power_target omitted",
+     lambda e: e["planned_design"]["thresholds"].pop("power_target"),
+     "power_target"),
+    ("power_target zero",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "power_target", 0.0), "power_target"),
+    ("power_target at alpha (indistinguishable from the FP floor)",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "power_target", 0.05), "power_target"),
+    ("power_target above 1",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "power_target", 1.5), "power_target"),
+    ("type_i_criterion omitted",
+     lambda e: e["planned_design"]["thresholds"].pop("type_i_criterion"),
+     "type_i_criterion"),
+    ("type_i_criterion empty",
+     lambda e: e["planned_design"]["thresholds"].__setitem__(
+         "type_i_criterion", ""), "type_i_criterion"),
+])
+def test_missing_or_degenerate_fitness_criteria_are_refused(tmp_path, label,
+                                                            mutate, needle):
+    path = _rehashed(tmp_path, mutate)
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any(needle in i for i in issues), f"{label}: {issues}"
+
+
+def test_the_lower_bound_type_i_direction_is_refused(tmp_path):
+    """THE DIRECTION IS THE FINDING: a lower-bound non-excess check tests
+    only whether a rate materially ABOVE alpha was demonstrated — it cannot
+    support an at-or-below-alpha claim. The superseded direction must fail
+    the lint independently of the profile mismatch."""
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"]["thresholds"].__setitem__(
+            "type_i_criterion",
+            "CP-95 lower bound of sharp-null rejection rate <= alpha"))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any("SUPERSEDED lower-bound direction" in i for i in issues), \
+        issues
+    # and a criterion that names no upper bound at all is equally refused
+    path = _rehashed(
+        tmp_path, lambda e: e["planned_design"]["thresholds"].__setitem__(
+            "type_i_criterion", "rejection rate looks fine near alpha"))
+    issues = _m8_issues(lint_experiments_registry(path, ROOT))
+    assert any("does not bound the UPPER" in i for i in issues), issues
 
 
 # ------------------------------------------------------ Phase-1 stays untouched

@@ -110,13 +110,20 @@ def test_the_frozen_bounds_come_from_the_design_not_the_caller():
     thresholds = load_thresholds(REGISTRY, EID)
     assert policy["on_violation"] == "refuse"
     assert policy["max_non_decision_rate"] == 0.20
-    assert thresholds["min_detectable_effect"] == 0.25
+    # MDE re-frozen to the MEASURED-honest value (C1 re-freeze, audit a-004
+    # finding 1): the OC power study showed CP-95 lower-bound power reaches the
+    # 0.8 target at TV=0.35, not 0.25 (where the point estimate was 0.800 but
+    # the lower bound 0.757 fell short). 0.35 is the smallest effect this design
+    # can reliably detect.
+    assert thresholds["min_detectable_effect"] == 0.35
     # the decision quantile must not be silently reusable as the reporting
     # interval, so the two live under separate frozen keys
     assert thresholds["alpha"] == 0.05
     assert thresholds["confidence"] == 0.95
     # v4 REQUIRED keys, frozen in the same design-hashed bundle: the sham
-    # non-rejection's equivalence warrant and the dropout bound
+    # non-rejection's equivalence warrant (held intentionally TIGHTER than the
+    # MDE — the sham must exclude contamination at finer resolution than the
+    # order effect we claim to detect) and the dropout bound
     assert thresholds["sham_equivalence_margin"] == 0.25
     assert thresholds["max_surviving_delta"] == 2
 

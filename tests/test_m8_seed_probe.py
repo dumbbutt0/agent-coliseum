@@ -10,15 +10,22 @@ Every test here is offline: `_post` is monkeypatched and no real server is ever
 contacted.
 """
 
-import pytest
+import json
+import os
 
-from coliseum.textlab.agents import (PLANNER_BUDGET, SEED_PROBE_ALT_SEED_OFFSET,
+import pytest
+import yaml
+
+from coliseum.textlab.agents import (M8_DECODER_CONTROLS, PLANNER_BUDGET,
+                                     SEED_PROBE_ALT_SEED_OFFSET,
                                      SEED_PROBE_PROMPT, LLMAgent, MockLLMAgent,
                                      OllamaAgent, agent_config_hash)
-from coliseum.textlab.schema import SchemaError, config_hash
+from coliseum.textlab.schema import (SchemaError, build_behavioral_config,
+                                     config_hash, regime_hashes)
 
 STOCH = {"mode": "stochastic", "temperature": 0.7}
 DETERM = {"mode": "deterministic", "temperature": 0}
+M8_SAMPLING = {"mode": "stochastic", "temperature": 0.7}
 
 
 def _build(monkeypatch, responder):
@@ -289,3 +296,141 @@ def test_replay_agent_still_cannot_contact_a_provider():
     replay = agent_from_manifest(manifest)
     with pytest.raises(SchemaError):
         replay._generate("anything", PLANNER_BUDGET)
+
+
+# -- b-002 finding f0: the model regime freezes EVERY decoder control ---------
+#
+# f0 reproduced a hole: with only temperature, num_predict, and seed sent, two
+# hosts with the same digest/backend but a different EFFECTIVE CONTEXT LENGTH
+# executed and pooled under one agent_regime_id. The regime now sends and hashes
+# every output-distribution knob, and resolves the effective num_ctx before the
+# hash. These tests are the minimum_regression: exact emitted options + per-
+# control lineage sensitivity + provenance-gate refusal of a substitution.
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REGISTRY = os.path.join(_REPO, "configs", "registry", "experiments.yaml")
+_M8_CONFIG = os.path.join(
+    _REPO, "configs", "experiments",
+    "m8-phase2-live-order-sensitivity.experiment.json")
+
+
+def _agent_regime_id(agent):
+    """The agent-side regime hash the twin pairing keys on — num_ctx and every
+    frozen decoder control must move it."""
+    bc = build_behavioral_config(
+        "scramble_dev_m8", "shash", agent.spec_dict(),
+        "planner_priority", "2", M8_SAMPLING,
+        interaction_mode="sequential_history",
+        history_template_version="1", history_template_hash="deadbeef")
+    return regime_hashes(bc)[1]
+
+
+def test_scenario_request_emits_every_frozen_decoder_control(monkeypatch):
+    """The EXACT options an M8 scenario request sends carry every frozen decoder
+    control at its frozen value — num_ctx included. No knob is left to a backend
+    default."""
+    agent = _build(monkeypatch, lambda seed, n: "x")
+    agent.configure_sampling(M8_SAMPLING, 2001)
+    opts = agent._options(PLANNER_BUDGET["num_predict"])
+    assert opts == {"temperature": 0.7, "num_predict": 350,
+                    "top_p": 0.9, "top_k": 40, "repeat_penalty": 1.1,
+                    "num_ctx": 8192, "stop": [], "seed": 2001}
+    for k, v in M8_DECODER_CONTROLS.items():
+        assert opts[k] == v, k
+    # and the hashed spec carries the same controls (via sampling)
+    assert agent.spec_dict()["sampling"]["num_ctx"] == 8192
+
+
+def test_each_decoder_control_moves_the_agent_regime_id(monkeypatch):
+    """Vary each frozen control independently: the lineage hash cannot stay
+    equal across the change (this is what pooling under one regime id would
+    require)."""
+    agent = _build(monkeypatch, lambda seed, n: "x")
+    agent.configure_sampling(M8_SAMPLING, 2001)
+    base = _agent_regime_id(agent)
+    for k, alt in [("num_ctx", 4096), ("top_p", 0.8), ("top_k", 50),
+                   ("repeat_penalty", 1.2), ("stop", ["END"])]:
+        saved = agent.sampling[k]
+        agent.sampling[k] = alt
+        assert _agent_regime_id(agent) != base, k
+        agent.sampling[k] = saved
+    assert _agent_regime_id(agent) == base           # exact restoration
+
+
+def test_effective_context_length_is_resolved_before_hashing(monkeypatch):
+    """Two hosts with the SAME digest and backend version but different model
+    context capabilities resolve to different EFFECTIVE num_ctx before the
+    regime is hashed, so the one that must clamp can never pool with the one
+    that honors the full request — resolved exactly like think-mode/
+    backend_version, before the hash."""
+    def resolved_host(cap):
+        agent = _build(monkeypatch, lambda seed, n: "x")
+        agent.configure_sampling(M8_SAMPLING, 2001)
+        # same requested num_ctx (8192) for both; only the backend capability
+        # differs, so any regime-id split is due to the RESOLVED context length
+        monkeypatch.setattr(OllamaAgent, "_effective_num_ctx",
+                            lambda self, req, _cap=cap: min(req, _cap))
+        agent.resolve_effective_config()
+        return agent
+
+    full_host = resolved_host(32768)     # capability >= request -> stays 8192
+    small_host = resolved_host(4096)     # capability < request  -> clamped 4096
+    assert full_host.sampling["num_ctx"] == 8192
+    assert small_host.sampling["num_ctx"] == 4096
+    # same backend_version on both (0.9.9), so the ONLY difference is num_ctx
+    assert full_host.backend_version == small_host.backend_version == "0.9.9"
+    assert _agent_regime_id(full_host) != _agent_regime_id(small_host)
+
+
+def test_effective_num_ctx_falls_back_to_requested_when_unreachable(monkeypatch):
+    """An unreachable /api/show never silently drops num_ctx — it resolves to
+    the requested value, which the agent still sends explicitly (never a backend
+    default)."""
+    import urllib.request
+    agent = _build(monkeypatch, lambda seed, n: "x")
+    agent.configure_sampling(M8_SAMPLING, 2001)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    assert agent._effective_num_ctx(8192) == 8192
+
+
+def test_provenance_lint_refuses_a_decoder_control_substitution(tmp_path):
+    """Vary a control in the committed config: the provenance gate refuses it —
+    both because the config no longer realizes the frozen design and because the
+    audited code profile pins num_ctx independently of design_hash."""
+    from coliseum.textlab.registry import lint_experiment_config
+    cfg = json.load(open(_M8_CONFIG))
+    cfg["decoder_controls"] = dict(cfg["decoder_controls"], num_ctx=4096)
+    p = tmp_path / "substituted.experiment.json"
+    p.write_text(json.dumps(cfg))
+    issues = lint_experiment_config(str(p), _REGISTRY, _REPO)
+    assert any("decoder_controls" in i for i in issues), issues
+    assert any("num_ctx" in i and "4096" in i for i in issues), issues
+
+
+def test_mutate_rehash_mirror_attack_on_decoder_controls_is_refused(tmp_path):
+    """The strongest form: weaken num_ctx in BOTH the design and the config,
+    recompute design_hash, and mirror it so every pairwise equality passes. The
+    audited-code profile (registry.M8_FROZEN_PROFILE) still refuses, because it
+    is not derived from the artifact being checked."""
+    from coliseum.textlab.registry import (design_hash, lint_experiment_config,
+                                           lint_experiments_registry)
+    raw = yaml.safe_load(open(_REGISTRY))
+    e = next(x for x in raw["experiments"]
+             if x["experiment_id"] == "m8-phase2-live-order-sensitivity")
+    e["planned_design"]["decoder_controls"]["num_ctx"] = 4096   # weaken
+    e["design_hash"] = design_hash(e["planned_design"])         # attacker rehash
+    reg = tmp_path / "experiments.yaml"
+    reg.write_text(yaml.safe_dump(raw))
+    cfg = json.load(open(_M8_CONFIG))
+    cfg["decoder_controls"]["num_ctx"] = 4096                   # mirror
+    cfg["design_hash"] = e["design_hash"]
+    cfgp = tmp_path / "mirrored.experiment.json"
+    cfgp.write_text(json.dumps(cfg))
+    # hash reconstruction now passes; the audited-code profile does not
+    issues = lint_experiment_config(str(cfgp), str(reg), _REPO)
+    assert any("audited frozen" in i and "num_ctx" in i for i in issues), issues
+    reg_issues = [i for i in lint_experiments_registry(str(reg), _REPO)
+                  if "m8-phase2" in i]
+    assert any("audited frozen" in i and "num_ctx" in i for i in reg_issues), \
+        reg_issues

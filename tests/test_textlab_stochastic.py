@@ -71,6 +71,15 @@ def test_sampler_seed_reaches_backend_payload(tmp_path):
     caps = [json.loads(l) for l in open(os.path.join(r.run_dir, "captures.jsonl"))]
     assert caps and all(c["backend_payload"]["options"]["seed"] == 77 for c in caps)
     assert all(c["backend_payload"]["options"]["temperature"] == 0.7 for c in caps)
+    # b-002 finding f0: the frozen Ollama decoder controls (num_ctx/top_p/...)
+    # are scoped to OllamaAgent — a MOCK (non-ollama) run never carries them, so
+    # its sampling, spec_dict, and run_id are byte-unchanged by the f0 fix and
+    # Phase-1 mock evidence still regenerates identically.
+    run = json.load(open(os.path.join(r.run_dir, "run.json")))
+    for k in ("num_ctx", "top_p", "top_k", "repeat_penalty", "stop"):
+        assert k not in run["sampling"], k
+        assert k not in run["agent_config"]["sampling"], k
+        assert all(k not in c["backend_payload"]["options"] for c in caps), k
     run = json.load(open(os.path.join(r.run_dir, "run.json")))
     assert run["sampler_seed"] == 77
     assert run["sampling"]["mode"] == "stochastic"

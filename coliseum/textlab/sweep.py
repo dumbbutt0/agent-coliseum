@@ -301,6 +301,37 @@ def manifest_load(path: str, out_root: str) -> dict:
     return done
 
 
+def _tombstone_path(manifest_path: str) -> str:
+    """The durable per-cell failure ledger, colocated with the manifest it
+    resumes against."""
+    return manifest_path + ".tombstones.jsonl"
+
+
+def tombstone_load(manifest_path: str) -> dict:
+    """(regime_id, scenario_seed, sampler_seed) -> tombstone row for every cell a
+    prior retries_per_unit=0 sweep attempted and FAILED (audit b-002 finding 1).
+
+    A tombstone is a DURABLE TYPED FAILURE: under retries_per_unit=0 a failed
+    unit is a terminal outcome, never a re-roll, so resume must never re-attempt
+    a key that carries one. Absent ledger -> no tombstones (a resume that never
+    opted in behaves exactly as before). Keyed on the SAME resume identity as the
+    manifest, so a manifested success and a tombstone can never target one key
+    without contradicting each other."""
+    done = {}
+    path = _tombstone_path(manifest_path)
+    if not os.path.exists(path):
+        return done
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            key = (rec["regime_id"], rec["scenario_seed"], rec["sampler_seed"])
+            done[key] = rec
+    return done
+
+
 def resolve_sampling(temperature: float, sampler_seeds):
     """(sampling, sampler_seeds, mode) from the temperature/seed pair, with the
     same validation both entrypoints must pass before any run."""
@@ -326,6 +357,14 @@ class SweepResult:
         self.digests = {}           # model -> pinned digest actually served
         self.skipped_resumed = 0    # rows already present in the manifest
         self.errors = []            # (scenario, seed, sampler_seed, message)
+        # ---- m8 Phase 2, audit b-002 finding 1 (retries_per_unit=0). Durable
+        # per-cell failure tombstones: a failed unit is a typed outcome, never a
+        # re-roll. `tombstoned_resumed` counts cells skipped this call because a
+        # prior call already recorded their failure; `tombstones_written` counts
+        # new failure tombstones persisted this call. Both stay 0 unless the
+        # caller opts into retries_per_unit=0, so default sweeps are unchanged.
+        self.tombstoned_resumed = 0
+        self.tombstones_written = 0
         # ---- m8 Phase 2 additions. A condition key is (model, scenario): the
         # A/B/C conditions of the frozen design are scenarios, but two models in
         # one sweep are two separate comparisons and must never be pooled.
@@ -412,7 +451,8 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
               expected_digests: dict | None = None, progress=None,
               execution_order: str = "blocked",
               record_execution_index: bool | None = None,
-              max_surviving_delta: int | None = None) -> SweepResult:
+              max_surviving_delta: int | None = None,
+              retries_per_unit: int | None = None) -> SweepResult:
     """Execute (models x scenarios x scenario-seeds x sampler-seeds), appending
     validated rows to spec['manifest'] and resuming past rows already present.
 
@@ -439,8 +479,24 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     `max_surviving_delta` runs the fail-closed balance gate at the end of the
     sweep (see SweepResult.check_condition_balance) and raises SweepUnbalanced
     rather than returning a pack whose conditions lost unequal numbers of runs.
-    Failed runs are still recorded in `result.errors` and never erased."""
+    Failed runs are still recorded in `result.errors` and never erased.
+
+    `retries_per_unit` (audit b-002 finding 1) enforces the frozen
+    one-effective-unit contract. Default None keeps today's behaviour: a failed
+    cell is recorded only in memory, so a later resume re-attempts it. Passing 0
+    — the frozen M8 design's declared value — persists a DURABLE typed failure
+    tombstone for every failed cell (see tombstone_load) and honours it on
+    resume: a completed-or-failed unit is NEVER re-attempted, so no provider call
+    can re-roll a failure into a success. It is opt-in and writes a separate
+    ledger file, so a default sweep's manifest regenerates byte-for-byte."""
     say = progress or (lambda *_a, **_k: None)
+    if retries_per_unit is not None and (isinstance(retries_per_unit, bool)
+                                         or retries_per_unit != 0):
+        raise SweepAborted(
+            f"retries_per_unit={retries_per_unit!r} is not supported — the "
+            "frozen design declares retries_per_unit=0 (a failed unit is a typed "
+            "outcome, never a re-roll); pass 0 to enforce durable tombstones or "
+            "None to retain the historical re-attempt-on-resume behaviour")
     sampling, sampler_seeds, mode = resolve_sampling(
         spec.get("temperature", 0.0), spec.get("sampler_seeds"))
     arbitration = spec.get("arbitration", "planner_priority")
@@ -505,6 +561,16 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
     os.makedirs(out_root, exist_ok=True)
     done = manifest_load(manifest_path, out_root)
+    # audit b-002 finding 1: under retries_per_unit=0, load durable failure
+    # tombstones so a resume never re-attempts a cell a prior call already
+    # failed. Absent/None -> empty, so default sweeps are untouched.
+    tombstoned = tombstone_load(manifest_path) if retries_per_unit == 0 else {}
+    tomb_path = _tombstone_path(manifest_path)
+
+    def _write_tombstone(row: dict) -> None:
+        with open(tomb_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+            fh.flush()
 
     total = len(spec["models"]) * len(scenarios) * len(seeds) * len(sampler_seeds)
     say(f"sweep[{mode}|{interaction}]: {len(spec['models'])} models x "
@@ -542,12 +608,28 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
             for scenario_name, scenario_seed, sampler_seed in order:
                 path, regime_id = _ctx(scenario_name)
                 cond = result._condition((model, scenario_name))
-                if (regime_id, scenario_seed, sampler_seed) in done:
+                unit_key = (regime_id, scenario_seed, sampler_seed)
+                if unit_key in done:
                     result.skipped_resumed += 1
                     # already-recorded evidence still counts as a survivor of
                     # its condition, otherwise a resumed pack looks unbalanced
                     result.resumed[cond] += 1
                     result.surviving[cond] += 1
+                    continue
+                if retries_per_unit == 0 and unit_key in tombstoned:
+                    # audit b-002 finding 1: a durable prior failure. retries_per
+                    # _unit=0 forbids a re-roll, so this cell is NOT attempted
+                    # again — its typed failure is re-registered as the same
+                    # dropout it was, and no provider is contacted.
+                    kind = tombstoned[unit_key].get("failure_kind", "other")
+                    result.dropouts[cond][kind] += 1
+                    result.tombstoned_resumed += 1
+                    result.execution_log.append(
+                        {"execution_index": len(result.execution_log),
+                         "model": model, "scenario": scenario_name,
+                         "scenario_seed": scenario_seed,
+                         "sampler_seed": sampler_seed,
+                         "status": "failed_tombstoned", "failure_kind": kind})
                     continue
                 if _deadline_hit():
                     raise SweepAborted(
@@ -573,6 +655,20 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                     result.errors.append(
                         (scenario_name, scenario_seed, sampler_seed,
                          f"{e.__class__.__name__}: {e}"))
+                    if retries_per_unit == 0:
+                        # audit b-002 finding 1: persist the typed failure so a
+                        # resume can never re-roll this unit into a success.
+                        _write_tombstone({
+                            "regime_id": regime_id, "model": model,
+                            "scenario": scenario_name,
+                            "scenario_seed": scenario_seed,
+                            "sampler_seed": sampler_seed,
+                            "failure_kind": kind,
+                            "error": f"{e.__class__.__name__}: {e}",
+                            "recorded_utc": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                        tombstoned[unit_key] = {"failure_kind": kind}
+                        result.tombstones_written += 1
                     say(f"  !! {scenario_name} s{scenario_seed} "
                         f"k{sampler_seed}: {e.__class__.__name__}: {e}")
                     continue

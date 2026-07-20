@@ -1155,9 +1155,13 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
     functional of the same-sized samples, so the small-sample inflation is shared
     and cancels out of the comparison instead of accumulating in the threshold.
 
-    Units admissible in only ONE condition cannot be exchanged (there is nothing
-    to exchange them with); they are held FIXED in their own condition across
-    every iteration, which preserves the observed cell sizes exactly.
+    v4 (audit d-002 finding 0): a unit admissible in only ONE compared condition
+    is NEVER held fixed on this frozen M8 path. The matched-unit gate refuses
+    pre-statistics unless every one of the frozen matched units carries an
+    admissible draw on BOTH sides, so by the time control reaches here the only
+    units outside `shared` are non-decisions (empty draw lists) that contribute
+    nothing. An admissible unmatched unit reaching this function is a gate breach
+    and REFUSES rather than padding one condition's mass with a held-fixed pair.
 
     `rng` is a caller-owned random.Random seeded from the frozen permutation seed.
     Iteration order over units is fixed, so the quantile is byte-reproducible.
@@ -1165,24 +1169,25 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
     shared = sorted((u for u in units_x if units_x[u] and units_y.get(u)), key=repr)
     shared_set = set(shared)
 
-    def fixed(units):
-        counts: dict = {}
-        total = 0
+    # The held-fixed behavior is REMOVED (audit d-002 finding 0): an unmatched
+    # unit that still carries admissible draws must never enter the null. Only
+    # non-decision units (empty draws) may sit outside `shared`, and they add no
+    # mass to either condition.
+    for units in (units_x, units_y):
         for unit, draws in units.items():
-            if unit in shared_set:
+            if unit in shared_set or not draws:
                 continue
-            for action in draws:
-                counts[action] = counts.get(action, 0) + 1
-                total += 1
-        return counts, total
-
-    fx, tx = fixed(units_x)
-    fy, ty = fixed(units_y)
+            raise SchemaError(
+                "_order_permutation_null: unit "
+                f"{unit!r} carries admissible draws in one compared condition "
+                "but is unmatched in the other; the frozen M8 paired null never "
+                "holds an unmatched admissible unit fixed — the matched-unit "
+                "grid gate must refuse before any permutation is computed")
 
     reps = []
     for _ in range(iterations):
-        cx, cy = dict(fx), dict(fy)
-        nx, ny = tx, ty
+        cx, cy = {}, {}
+        nx = ny = 0
         for unit in shared:
             dx, dy = units_x[unit], units_y[unit]
             if rng.random() < 0.5:
@@ -1208,7 +1213,8 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
 def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                              admissibility_policy: dict, thresholds: dict,
                              replay_attestation: dict, terminal_dp_id: str,
-                             surviving_counts: dict | None = None) -> dict:
+                             surviving_counts: dict | None = None,
+                             retries_per_unit: int | None = None) -> dict:
     """Distributional order-sensitivity report for the m8 Phase-2 live experiment.
 
     Versioned successor to `scramble_terminal_distribution` (which is UNCHANGED
@@ -1314,6 +1320,23 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         raise SchemaError("terminal_dp_id must be a non-empty string — the "
                           "measured probe's identity is part of the frozen "
                           "design and may not be defaulted or inferred")
+    # v4 (audit b-002 finding 1): `retries_per_unit` enforces the frozen
+    # one-effective-unit contract on the ANALYSIS side. Default None keeps the
+    # general replicate-aggregation behaviour (many draws per unit pool into the
+    # cell distribution); passing 0 — the frozen M8 design's declared value —
+    # admits exactly ONE canonical observation per effective unit: identical
+    # duplicate run dirs for the same (variant, scenario_seed, sampler_seed)
+    # deduplicate to byte-identical statistics, and CONFLICTING duplicates
+    # refuse rather than silently reweighting the distribution. This is opt-in
+    # so scripted Phase-1 regeneration and the general replicate contract are
+    # both unchanged; the frozen entrypoint loads 0 from the design.
+    if retries_per_unit is not None and (isinstance(retries_per_unit, bool)
+                                         or retries_per_unit != 0):
+        raise SchemaError(
+            f"retries_per_unit={retries_per_unit!r} is not supported — the "
+            "frozen design declares retries_per_unit=0 (one canonical "
+            "observation per effective unit); pass 0 to enforce it or None to "
+            "retain general replicate aggregation")
     if surviving_counts is not None:
         if not isinstance(surviving_counts, dict):
             raise SchemaError("surviving_counts must be a mapping "
@@ -1352,6 +1375,11 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     regime_by_agent: dict = {}
     excluded: list = []
     replay_verified_n = 0
+    # v4 (audit b-002 finding 1): the one-canonical-observation ledger, active
+    # only under retries_per_unit=0. Maps (agent_id, base_condition, unit) to the
+    # unit's single admitted outcome so a duplicate run dir for the same frozen
+    # cell deduplicates (identical) or refuses (conflicting), never reweighting.
+    canonical: dict = {}
     for rd in sorted(run_dirs):
         report_id = os.path.basename(os.path.normpath(rd))
         with open(os.path.join(rd, "run.json"), encoding="utf-8") as fh:
@@ -1397,6 +1425,36 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         terminal = _order_terminal_probe(nodes, terminal_dp_id, rd)
         verdict = decision_admissibility(terminal)
         unit = (run["variant_id"], run.get("scenario_seed"), run.get("sampler_seed"))
+
+        # v4 (audit b-002 finding 1): under the frozen retries_per_unit=0
+        # contract, a second run dir for a cell already observed is a resume
+        # re-roll, not new evidence. An identical duplicate deduplicates
+        # (skipped, so the distribution is byte-identical to the single-attempt
+        # pack); a conflicting duplicate REFUSES before any statistic rather than
+        # pooling both observations and moving the distribution.
+        if retries_per_unit == 0:
+            ckey = (agent_id, cond, unit)
+            outcome = (("admissible", terminal["final_action"])
+                       if verdict["admissible"]
+                       else ("non_decision", verdict["reason"]))
+            prev = canonical.get(ckey)
+            if prev is not None:
+                if prev == outcome:
+                    # identical duplicate: canonical dedup. It was replay-verified
+                    # above but contributes NOTHING, so it is not counted as
+                    # evidence — the report is byte-identical to the single pack.
+                    replay_verified_n -= 1
+                    continue
+                raise SchemaError(
+                    "order-sensitivity aggregator REFUSES pre-statistics: "
+                    f"duplicate_effective_unit — {agent_id}|{cond} unit "
+                    f"{unit!r} has CONFLICTING observations across duplicate "
+                    f"run dirs ({prev} vs {outcome}); retries_per_unit=0 admits "
+                    "exactly one canonical observation per effective unit and "
+                    "refuses conflicting duplicates rather than silently "
+                    "reweighting the distribution — a refusal is an "
+                    "inconclusive result, not a number to interpret")
+            canonical[ckey] = outcome
 
         cells = per_agent.setdefault(agent_id, {})
         targets = [cond]
@@ -1568,9 +1626,16 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                             "realized before the paired permutation null "
                             "decides anything")
             required = len(frozen_seeds) * len(groups)
+            # matched_units is the ADMISSIBLE paired count (audit d-002 finding
+            # 0), not a placeholder echo of `required`: a unit present as a
+            # non-decision (empty draws) is NOT a matched pair. The admissible
+            # matched-pair gate below refuses unless these equal `required`.
+            adm = {label: {u for u, d in cells[label]["units"].items() if d}
+                          if label in cells else set()
+                   for label in cond_labels}
             body["per_agent"][agent_id]["matched_unit_grid"] = {
                 "required_matched_units": required,
-                "matched_units": {f"A|{other}": required
+                "matched_units": {f"A|{other}": len(adm["A"] & adm[other])
                                   for other in cond_labels if other != "A"},
                 "derivation": ("|S1 ∪ S2| × #(variant, scenario_seed) groups — "
                                "the noise-floor split partitions the frozen "
@@ -1623,6 +1688,40 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         exc.report = body
         raise exc
 
+    # ---- clause 0 (v4), admissible matched-pair count — audit d-002 finding 0.
+    # The matched-unit grid above validates unit-KEY identity; a non-decision
+    # leaves the key present with an EMPTY draw list, so a unit inadmissible in
+    # ONE compared condition — but within every non-decision rate/delta bound —
+    # slipped past both that grid and the policy gates, while
+    # _order_permutation_null silently dropped the pair and held the opposite
+    # condition's action fixed (matched_unit_grid said 48; the permutation paired
+    # 47). A verdict-bearing permutation must pair every one of the frozen
+    # matched units with an ADMISSIBLE draw on BOTH sides. This is charged only
+    # when the frozen sampler-seed grid is declared (its size DERIVES the
+    # required count), it refuses pre-statistics with a typed census when either
+    # comparison falls short, and it never holds an unmatched unit fixed.
+    if frozen_seeds:
+        for agent_id in sorted(per_agent):
+            cells = per_agent[agent_id]
+            adm = {label: {u for u, d in cells[label]["units"].items() if d}
+                          if label in cells else set()
+                   for label in cond_labels}
+            groups = sorted({(v, ss) for lbl in cond_labels
+                             for (v, ss, _k) in adm[lbl]}, key=repr)
+            required_pairs = len(frozen_seeds) * len(groups)
+            for x, y in (("A", "B"), ("A", "C")):
+                paired = len(adm.get(x, set()) & adm.get(y, set()))
+                if paired != required_pairs:
+                    _refuse_pre_statistics(
+                        f"matched_unit_grid — {agent_id}|{x}|{y} pairs {paired} "
+                        f"admissible matched units, not the {required_pairs} "
+                        "required by the frozen grid; a non-decision on one side "
+                        "makes that pair INADMISSIBLE, so the paired permutation "
+                        "null has fewer than the full grid to exchange. Every "
+                        "matched unit must carry an admissible draw on BOTH "
+                        "sides of A|B and A|C and an unmatched unit is never "
+                        "silently held fixed")
+
     # ---- distances, uncertainty, verdict — reached ONLY past the gate -------
     rng = random.Random(thresholds["bootstrap_seed"])
     perm_rng = random.Random(thresholds["permutation_seed"])
@@ -1660,7 +1759,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         tv_ac = out["tv_distances"]["A|C"]
         # RETAINED, DIAGNOSTIC ONLY. TV_null and its bootstrap interval describe
         # within-condition stability across the frozen sampler-seed halves. They
-        # GATE NOTHING at ORDER_REPORT_VERSION 3 and appear in no branch of the
+        # GATE NOTHING at ORDER_REPORT_VERSION 4 and appear in no branch of the
         # rule below — do not reintroduce them into a verdict without
         # re-characterising the design, since comparing a 24-vs-24 distance
         # against a 48-vs-48 statistic is the exact defect v2 exists to remove.
@@ -1669,7 +1768,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             "tv_null_upper": (out["bootstrap"]["null"]["upper"]
                               if "null" in out["bootstrap"] else None),
             "note": ("within-condition stability diagnostic; does not gate any "
-                     "verdict at order_report_version 3"),
+                     "verdict at order_report_version 4"),
         }
         sem = thresholds["sham_equivalence_margin"]
         out["decision_inputs"] = {"tv_ab": tv_ab,

@@ -27,6 +27,7 @@ import re
 
 import yaml
 
+from .agents import M8_DECODER_CONTROLS
 from .schema import SchemaError, canonical_json
 
 EXPERIMENTS_REGISTRY_VERSION = "1"
@@ -70,7 +71,39 @@ ADMISSIBILITY_POLICY_KEYS = (
     "max_non_decision_rate_delta", "min_admissible_effective_n",
     "on_violation")
 THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
-                  "min_detectable_effect", "sham_equivalence_margin")
+                  "min_detectable_effect", "sham_equivalence_margin",
+                  "power_target", "type_i_criterion")
+
+# ------------------------------------------------- the ONE canonical null (a-004)
+#
+# Audit a-004 finding 0: the candidate froze contradictory marginal and sharp
+# nulls — the registry hypothesis stated marginal P(Y|A)=P(Y|B) while the
+# primary_event and preregistration adopted a sharp per-unit null, and the
+# committed operating-characteristics study charged iid equal-marginal packs
+# (which violate the sharp null in every generated trial) as sharp-null type-I
+# arms. There is now exactly ONE canonical, machine-readable null statement,
+# anchored here in audited code and mirrored VERBATIM in planned_design
+# (null_form + null_statement, both design-hashed), the hypothesis, the
+# primary_event, the preregistration document, the committed experiment
+# config, the operating-characteristics script and its committed artifact.
+# Marginal equality P(Y|A)=P(Y|B) is a stated CONSEQUENCE of this null, never
+# the operative hypothesis, and no marginal claim is licensed by a rejection.
+M8_NULL_FORM = "sharp"
+M8_NULL_STATEMENT = (
+    "Sharp (unit-level) null: for every matched effective unit (variant_id, "
+    "scenario_seed, sampler_seed), presentation order made no difference to "
+    "the terminal action chosen at that unit.")
+
+# Audit a-004 finding 1: the fitness criteria that declare the finite-sample
+# design fit to run were invented inside the un-hashed simulation script (a
+# power floor of merely 'CP lower bound > 0.05', and a type-I check in the
+# WRONG direction — a lower-bound non-excess check does not establish an
+# at-or-below-alpha bound). Both criteria are now frozen in
+# planned_design.thresholds, covered by design_hash, anchored here, and the
+# committed characterisation must MEET them before execution.
+M8_POWER_TARGET = 0.8
+M8_TYPE_I_CRITERION = (
+    "CP-95 upper bound of sharp-null rejection rate <= alpha")
 # M8 audit repair R4: the null model is a PAIRED PERMUTATION null, so its
 # parameters must be frozen inside planned_design exactly like the bootstrap
 # parameters were. A design that omits them cannot state a decision quantile at
@@ -78,6 +111,11 @@ THRESHOLD_KEYS = ("bootstrap_iterations", "bootstrap_seed", "confidence",
 PERMUTATION_THRESHOLD_KEYS = ("permutation_iterations", "permutation_seed",
                               "alpha")
 _RATE_KEYS = ("max_non_decision_rate", "max_non_decision_rate_delta")
+# b-002 finding f0: the decoder controls a fully-frozen model regime must pin
+# explicitly. Omitting any one falls back to a backend default and re-opens the
+# pooling hole (a different effective context length sharing one regime id).
+REQUIRED_DECODER_CONTROLS = ("num_ctx", "top_p", "top_k", "repeat_penalty",
+                             "stop")
 
 # experiments whose frozen design MUST carry a policy + thresholds + a
 # noise-floor split (a stochastic live design cannot be analysed without them)
@@ -200,18 +238,51 @@ M8_FROZEN_PROFILE = {
         "bootstrap_iterations": 10000,
         "bootstrap_seed": 20260719,
         "confidence": 0.95,
-        "min_detectable_effect": 0.25,
+        # a-004: the HONEST measured MDE. The committed operating-
+        # characteristics study measured power at TV=0.25 with a CP-95 lower
+        # bound of 0.757 < power_target, and at TV=0.35 with a lower bound of
+        # 0.978 >= power_target — so 0.35 is the smallest grid effect the
+        # frozen procedure reliably resolves. 0.25 was NOT kept to look
+        # better, and power_target was NOT lowered to rescue it.
+        "min_detectable_effect": 0.35,
+        # kept at 0.25 DELIBERATELY and INTENTIONALLY TIGHTER than the MDE
+        # (0.35): enlarging the sham margin would WEAKEN the sham-adequacy
+        # warrant (q_AC < margin becomes easier to grant), so the margin
+        # never follows the MDE upward. The sham control must exclude
+        # contamination at a FINER resolution (0.25) than the order effect the
+        # design claims to detect (0.35). The asymmetry is documented in the
+        # preregistration and the C1-BUNDLE.
         "sham_equivalence_margin": 0.25,
         "permutation_iterations": 10000,
         "permutation_seed": 20260719,
         "alpha": 0.05,
+        # a-004 finding 1: the design-fitness criteria are FROZEN bounds, not
+        # script inventions. power_target is the CP-95 LOWER bound the
+        # measured power at min_detectable_effect must reach; type_i_criterion
+        # is the UPPER-bound direction the sharp-null rejection rate must
+        # satisfy (the superseded lower-bound direction tested only whether
+        # excess above alpha was demonstrated — the wrong question).
+        "power_target": M8_POWER_TARGET,
+        "type_i_criterion": M8_TYPE_I_CRITERION,
     },
+    # a-004 finding 0: the ONE canonical null, anchored independently of the
+    # self-derived design_hash exactly like every other load-bearing value.
+    "null_form": M8_NULL_FORM,
+    "null_statement": M8_NULL_STATEMENT,
     "max_surviving_delta": 2,
     "sampler_seeds": list(range(2001, 2025)),
     "noise_floor_split": {"S1": list(range(2001, 2013)),
                           "S2": list(range(2013, 2025))},
     "scenario_seeds": [42, 1],
     "temperature": 0.7,
+    # b-002 finding f0: the frozen decoder regime. Every output-distribution
+    # knob previously left implicit (num_ctx / top_p / top_k / repeat_penalty /
+    # stop) is now an EXACT value the agent sends on every request and hashes
+    # into the regime. Sourced from agents.M8_DECODER_CONTROLS — the single
+    # definition the OllamaAgent actually sends — so the design/config lints
+    # pin exactly what runs, and a context-length or decoder substitution can
+    # neither execute unnoticed nor share the agent_regime_id.
+    "decoder_controls": dict(M8_DECODER_CONTROLS),
     "arbitration": "planner_priority",
     "model_digests": {
         "huihui_ai/qwen2.5-abliterate:7b-instruct":
@@ -283,6 +354,16 @@ def _profile_issues(eid: str, where: str, view: dict) -> list:
                     "extra digest is a NEW regime and is refused "
                     "independently of the self-derived hash")
             continue
+        if key == "decoder_controls":
+            got = view.get(key)
+            if got != want:
+                issues.append(
+                    f"{where}: decoder_controls {got!r} != audited frozen "
+                    f"profile controls {want!r} — a substituted, missing, or "
+                    "extra decoder control (num_ctx/top_p/top_k/repeat_penalty/"
+                    "stop) is a NEW model regime and is refused independently "
+                    "of the self-derived hash (b-002 finding f0)")
+            continue
         if key not in view:
             issues.append(f"{where}: {key} is missing — the audited frozen "
                           f"profile pins it at {want!r}")
@@ -301,7 +382,8 @@ def _config_profile_view(cfg: dict) -> dict:
     view = {k: cfg[k] for k in (
         "admissibility_policy", "thresholds", "max_surviving_delta",
         "sampler_seeds", "noise_floor_split", "temperature", "arbitration",
-        "model_digests") if k in cfg}
+        "model_digests", "null_form", "null_statement",
+        "decoder_controls") if k in cfg}
     if "seeds" in cfg:
         view["scenario_seeds"] = cfg["seeds"]
     return view
@@ -463,6 +545,47 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "must be a float in (0, 1] — it bounds a "
                           "total-variation quantile and a zero margin makes "
                           "the sham warrant unsatisfiable")
+        # a-004 finding 1: the design-fitness criteria are frozen thresholds.
+        # A power target at or below alpha is indistinguishable from the
+        # false-positive floor and is no target at all.
+        pt = th.get("power_target")
+        if "power_target" in th and (
+                isinstance(pt, bool) or not isinstance(pt, (int, float))
+                or not (0 < pt < 1)):
+            issues.append(f"{eid}: thresholds power_target {pt!r} must be a "
+                          "float in (0, 1) — it is the CP-95 LOWER bound the "
+                          "measured power at min_detectable_effect must reach")
+        al_ = th.get("alpha")
+        if isinstance(pt, (int, float)) and not isinstance(pt, bool) \
+                and isinstance(al_, (int, float)) \
+                and not isinstance(al_, bool) and pt <= al_:
+            issues.append(f"{eid}: thresholds power_target {pt!r} <= alpha "
+                          f"{al_!r} — a power target at or below the "
+                          "false-positive floor is not a target")
+        # a-004 finding 1: the type-I evidence criterion's DIRECTION is the
+        # load-bearing part — an at-or-below-alpha claim needs the UPPER
+        # confidence bound at or below alpha; a lower-bound non-excess check
+        # answers a different (and weaker) question.
+        tic = th.get("type_i_criterion")
+        if "type_i_criterion" in th:
+            if not isinstance(tic, str) or not tic.strip():
+                issues.append(f"{eid}: thresholds type_i_criterion {tic!r} "
+                              "must be a non-empty string stating the frozen "
+                              "type-I evidence rule")
+            else:
+                low_tic = tic.lower()
+                if "upper bound" not in low_tic:
+                    issues.append(
+                        f"{eid}: thresholds type_i_criterion does not bound "
+                        "the UPPER confidence limit — only an upper bound at "
+                        "or below alpha supports an at-or-below-alpha type-I "
+                        "claim")
+                if "lower bound" in low_tic:
+                    issues.append(
+                        f"{eid}: thresholds type_i_criterion expresses the "
+                        "SUPERSEDED lower-bound direction — that check only "
+                        "tested whether excess above alpha was demonstrated, "
+                        "which is the wrong direction (audit a-004 finding 1)")
 
         # R4: paired-permutation null parameters. The decision quantile is the
         # 1-alpha percentile of a permutation null drawn under a declared seed
@@ -492,6 +615,36 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
                           "(0, 0.5) — a decision quantile at or above the "
                           "median is not a test")
 
+    # a-004 finding 0: ONE null everywhere. The design must declare its null
+    # form machine-readably, the declared form must be the sharp unit-level
+    # null the paired permutation test is exact under, and the ONE canonical
+    # statement must appear VERBATIM in both the hypothesis and the decision
+    # rule — a design whose surfaces can answer different hypotheses has no
+    # auditable null at all.
+    nf = pd.get("null_form")
+    if nf != "sharp":
+        issues.append(f"{eid}: planned_design null_form {nf!r} != 'sharp' — "
+                      "the paired permutation test is exact under the sharp "
+                      "unit-level null, not under marginal equality, and the "
+                      "operative null must be declared machine-readably")
+    ns = pd.get("null_statement")
+    if not isinstance(ns, str) or not ns.strip():
+        issues.append(f"{eid}: planned_design missing 'null_statement' (the "
+                      "ONE canonical machine-readable statement of the "
+                      "operative null)")
+    else:
+        hyp = pd.get("hypothesis") or ""
+        if ns not in hyp:
+            issues.append(f"{eid}: hypothesis does not contain the canonical "
+                          "null_statement VERBATIM — the authoritative "
+                          "hypothesis and the declared null must be the same "
+                          "statement, not paraphrases of each other")
+        pe_ = pd.get("primary_event") or ""
+        if ns not in pe_:
+            issues.append(f"{eid}: primary_event does not contain the "
+                          "canonical null_statement VERBATIM — the decision "
+                          "rule must test exactly the declared null")
+
     # differential provider dropout is observationally identical to an order
     # effect (the survivors in the affected condition are a biased subsample),
     # and sweep.run_sweep SKIPS the balance gate when this bound is absent. An
@@ -517,6 +670,38 @@ def _lint_frozen_policy(eid: str, pd: dict) -> list:
         issues.append(f"{eid}: planned_design missing 'arbitration' (the "
                       "arbitration rule is part of the frozen regime and the "
                       "config gate binds to it exactly)")
+
+    # b-002 finding f0: the model regime is not frozen unless EVERY decoder
+    # control that shapes the output distribution is pinned to an EXACT value.
+    # Left implicit, a backend default (num_ctx / top_p / top_k / repeat_penalty
+    # / stop) lets two hosts with different effective context lengths execute and
+    # pool under one agent_regime_id. The design must freeze them; the agent
+    # sends exactly these and resolves the effective context before hashing.
+    dc = pd.get("decoder_controls")
+    if not isinstance(dc, dict):
+        issues.append(f"{eid}: planned_design missing 'decoder_controls' (the "
+                      "frozen decoder regime: num_ctx/top_p/top_k/"
+                      "repeat_penalty/stop must each be an explicit, sent, and "
+                      "hashed value, or a context-length or decoder "
+                      "substitution shares the agent_regime_id)")
+    else:
+        for k in REQUIRED_DECODER_CONTROLS:
+            if k not in dc:
+                issues.append(f"{eid}: decoder_controls missing {k!r} — an "
+                              "omitted decoder control falls back to a backend "
+                              "default and is not frozen")
+        nc = dc.get("num_ctx")
+        if "num_ctx" in dc and (isinstance(nc, bool) or not isinstance(nc, int)
+                                or nc <= 0):
+            issues.append(f"{eid}: decoder_controls num_ctx {nc!r} must be a "
+                          "positive int — the frozen effective context length, "
+                          "sent on every request and hashed into the regime")
+        st = dc.get("stop")
+        if "stop" in dc and (not isinstance(st, list)
+                             or not all(isinstance(x, str) for x in st)):
+            issues.append(f"{eid}: decoder_controls stop {st!r} must be a list "
+                          "of strings (an explicit — possibly empty — stop set, "
+                          "never an unfrozen backend default)")
 
     # b-001 finding 1: the FULL immutable model digest must be frozen in the
     # design, per model, in full 64-hex shape — the config gate requires exact
@@ -847,8 +1032,15 @@ def lint_experiments_registry(registry_path: str, repo_root: str) -> list:
 EXPERIMENT_CONFIG_REQUIRED = (
     "experiment_id", "design_hash", "task_id", "driver", "models",
     "model_digests", "scenarios", "seeds", "sampler_seeds", "temperature",
-    "arbitration", "interaction", "out_root", "manifest", "scenario_count",
-    "retries_per_unit", "expected_run_count")
+    "arbitration", "interaction", "out_root", "manifest",
+    "scenario_count", "retries_per_unit", "expected_run_count")
+
+# `decoder_controls` is required ONLY for experiments whose frozen design carries
+# a decoder-control regime (the M8 live-order-sensitivity freeze, audit b-002
+# f0). The m6-era ollama_local configs predate that freeze and must stay
+# lintable; the config-vs-design equality check below still holds every config
+# to whatever its own design declares (None == None for the m6 designs).
+EXPERIMENT_CONFIG_REQUIRED_POLICY = ("decoder_controls",)
 
 
 def lint_experiment_config(config_path: str, registry_path: str,
@@ -866,6 +1058,8 @@ def lint_experiment_config(config_path: str, registry_path: str,
         return [f"config unreadable: {exc}"]
     where = os.path.basename(config_path)
     missing = [f for f in EXPERIMENT_CONFIG_REQUIRED if f not in cfg]
+    if cfg.get("experiment_id") in POLICY_REQUIRED_EXPERIMENTS:
+        missing += [f for f in EXPERIMENT_CONFIG_REQUIRED_POLICY if f not in cfg]
     if missing:
         issues.append(f"{where}: missing required fields {missing}")
         return issues
@@ -918,6 +1112,16 @@ def lint_experiment_config(config_path: str, registry_path: str,
     if cfg["temperature"] != design.get("temperature"):
         issues.append(f"{where}: temperature {cfg['temperature']} != frozen "
                       f"{design.get('temperature')}")
+    # b-002 finding f0: the frozen decoder regime must be realized EXACTLY. A
+    # different num_ctx/top_p/top_k/repeat_penalty/stop is a NEW model regime,
+    # never a variation of the pre-registered one — a config that omits or
+    # substitutes any control could otherwise run under a distinct effective
+    # context length while claiming this design's agent_regime_id.
+    if cfg.get("decoder_controls") != design.get("decoder_controls"):
+        issues.append(f"{where}: decoder_controls {cfg.get('decoder_controls')!r}"
+                      f" != frozen decoder_controls "
+                      f"{design.get('decoder_controls')!r} — a substituted or "
+                      "omitted decoder control is a NEW model regime")
     # b-001 finding 2: the arbitration rule is part of the frozen regime. When
     # the design declares it (every live pre-registration from M8 on does —
     # _lint_frozen_policy requires it), the config must realize it EXACTLY: a

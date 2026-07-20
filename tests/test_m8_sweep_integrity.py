@@ -406,6 +406,90 @@ def test_resume_is_unchanged_and_counted_per_condition(tmp_path, monkeypatch):
     assert second.check_condition_balance(0) is None
 
 
+# ----------------- audit b-002 finding 1: retries_per_unit=0 tombstones
+
+def _install_failing_real_runner(monkeypatch, calls, target):
+    """Wrap the REAL fixture-backed run_scenario so ONE cell fails (a live-only
+    timeout) while every other cell produces genuine evidence dirs — the seam
+    the finding requires the tombstone regression to exercise."""
+    real_run_scenario = sweep_mod.run_scenario
+
+    def _failing(path, agent_spec, seed, **kw):
+        scenario = os.path.splitext(os.path.basename(path))[0]
+        ks = kw.get("sampler_seed")
+        calls.append((scenario, seed, ks))
+        if (scenario, seed, ks) == target:
+            raise TimeoutError("planner budget 120s exceeded")
+        return real_run_scenario(path, agent_spec, seed, **kw)
+
+    monkeypatch.setattr(sweep_mod, "run_scenario", _failing)
+
+
+def test_retries_per_unit_zero_tombstones_a_failure_and_never_rerolls(
+        tmp_path, monkeypatch):
+    """THE b-002 FINDING-1 (sweep side) REGRESSION: with retries_per_unit=0 a
+    unit that fails ONCE is persisted as a durable typed tombstone; the next
+    sweep over the same manifest NEVER re-attempts it (no second run_scenario /
+    provider call) and the typed failure survives in durable evidence."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    spec = _spec(tmp_path, scenarios=CONDITIONS, seeds=(42, 1),
+                 sampler_seeds=[2001, 2002], temperature=0.7)
+
+    first = run_sweep(spec, retries_per_unit=0)
+    assert len(first.errors) == 1 and first.tombstones_written == 1
+    assert calls.count(target) == 1               # attempted exactly once
+
+    # the durable tombstone is on disk, carrying the typed failure kind
+    tomb_path = spec["manifest"] + ".tombstones.jsonl"
+    assert os.path.exists(tomb_path)
+    tombs = [json.loads(l) for l in open(tomb_path, encoding="utf-8") if l.strip()]
+    assert len(tombs) == 1
+    assert tombs[0]["failure_kind"] == "timeout"
+    assert tombs[0]["scenario"] == "scramble_perm"
+    assert tombs[0]["scenario_seed"] == 42 and tombs[0]["sampler_seed"] == 2001
+
+    # resume: the tombstoned cell is NOT attempted a second time — no re-roll
+    n_after_first = len(calls)
+    second = run_sweep(spec, retries_per_unit=0)
+    assert target not in calls[n_after_first:], "a tombstoned failure was re-rolled"
+    assert second.tombstoned_resumed == 1
+    assert second.tombstones_written == 0
+    perm = (MODEL, "scramble_perm")
+    assert second.dropouts[perm]["timeout"] == 1  # the typed failure survives
+
+
+def test_default_resume_still_rerolls_a_failure_no_tombstone(tmp_path, monkeypatch):
+    """The historical-behaviour lock: with NO opt-in a failed unit leaves no
+    tombstone and IS re-attempted on the next sweep. retries_per_unit=0 is the
+    only thing that changes this — Phase-1 default resume is untouched."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    spec = _spec(tmp_path, scenarios=CONDITIONS, seeds=(42, 1),
+                 sampler_seeds=[2001, 2002], temperature=0.7)
+
+    first = run_sweep(spec)
+    assert first.tombstones_written == 0
+    assert not os.path.exists(spec["manifest"] + ".tombstones.jsonl")
+    n = len(calls)
+    run_sweep(spec)
+    assert target in calls[n:], "default resume must still re-attempt a failure"
+
+
+def test_unsupported_retries_per_unit_is_refused(tmp_path, monkeypatch):
+    """Only the frozen value 0 (or None) is contract-legal; a positive retry
+    budget is refused before any compute."""
+    _install_offline_ollama(monkeypatch)
+    spec = _spec(tmp_path, seeds=(42,))
+    for bad in (1, 2, True):
+        with pytest.raises(SweepAborted, match="retries_per_unit"):
+            run_sweep(spec, retries_per_unit=bad)
+
+
 # ------------------------- audit c-001 finding 0 (generator side): attestation
 
 import hashlib
