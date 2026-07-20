@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass
 
 import yaml
 
@@ -524,6 +525,69 @@ def load_thresholds(registry_path: str, experiment_id: str) -> dict:
     if delta is not None:
         bundle["max_surviving_delta"] = delta
     return bundle
+
+
+@dataclass(frozen=True)
+class VerifiedBundle:
+    """A frozen design that has passed BOTH design_hash reconstruction AND the
+    independent M8_FROZEN_PROFILE comparison (d-003 finding 0).
+
+    Production entrypoints (the live driver, the order-report CLI, the result
+    package) must consume THIS TYPE, never a bare registry path or a plain dict.
+    The design_hash-only load path (`_frozen_design` / `load_thresholds`) is
+    self-derived: an attacker who weakens a type-valid bound, recomputes
+    design_hash and mirrors the config defeats it. `load_verified_bundle` is the
+    ONLY supported producer of this type and re-checks every profile value
+    against audited code (`M8_FROZEN_PROFILE`), so a caller-selected `--registry`
+    that self-rehashes a weakened design cannot yield a VerifiedBundle. Passing a
+    raw dict/path where a VerifiedBundle is required is a type error, not a
+    silent weaker load."""
+    experiment_id: str
+    design_hash: str
+    planned_design: dict
+    thresholds: dict
+    admissibility_policy: dict
+
+    @property
+    def retries_per_unit(self):
+        return self.planned_design.get("retries_per_unit")
+
+    @property
+    def max_surviving_delta(self):
+        return self.planned_design.get("max_surviving_delta")
+
+    @property
+    def stopping_rule(self):
+        return self.planned_design.get("stopping_rule")
+
+
+def load_verified_bundle(registry_path: str,
+                         experiment_id: str) -> VerifiedBundle:
+    """Load a frozen design and verify it against the audited numeric profile.
+
+    Raises SchemaError if design_hash does not reconstruct OR if any frozen
+    profile value (thresholds, policy, digests, decoder controls, null form/
+    statement, stopping rule, seeds, …) disagrees with `M8_FROZEN_PROFILE`. This
+    is the load path production entrypoints MUST use: it closes the gap where a
+    weaken-and-rehash edit passed the design_hash-only loaders because the
+    profile check lived only in `lint_registry`, off the hot path."""
+    pd = _frozen_design(registry_path, experiment_id)  # raises on hash drift
+    entry = _find_entry(registry_path, experiment_id)
+    prof = _profile_issues(experiment_id,
+                           f"{experiment_id}: verified-bundle load", pd)
+    if prof:
+        raise SchemaError(
+            f"{experiment_id}: frozen numeric profile mismatch on the "
+            "verified-bundle load path (a design_hash that reconstructs does "
+            "NOT license a weakened bound; the profile is anchored in audited "
+            "code) — " + "; ".join(prof))
+    return VerifiedBundle(
+        experiment_id=experiment_id,
+        design_hash=entry["design_hash"],
+        planned_design=pd,
+        thresholds=load_thresholds(registry_path, experiment_id),
+        admissibility_policy=load_admissibility_policy(
+            registry_path, experiment_id))
 
 
 def _lint_frozen_policy(eid: str, pd: dict) -> list:

@@ -58,11 +58,83 @@ def _git_commit() -> str | None:
     return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
 
 
+_CONDITION_LABELS = ("A", "B", "C")
+
+
+def _recompute_order_report(experiment_id: str, registry_path: str,
+                            manifest_path: str, out_root: str, config_dir: str,
+                            attestation: dict) -> dict:
+    """Independently RE-DERIVE the order report from the bound raw evidence and
+    the frozen VERIFIED design (d-003 finding 2). Returns the report dict, or
+    raises SchemaError if the evidence does not admit a verdict — in which case
+    a caller-supplied verdict-bearing report is, by construction, not derivable
+    from this evidence and the package must refuse. The design is loaded through
+    `load_verified_bundle`, so a self-rehashed or profile-weakened registry
+    cannot drive the recomputation, and retries_per_unit is taken from the
+    frozen design (0) so duplicate/conflicting observations dedup-or-refuse
+    exactly as the production analysis path does."""
+    from . import metrics as metrics_mod
+    from . import sweep
+    from .registry import load_verified_bundle
+    from .scenario import load_scenario
+
+    vb = load_verified_bundle(registry_path, experiment_id)
+    scenarios = list(vb.planned_design.get("scenarios") or [])
+    if len(scenarios) != len(_CONDITION_LABELS):
+        raise SchemaError(
+            f"{experiment_id}: planned_design.scenarios has {len(scenarios)} "
+            f"entries, expected {len(_CONDITION_LABELS)} (A/B/C)")
+    conditions = dict(zip(_CONDITION_LABELS, scenarios))
+    retries_per_unit = vb.retries_per_unit
+    if isinstance(retries_per_unit, bool) or retries_per_unit != 0:
+        raise SchemaError(
+            f"{experiment_id}: frozen retries_per_unit={retries_per_unit!r} "
+            "!= 0 — cannot recompute the package report under the frozen "
+            "one-effective-unit contract")
+
+    rows = sweep.manifest_load(manifest_path, out_root)
+    if not rows:
+        raise SchemaError(f"{experiment_id}: manifest resolves to zero rows")
+    run_dirs = sorted(os.path.join(out_root, rec["dir"])
+                      for rec in rows.values())
+    surviving_counts: dict = {}
+    for rec in rows.values():
+        surviving_counts[rec["scenario"]] = \
+            surviving_counts.get(rec["scenario"], 0) + 1
+
+    terminal_ids = set()
+    for scen_id in conditions.values():
+        scen = load_scenario(os.path.join(config_dir, f"{scen_id}.yaml"))
+        decisions = [dp.dp_id for dp in scen.decision_points
+                     if not dp.is_exposure()]
+        if len(decisions) != 1:
+            raise SchemaError(
+                f"{experiment_id}: {scen_id} has {len(decisions)} decision-"
+                "kind points; exactly one terminal probe is required")
+        terminal_ids.add(decisions[0])
+    if len(terminal_ids) != 1:
+        raise SchemaError(
+            f"{experiment_id}: triplet disagrees on the terminal probe id "
+            f"{sorted(terminal_ids)}")
+
+    return metrics_mod.order_sensitivity_report(
+        run_dirs, conditions, admissibility_policy=vb.admissibility_policy,
+        thresholds=vb.thresholds, replay_attestation=attestation,
+        terminal_dp_id=terminal_ids.pop(),
+        surviving_counts=surviving_counts, retries_per_unit=retries_per_unit)
+
+
 def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
                          registry_path: str, report_path: str,
-                         extra: dict) -> str:
-    """Assemble and write <out_root>/result_package.json; returns its path."""
-    from .registry import _find_entry
+                         extra: dict, config_dir: str = "configs/scenarios"
+                         ) -> str:
+    """Assemble and write <out_root>/result_package.json; returns its path.
+
+    For a POLICY_REQUIRED experiment the supplied report is NOT trusted: the
+    verdict is RE-DERIVED from the bound manifest/attestation evidence and the
+    frozen verified design, and must match the supplied report canonically
+    (d-003 finding 2). A caller-authored or stale verdict cannot be packaged."""
+    from .registry import _find_entry, POLICY_REQUIRED_EXPERIMENTS
     from .registry import design_hash as compute_design_hash
 
     if not isinstance(extra, dict):
@@ -132,6 +204,30 @@ def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
             f"{experiment_id}: design_hash "
             f"{str(entry.get('design_hash'))[:16]}… != recomputed "
             f"{want[:16]}… — the frozen design was mutated")
+
+    # d-003 finding 2: for a policy-required experiment the packaged verdict is
+    # RE-DERIVED from the bound evidence, never trusted from the caller's report.
+    # Recompute the order report from the current run evidence + the frozen
+    # VERIFIED design and require canonical equality with the supplied report.
+    # This defeats a forged verdict, a stale report, an all-fallback pack whose
+    # real recomputation refuses, and a report bound to different runs.
+    if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+        try:
+            recomputed = _recompute_order_report(
+                experiment_id, registry_path, manifest_path, out_root,
+                config_dir, attestation)
+        except SchemaError as e:
+            raise SchemaError(
+                f"{experiment_id}: the supplied report carries a verdict but an "
+                f"independent recomputation from the bound evidence refuses "
+                f"({e}) — a caller-authored verdict that the evidence does not "
+                "produce is never packaged")
+        if canonical_json(recomputed) != canonical_json(report):
+            raise SchemaError(
+                f"{experiment_id}: the supplied report does not match an "
+                "independent recomputation from the bound run evidence and the "
+                "frozen verified design — the package binds a DERIVED verdict, "
+                "never a caller-authored, stale, or mis-bound one")
 
     body = {
         "package_version": PACKAGE_VERSION,

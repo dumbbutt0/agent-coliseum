@@ -258,7 +258,8 @@ def cmd_order_report(args):
     from . import metrics as metrics_mod
     from . import sweep
     from .registry import (_frozen_design, load_admissibility_policy,
-                           load_thresholds)
+                           load_thresholds, load_verified_bundle,
+                           POLICY_REQUIRED_EXPERIMENTS)
     from .schema import SchemaError
 
     marker = os.path.join(args.out_root, SMOKE_MARKER_NAME)
@@ -292,10 +293,33 @@ def cmd_order_report(args):
         surviving_counts[rec["scenario"]] = \
             surviving_counts.get(rec["scenario"], 0) + 1
 
-    policy = load_admissibility_policy(args.registry, args.experiment_id)
-    thresholds = load_thresholds(args.registry, args.experiment_id)
-    conditions = _conditions_from_design(
-        _frozen_design(args.registry, args.experiment_id))
+    # d-003 findings 0 & 1: for a policy-required experiment the analysis MUST
+    # load a VERIFIED bundle (profile-checked, not design_hash-only) and MUST
+    # source retries_per_unit from the frozen design. A caller-selected
+    # --registry that self-rehashes a weakened design refuses here; and the
+    # frozen zero-retry contract (deduplicate/refuse duplicate observations
+    # rather than pool replicates) can no longer be omitted at this entrypoint.
+    if args.experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+        try:
+            vb = load_verified_bundle(args.registry, args.experiment_id)
+        except SchemaError as e:
+            sys.exit(f"ORDER-REPORT REFUSED: verified frozen bundle load "
+                     f"failed ({e}) — a policy-required analysis will not run "
+                     "against an unverified or self-rehashed design")
+        policy = vb.admissibility_policy
+        thresholds = vb.thresholds
+        conditions = _conditions_from_design(vb.planned_design)
+        retries_per_unit = vb.retries_per_unit
+        if isinstance(retries_per_unit, bool) or retries_per_unit != 0:
+            sys.exit(f"ORDER-REPORT REFUSED: frozen retries_per_unit="
+                     f"{retries_per_unit!r} != 0 — the one-effective-unit "
+                     "contract is mandatory on this path")
+    else:
+        policy = load_admissibility_policy(args.registry, args.experiment_id)
+        thresholds = load_thresholds(args.registry, args.experiment_id)
+        conditions = _conditions_from_design(
+            _frozen_design(args.registry, args.experiment_id))
+        retries_per_unit = None
     # terminal_dp_id is SCENARIO-DESIGN identity, DERIVED — never a CLI knob.
     # Under imposed history each m8 scenario carries exactly ONE decision-kind
     # point (the terminal probe); it must be unique within every scenario and
@@ -320,7 +344,8 @@ def cmd_order_report(args):
             admissibility_policy=policy, thresholds=thresholds,
             replay_attestation=attestation,
             terminal_dp_id=terminal_ids.pop(),
-            surviving_counts=surviving_counts)
+            surviving_counts=surviving_counts,
+            retries_per_unit=retries_per_unit)
     except SchemaError as e:
         # typed refusal: NOTHING is written — a refusal is an inconclusive
         # result, never a number (and never a file bearing distances)
@@ -530,7 +555,9 @@ def cmd_result_package(args):
     try:
         path = build_result_package(args.experiment_id, args.manifest,
                                     args.out_root, args.registry,
-                                    args.report, extra)
+                                    args.report, extra,
+                                    config_dir=getattr(args, "config_dir",
+                                                       "configs/scenarios"))
     except SchemaError as e:
         sys.exit(f"RESULT-PACKAGE REFUSED: {e}")
     print("wrote", path)
@@ -694,6 +721,10 @@ def main(argv=None):
     s.add_argument("--report", required=True,
                    help="path to the order_report.json this package closes over")
     s.add_argument("--registry", default="configs/registry/experiments.yaml")
+    s.add_argument("--config-dir", default="configs/scenarios",
+                   help="scenario dir used to independently RE-DERIVE the "
+                        "verdict from evidence (d-003 f2); the packaged report "
+                        "must match that recomputation")
     s.add_argument("--extra", default=None,
                    help="JSON object of extra fields (e.g. suite receipt)")
 

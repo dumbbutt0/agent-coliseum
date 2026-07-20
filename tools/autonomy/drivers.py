@@ -89,7 +89,8 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
     experiment_id = config.get("experiment_id")
     from coliseum.textlab.registry import POLICY_REQUIRED_EXPERIMENTS
     if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
-        from coliseum.textlab.registry import load_thresholds
+        from coliseum.textlab.registry import load_verified_bundle
+        from coliseum.textlab.sweep import ExecutionPolicy
         from coliseum.textlab.scenario import (lint_scramble_triplet,
                                                load_scenario)
         from coliseum.textlab.schema import SchemaError
@@ -101,18 +102,17 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
                 "default would silently run the historical blocked order")
         registry_path = os.path.join(repo, "configs", "registry",
                                      "experiments.yaml")
+        # d-003 finding 0: load a VERIFIED bundle, not a raw design_hash-only
+        # load. load_verified_bundle re-checks every value against the audited
+        # M8_FROZEN_PROFILE, so a caller-selected --registry that self-rehashes
+        # a weakened design refuses here instead of running with lax bounds.
         try:
-            bundle = load_thresholds(registry_path, experiment_id)
+            bundle = load_verified_bundle(registry_path, experiment_id)
         except (SchemaError, OSError) as exc:
             raise RunnerRefusal(
-                f"{experiment_id}: frozen threshold bundle unavailable "
-                f"({exc}) — the driver never invents execution bounds")
-        max_surviving_delta = bundle.get("max_surviving_delta")
-        if max_surviving_delta is None:
-            raise RunnerRefusal(
-                f"{experiment_id}: registry entry carries no "
-                "max_surviving_delta — run_sweep skips the balance gate "
-                "without it, so an unbounded pack must refuse, not run")
+                f"{experiment_id}: verified frozen bundle unavailable ({exc}) "
+                "— the driver never invents execution bounds nor accepts an "
+                "unverified (self-rehashed or profile-mismatched) design")
 
         # scramble-triplet preflight under the imposed-history contract: the
         # three conditions must be matched-except-order BEFORE any model call.
@@ -136,9 +136,17 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
             raise RunnerRefusal(
                 f"{experiment_id}: scramble-triplet preflight refused: "
                 + "; ".join(preflight))
-        sweep_extra = {"execution_order": config["execution_order"],
-                       "record_execution_index": True,
-                       "max_surviving_delta": max_surviving_delta}
+        # b-003 / c-003: build the STRUCTURAL execution policy from the verified
+        # bundle. retries_per_unit=0 (durable tombstones, no re-roll) and
+        # max_surviving_delta come from the profile-checked frozen design; a
+        # missing/nonzero value refuses here, before any provider contact.
+        try:
+            policy = ExecutionPolicy.from_verified_bundle(
+                bundle, execution_order=config["execution_order"],
+                record_execution_index=True)
+        except SweepAborted as exc:
+            raise RunnerRefusal(str(exc))
+        sweep_extra = {"execution_policy": policy}
 
     spec = {"models": config["models"], "scenarios": config["scenarios"],
             "seeds": config["seeds"],
@@ -147,7 +155,10 @@ def _drive_ollama_local(repo: str, config: dict, deadline: float) -> dict:
             "arbitration": config.get("arbitration", "planner_priority"),
             "interaction": config.get("interaction", "independent_vignettes"),
             "config_dir": config_dir, "out_root": out_root,
-            "manifest": manifest_path}
+            "manifest": manifest_path,
+            # experiment_id lets run_sweep detect a policy-required sweep and
+            # fail closed if no ExecutionPolicy was supplied.
+            "experiment_id": experiment_id}
     try:
         sweep = run_sweep(spec, deadline=deadline,
                           expected_digests=expected_digests, **sweep_extra)

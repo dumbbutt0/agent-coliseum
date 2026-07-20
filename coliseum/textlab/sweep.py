@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 
 from coliseum.textlab.agents import (HISTORY_TEMPLATE_HASH,
                                      HISTORY_TEMPLATE_VERSION, OllamaAgent)
@@ -39,6 +40,50 @@ REQUIRED_ROW_FIELDS = (
     "arbitration", "run_id", "dir", "reportable", "stochastic_reportable",
     "interaction_mode", "path",
 )
+
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    """The frozen execution contract a policy-required live sweep MUST run under
+    (b-003 / c-003 finding class). It bundles the analysis-critical execution
+    bounds into ONE typed object so a production caller cannot silently omit the
+    frozen retry / balance / order contract by forgetting a keyword argument.
+
+    `run_sweep` requires an ExecutionPolicy for every POLICY_REQUIRED_EXPERIMENTS
+    sweep and fails closed before any provider contact if it is absent or if its
+    `retries_per_unit` is anything other than 0 — so the historical permissive
+    default (a failed unit re-rolled on resume) can never reach the live M8 path.
+    The ONLY supported producer for a frozen experiment is
+    `from_verified_bundle`, which sources every value from an audited
+    `registry.VerifiedBundle` (profile-checked), never from loose kwargs."""
+    retries_per_unit: int
+    max_surviving_delta: int
+    execution_order: str = "interleaved"
+    record_execution_index: bool = True
+
+    @classmethod
+    def from_verified_bundle(cls, bundle, *, execution_order: str,
+                             record_execution_index: bool = True
+                             ) -> "ExecutionPolicy":
+        """Build the policy from an audited VerifiedBundle. `retries_per_unit`
+        and `max_surviving_delta` come from the profile-checked frozen design;
+        the caller supplies only the (config-declared) execution order."""
+        rpu = bundle.retries_per_unit
+        if rpu is None or isinstance(rpu, bool) or rpu != 0:
+            raise SweepAborted(
+                f"{getattr(bundle, 'experiment_id', '?')}: frozen design "
+                f"retries_per_unit={rpu!r} is not the required 0 — a "
+                "policy-required live sweep must persist typed tombstones and "
+                "never re-roll a failed unit")
+        msd = bundle.max_surviving_delta
+        if msd is None or isinstance(msd, bool) or not isinstance(msd, int):
+            raise SweepAborted(
+                f"{getattr(bundle, 'experiment_id', '?')}: frozen design "
+                f"max_surviving_delta={msd!r} is missing or not an int — the "
+                "balance gate cannot be skipped on a policy-required sweep")
+        return cls(retries_per_unit=0, max_surviving_delta=msd,
+                   execution_order=execution_order,
+                   record_execution_index=record_execution_index)
 
 
 class SweepAborted(Exception):
@@ -452,7 +497,8 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
               execution_order: str = "blocked",
               record_execution_index: bool | None = None,
               max_surviving_delta: int | None = None,
-              retries_per_unit: int | None = None) -> SweepResult:
+              retries_per_unit: int | None = None,
+              execution_policy: "ExecutionPolicy | None" = None) -> SweepResult:
     """Execute (models x scenarios x scenario-seeds x sampler-seeds), appending
     validated rows to spec['manifest'] and resuming past rows already present.
 
@@ -488,8 +534,55 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     tombstone for every failed cell (see tombstone_load) and honours it on
     resume: a completed-or-failed unit is NEVER re-attempted, so no provider call
     can re-roll a failure into a success. It is opt-in and writes a separate
-    ledger file, so a default sweep's manifest regenerates byte-for-byte."""
+    ledger file, so a default sweep's manifest regenerates byte-for-byte.
+
+    `execution_policy` (b-003 / c-003 finding class) is the STRUCTURAL form of
+    the above. A frozen `ExecutionPolicy` bundles retries_per_unit /
+    max_surviving_delta / execution_order / record_execution_index into one typed
+    object. For a POLICY_REQUIRED experiment (identified by spec['experiment_id'])
+    it is MANDATORY and fails closed here before any provider contact if absent
+    or if its retries_per_unit != 0 — so a production caller can no longer omit
+    the frozen retry/balance contract by forgetting a keyword. When supplied it
+    is the authority: the individual retries_per_unit / max_surviving_delta /
+    execution_order / record_execution_index kwargs must not also be passed with
+    a conflicting value."""
     say = progress or (lambda *_a, **_k: None)
+
+    # STRUCTURAL execution-policy enforcement (b-003 / c-003). Resolve the frozen
+    # contract from the typed policy when present, and REQUIRE it for a
+    # policy-required experiment so the permissive default can never run live.
+    from coliseum.textlab.registry import POLICY_REQUIRED_EXPERIMENTS
+    experiment_id = spec.get("experiment_id")
+    policy_required = experiment_id in POLICY_REQUIRED_EXPERIMENTS
+    if execution_policy is not None:
+        # the typed policy is the authority; a conflicting loose kwarg is a
+        # caller bug, not a silent override.
+        for name, loose, frozen in (
+                ("retries_per_unit", retries_per_unit,
+                 execution_policy.retries_per_unit),
+                ("max_surviving_delta", max_surviving_delta,
+                 execution_policy.max_surviving_delta),
+                ("execution_order",
+                 execution_order if execution_order != "blocked" else None,
+                 execution_policy.execution_order),
+                ("record_execution_index", record_execution_index,
+                 execution_policy.record_execution_index)):
+            if loose is not None and loose != frozen:
+                raise SweepAborted(
+                    f"run_sweep: {name}={loose!r} kwarg conflicts with the "
+                    f"execution_policy value {frozen!r} — pass the frozen "
+                    "contract through the ExecutionPolicy only")
+        retries_per_unit = execution_policy.retries_per_unit
+        max_surviving_delta = execution_policy.max_surviving_delta
+        execution_order = execution_policy.execution_order
+        record_execution_index = execution_policy.record_execution_index
+    elif policy_required:
+        raise SweepAborted(
+            f"{experiment_id}: a policy-required live sweep must be driven by a "
+            "frozen ExecutionPolicy (execution_policy=...); run_sweep refuses "
+            "the permissive default so a failed unit can never be re-rolled and "
+            "the balance gate can never be silently skipped")
+
     if retries_per_unit is not None and (isinstance(retries_per_unit, bool)
                                          or retries_per_unit != 0):
         raise SweepAborted(
@@ -497,6 +590,11 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
             "frozen design declares retries_per_unit=0 (a failed unit is a typed "
             "outcome, never a re-roll); pass 0 to enforce durable tombstones or "
             "None to retain the historical re-attempt-on-resume behaviour")
+    if policy_required and retries_per_unit != 0:
+        raise SweepAborted(
+            f"{experiment_id}: policy-required sweep resolved "
+            f"retries_per_unit={retries_per_unit!r}, not 0 — the frozen "
+            "one-effective-unit tombstone contract is mandatory on this path")
     sampling, sampler_seeds, mode = resolve_sampling(
         spec.get("temperature", 0.0), spec.get("sampler_seeds"))
     arbitration = spec.get("arbitration", "planner_priority")
