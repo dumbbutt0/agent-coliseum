@@ -123,33 +123,36 @@ def test_execution_policy_refuses_missing_dropout_bound():
 
 # -------------------------------------------------------------------- run_sweep
 
-def _min_spec(**over):
+def _min_spec(tmp_path, **over):
+    out = str(tmp_path)
     spec = {"experiment_id": EID, "models": [], "scenarios": [], "seeds": [],
-            "config_dir": ".", "out_root": ".", "manifest": "m.jsonl"}
+            "config_dir": out, "out_root": out,
+            "manifest": os.path.join(out, "m.jsonl")}
     spec.update(over)
     return spec
 
 
-def test_run_sweep_refuses_policy_required_without_execution_policy():
+def test_run_sweep_refuses_policy_required_without_execution_policy(tmp_path):
     with pytest.raises(SweepAborted) as exc:
-        run_sweep(_min_spec())
+        run_sweep(_min_spec(tmp_path))
     assert "ExecutionPolicy" in str(exc.value)
 
 
-def test_run_sweep_refuses_conflicting_kwarg():
+def test_run_sweep_refuses_conflicting_kwarg(tmp_path):
     vb = load_verified_bundle(REGISTRY, EID)
     ep = ExecutionPolicy.from_verified_bundle(vb, execution_order="interleaved")
     with pytest.raises(SweepAborted) as exc:
-        run_sweep(_min_spec(), execution_policy=ep, max_surviving_delta=99)
+        run_sweep(_min_spec(tmp_path), execution_policy=ep,
+                  max_surviving_delta=99)
     assert "conflicts" in str(exc.value)
 
 
-def test_run_sweep_nonpolicy_experiment_needs_no_policy():
+def test_run_sweep_nonpolicy_experiment_needs_no_policy(tmp_path):
     # a non-policy experiment id must NOT trip the mandatory-policy gate; it
     # proceeds past the gate (and fails later for ordinary reasons, never the
     # policy refusal).
     try:
-        run_sweep(_min_spec(experiment_id="not-a-policy-experiment"))
+        run_sweep(_min_spec(tmp_path, experiment_id="not-a-policy-experiment"))
     except SweepAborted as exc:
         assert "ExecutionPolicy" not in str(exc.value)
     except Exception:
