@@ -44,6 +44,7 @@ import pytest
 
 from coliseum.textlab.admissibility import DECISION_ADMISSIBILITY_VERSION
 from coliseum.textlab.metrics import (ORDER_REPORT_VERSION, METRICS_VERSION,
+                                      frozen_grid_from_design,
                                       order_sensitivity_report,
                                       scramble_terminal_distribution)
 from coliseum.textlab.schema import SchemaError, canonical_json
@@ -801,6 +802,127 @@ def test_partial_identity_replacement_refuses(tmp_path):
     with pytest.raises(SchemaError) as exc:
         _report(dirs, _GRID_POLICY, _grid_thresh())
     assert "matched_unit_grid" in str(exc.value)
+
+
+# the frozen matched-unit expectation for the M8 Phase-2 design: 2 frozen
+# (variant, scenario_seed) groups over scenario_seeds {42, 1} x 24 sampler
+# seeds = 48 matched units per comparison. Threaded by the production
+# entrypoints (cli cmd_order_report, result_package) so the gate enforces the
+# FROZEN count, never one derived from whatever groups the pack carries.
+FROZEN_GRID = {"scenario_seeds": [42, 1], "matched_units_per_condition": 48}
+
+
+def _three_group_grid(tmp_path, choose=lambda c, v, s: "share"):
+    """The d-006 auditor probe: the frozen two-group grid PLUS a THIRD, unfrozen
+    (variant, scenario_seed) group ('v2_probe', 7) across A/B/C. 3 groups x 24
+    frozen sampler seeds x 3 conditions = 216 run dirs, 72 matched units per
+    comparison. Every group fully realizes the frozen sampler seeds, so the
+    per-group realization gate is satisfied — only the frozen-grid closure
+    catches the extra group."""
+    s_all = list(range(2001, 2025))
+    dirs = []
+    for cond in ("A", "B", "C"):
+        for variant, scen_seed in (("v0", 42), ("v1", 1), ("v2_probe", 7)):
+            for samp in s_all:
+                dirs.append(_mkrun(tmp_path, f"{cond}_{variant}_{samp}",
+                                   CONDITIONS[cond], variant, scen_seed, samp,
+                                   choose(cond, variant, samp)))
+    return dirs
+
+
+def test_frozen_grid_from_design_reads_the_pinned_count_and_axis():
+    """The builder projects the pre-registered planned_design into the frozen
+    matched-unit expectation the analyzer enforces."""
+    grid = frozen_grid_from_design(
+        {"scenario_seeds": [42, 1], "effective_units_per_condition": 48,
+         "other": "ignored"})
+    assert grid == {"scenario_seeds": [42, 1], "matched_units_per_condition": 48}
+    for bad in ({"scenario_seeds": [], "effective_units_per_condition": 48},
+                {"scenario_seeds": [42, 1], "effective_units_per_condition": 0},
+                {"scenario_seeds": [42, 1]},
+                {"effective_units_per_condition": 48}):
+        with pytest.raises(SchemaError):
+            frozen_grid_from_design(bad)
+
+
+def test_unfrozen_third_group_passes_without_the_grid_but_refuses_with_it(tmp_path):
+    """d-006 (Section D): the auditor's 216-run/3-group probe. WITHOUT the frozen
+    grid the required matched-unit count SCALES with the observed groups (24 x 3
+    = 72) so the extra group sails through and a verdict is emitted — the exact
+    fail-open. WITH the frozen grid threaded (as every production entrypoint now
+    does) the count is PINNED to the pre-registered 48 and the group axis is
+    closed to the frozen scenario_seeds {42, 1}, so the unfrozen ('v2_probe', 7)
+    group REFUSES pre-statistics and no distance/quantile/verdict escapes."""
+    dirs = _three_group_grid(tmp_path)
+    surviving = {"A": 72, "B": 72, "C": 72}
+
+    # WITHOUT the frozen grid: the fail-open — required scales to 72, admission
+    # passes, and a verdict is produced from an unfrozen-count pack.
+    open_rep = _report(dirs, _GRID_POLICY, _grid_thresh(), surviving=surviving)
+    agent = open_rep["per_agent"]["live"]
+    assert agent["matched_unit_grid"]["required_matched_units"] == 72
+    assert agent["verdict"]  # a verdict was (wrongly) emitted
+
+    # WITH the frozen grid: fail-closed. The extra/unfrozen group is inadmissible.
+    with pytest.raises(SchemaError) as exc:
+        order_sensitivity_report(
+            dirs, CONDITIONS, admissibility_policy=_GRID_POLICY,
+            thresholds=_grid_thresh(), replay_attestation=_attest(dirs),
+            terminal_dp_id=TERMINAL, surviving_counts=surviving,
+            frozen_grid=FROZEN_GRID)
+    msg = str(exc.value)
+    assert "matched_unit_grid" in msg
+    assert "inadmissible" in msg
+    assert "7" in msg  # the unfrozen scenario_seed is named
+    body = exc.value.report
+    # a refusal is pre-statistics: no numbers escape
+    for a in body["per_agent"].values():
+        for key in ("tv_distances", "bootstrap", "permutation_null",
+                    "decision_inputs", "verdict"):
+            assert key not in a
+    for leaked in ("tv_distances", "permutation_null", "q_ab", "verdict"):
+        assert leaked not in canonical_json(body)
+
+
+def test_extra_variant_on_a_frozen_seed_also_refuses_under_the_frozen_grid(tmp_path):
+    """A second variant on a FROZEN scenario_seed (('v9', 42) added alongside the
+    frozen ('v0', 42) and ('v1', 1)) keeps the observed scenario_seeds equal to
+    the frozen set {42, 1}, so it is caught by the frozen GROUP-COUNT closure,
+    not the scenario_seed check — the frozen count of 48 is never scaled to the
+    3-group evidence."""
+    s_all = list(range(2001, 2025))
+    dirs = []
+    for cond in ("A", "B", "C"):
+        for variant, scen_seed in (("v0", 42), ("v1", 1), ("v9", 42)):
+            for samp in s_all:
+                dirs.append(_mkrun(tmp_path, f"{cond}_{variant}_{samp}",
+                                   CONDITIONS[cond], variant, scen_seed, samp,
+                                   "share"))
+    with pytest.raises(SchemaError) as exc:
+        order_sensitivity_report(
+            dirs, CONDITIONS, admissibility_policy=_GRID_POLICY,
+            thresholds=_grid_thresh(), replay_attestation=_attest(dirs),
+            terminal_dp_id=TERMINAL,
+            surviving_counts={"A": 72, "B": 72, "C": 72},
+            frozen_grid=FROZEN_GRID)
+    assert "inadmissible" in str(exc.value)
+
+
+def test_frozen_conformant_grid_still_passes_under_the_frozen_grid(tmp_path):
+    """The frozen-conformant 144-run / 2-group / 48-unit pack is unchanged by the
+    frozen-grid enforcement: it still reaches a verdict and reports 48 matched
+    units. The gate refuses UNFROZEN shapes, never the pre-registered one."""
+    dirs = _full_grid(tmp_path,
+                      lambda c, v, s: "share" if s % 2 else "verify")
+    rep = order_sensitivity_report(
+        dirs, CONDITIONS, admissibility_policy=_GRID_POLICY,
+        thresholds=_grid_thresh(), replay_attestation=_attest(dirs),
+        terminal_dp_id=TERMINAL, surviving_counts={"A": 48, "B": 48, "C": 48},
+        frozen_grid=FROZEN_GRID)
+    agent = rep["per_agent"]["live"]
+    assert agent["matched_unit_grid"]["required_matched_units"] == 48
+    assert agent["matched_unit_grid"]["matched_units"] == {"A|B": 48, "A|C": 48}
+    assert agent["verdict"]
 
 
 def test_fully_matched_grid_reports_48_matched_units_for_both_comparisons(tmp_path):

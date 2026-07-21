@@ -320,12 +320,22 @@ def cmd_order_report(args):
             sys.exit(f"ORDER-REPORT REFUSED: frozen retries_per_unit="
                      f"{retries_per_unit!r} != 0 — the one-effective-unit "
                      "contract is mandatory on this path")
+        # d-006: thread the FROZEN matched-unit grid (unit count + group axis)
+        # from the verified design, so the analyzer enforces the pre-registered
+        # count and refuses an extra/unfrozen (variant, scenario_seed) group
+        # rather than scaling "required" to whatever groups the pack contains.
+        try:
+            frozen_grid = metrics_mod.frozen_grid_from_design(vb.planned_design)
+        except SchemaError as e:
+            sys.exit(f"ORDER-REPORT REFUSED: frozen matched-unit grid could not "
+                     f"be sourced from the verified design ({e})")
     else:
         policy = load_admissibility_policy(args.registry, args.experiment_id)
         thresholds = load_thresholds(args.registry, args.experiment_id)
         conditions = _conditions_from_design(
             _frozen_design(args.registry, args.experiment_id))
         retries_per_unit = None
+        frozen_grid = None
     # terminal_dp_id is SCENARIO-DESIGN identity, DERIVED — never a CLI knob.
     # Under imposed history each m8 scenario carries exactly ONE decision-kind
     # point (the terminal probe); it must be unique within every scenario and
@@ -351,7 +361,8 @@ def cmd_order_report(args):
             replay_attestation=attestation,
             terminal_dp_id=terminal_ids.pop(),
             surviving_counts=surviving_counts,
-            retries_per_unit=retries_per_unit)
+            retries_per_unit=retries_per_unit,
+            frozen_grid=frozen_grid)
     except SchemaError as e:
         # typed refusal: NOTHING is written — a refusal is an inconclusive
         # result, never a number (and never a file bearing distances)

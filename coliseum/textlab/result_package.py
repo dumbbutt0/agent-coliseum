@@ -117,11 +117,18 @@ def _recompute_order_report(experiment_id: str, registry_path: str,
             f"{experiment_id}: triplet disagrees on the terminal probe id "
             f"{sorted(terminal_ids)}")
 
+    # d-006: thread the FROZEN matched-unit grid from the verified design so the
+    # recomputation enforces the pre-registered unit count and (variant,
+    # scenario_seed) group axis. An extra/unfrozen group cannot scale "required"
+    # to match here any more than it can on the CLI analysis path, so a package
+    # built over an unfrozen-group pack refuses at recomputation.
+    frozen_grid = metrics_mod.frozen_grid_from_design(vb.planned_design)
     return metrics_mod.order_sensitivity_report(
         run_dirs, conditions, admissibility_policy=vb.admissibility_policy,
         thresholds=vb.thresholds, replay_attestation=attestation,
         terminal_dp_id=terminal_ids.pop(),
-        surviving_counts=surviving_counts, retries_per_unit=retries_per_unit)
+        surviving_counts=surviving_counts, retries_per_unit=retries_per_unit,
+        frozen_grid=frozen_grid)
 
 
 def build_result_package(experiment_id: str, manifest_path: str, out_root: str,

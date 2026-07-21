@@ -570,10 +570,21 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     experiment_id = spec.get("experiment_id")
     registry_path = spec.get("registry_path", "configs/registry/experiments.yaml")
     spec_scenarios = list(spec.get("scenarios") or [])
+    # b-006 (fail-closed): a FAILED protected-scenario resolution is NOT "no
+    # protected scenarios". A benign registry with no policy-required designs
+    # returns an EMPTY map WITHOUT raising and is still allowed (the sweep is
+    # simply non-policy); but if `protected_scenarios` RAISES — the caller-
+    # selected registry cannot resolve protection — the sweep cannot prove its
+    # scenarios are non-protected and MUST fail closed before any provider
+    # contact, never silently proceed as an ordinary (non-policy) sweep.
     try:
         protmap = protected_scenarios(registry_path)
-    except Exception:
-        protmap = {}
+    except Exception as exc:
+        raise SweepAborted(
+            f"cannot resolve protected scenarios from registry "
+            f"{registry_path!r} ({exc}) — a sweep whose scenarios cannot be "
+            "proven non-protected fails closed before any provider contact "
+            "rather than proceeding as an ordinary sweep") from exc
     protected_owners = {protmap[s] for s in spec_scenarios if s in protmap}
     policy_required = (experiment_id in POLICY_REQUIRED_EXPERIMENTS
                        or bool(protected_owners))

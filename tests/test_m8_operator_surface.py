@@ -203,14 +203,15 @@ def test_order_report_end_to_end_reaches_verdict_json(tmp_path, monkeypatch,
 
     def fake_osr(run_dirs, conditions, *, admissibility_policy, thresholds,
                  replay_attestation, terminal_dp_id, surviving_counts,
-                 retries_per_unit=None):
+                 retries_per_unit=None, frozen_grid=None):
         captured.update(run_dirs=run_dirs, conditions=conditions,
                         admissibility_policy=admissibility_policy,
                         thresholds=thresholds,
                         replay_attestation=replay_attestation,
                         terminal_dp_id=terminal_dp_id,
                         surviving_counts=surviving_counts,
-                        retries_per_unit=retries_per_unit)
+                        retries_per_unit=retries_per_unit,
+                        frozen_grid=frozen_grid)
         # the cli DERIVES the terminal probe from the triplet's unique
         # decision-kind point — for the m8 scenarios that is d_partner
         assert terminal_dp_id == "d_partner"
@@ -239,6 +240,10 @@ def test_order_report_end_to_end_reaches_verdict_json(tmp_path, monkeypatch,
     assert captured["admissibility_policy"]["max_non_decision_rate"] == 0.2
     assert captured["thresholds"]["max_surviving_delta"] == 2
     assert captured["thresholds"]["permutation_seed"] == 20260719
+    # d-006: the policy-required entrypoint threads the FROZEN matched-unit grid
+    # (pinned count + group axis) from the verified design — omission is impossible
+    assert captured["frozen_grid"] == {"scenario_seeds": [42, 1],
+                                       "matched_units_per_condition": 48}
 
 
 def test_order_report_typed_refusal_writes_no_distances_file(tmp_path,
@@ -792,6 +797,84 @@ def test_result_package_refuses_a_forged_verdict(tmp_path):
     with pytest.raises(SchemaError, match="independent recomputation"):
         build_result_package(EID, manifest, out_root, REGISTRY, other_report,
                              {}, config_dir="configs/scenarios")
+
+
+def _unfrozen_three_group_pack(tmp_path, subdir="probe3"):
+    """The d-006 probe as a REAL buildable pack: the frozen two groups PLUS an
+    unfrozen ('v2_probe', 7) group across A/B/C (3 conditions x 3 groups x 24
+    sampler seeds = 216 run dirs). Returns (manifest, out_root) with a
+    contract-shaped attestation on disk. No recomputed report is written — the
+    recompute now REFUSES this shape, which is the point of the test."""
+    out_root = str(tmp_path / subdir)
+    os.makedirs(out_root)
+    run_ids = []
+    rows = []
+    groups = list(oc.VARIANTS) + [("v2_probe", 7)]   # ('v2_probe', 7) is UNFROZEN
+    for cond in ("A", "B", "C"):
+        for variant, scen_seed in groups:
+            for samp in oc.SAMPLER_SEEDS:
+                d = oc._write_unit(out_root, cond, variant, scen_seed, samp,
+                                   "share_resource")
+                rid = os.path.basename(d)
+                run_ids.append(rid)
+                rj = os.path.join(d, "run.json")
+                with open(rj, encoding="utf-8") as fh:
+                    run = json.load(fh)
+                run["comparison_regime_id"] = f"regime_{cond}"
+                with open(rj, "w", encoding="utf-8") as fh:
+                    json.dump(run, fh)
+                rows.append({"regime_id": f"regime_{cond}", "model": "",
+                             "scenario": oc.CONDITIONS[cond],
+                             "scenario_seed": scen_seed, "sampler_seed": samp,
+                             "variant_id": variant, "temperature": 0.7,
+                             "sampling_mode": "stochastic", "digest": "",
+                             "scenario_hash": "",
+                             "arbitration": "planner_priority", "run_id": rid,
+                             "dir": rid, "reportable": True,
+                             "stochastic_reportable": True,
+                             "interaction_mode": "sequential_history",
+                             "path": ["expose", "share_resource"]})
+    manifest = os.path.join(out_root, "manifest.jsonl")
+    with open(manifest, "w", encoding="utf-8") as mf:
+        for row in rows:
+            mf.write(json.dumps(row) + "\n")
+    _write_attestation(manifest, out_root, run_ids)
+    return manifest, out_root
+
+
+def test_result_package_refuses_an_unfrozen_group_pack(tmp_path):
+    """d-006 (Section D), production seal: a pack carrying an EXTRA unfrozen
+    (variant, scenario_seed) group cannot be packaged. build_result_package
+    RE-DERIVES the order report with the frozen grid threaded from the verified
+    design (frozen_grid_from_design), so the recompute REFUSES the unfrozen group
+    — the required matched-unit count is pinned to the pre-registered 48 and is
+    never scaled to the 72 the 3-group evidence carries — and the package fails
+    closed. The direct recompute refuses identically."""
+    from coliseum.textlab.schema import canonical_json
+    from coliseum.textlab.result_package import _recompute_order_report
+
+    manifest, out_root = _unfrozen_three_group_pack(tmp_path)
+    # a verdict-bearing report on disk; only the recompute can catch the pack
+    report_path = os.path.join(out_root, "order_report.json")
+    with open(report_path, "w", encoding="utf-8") as fh:
+        fh.write(canonical_json(
+            _fake_verdict_report(EXPECTED_CONDITIONS)) + "\n")
+
+    with pytest.raises(SchemaError) as exc:
+        build_result_package(EID, manifest, out_root, REGISTRY, report_path,
+                             {}, config_dir="configs/scenarios")
+    msg = str(exc.value)
+    assert "independent recomputation" in msg
+    assert "inadmissible" in msg
+
+    att = json.load(open(os.path.join(out_root, "replay_attestation.json"),
+                         encoding="utf-8"))
+    with pytest.raises(SchemaError) as exc2:
+        _recompute_order_report(EID, REGISTRY, manifest, out_root,
+                                "configs/scenarios", att)
+    assert "inadmissible" in str(exc2.value)
+    # nothing was sealed
+    assert not os.path.exists(os.path.join(out_root, "result_package.json"))
 
 
 def test_result_package_refuses_verdictless_report_and_missing_attestation(

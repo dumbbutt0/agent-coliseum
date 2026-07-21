@@ -237,6 +237,59 @@ def test_run_sweep_refuses_an_anonymous_protected_scenario(tmp_path,
     assert "scramble_dev_m8" in msg and "anonymous" in msg
 
 
+def test_run_sweep_fails_closed_when_protected_resolution_raises(tmp_path,
+                                                                 monkeypatch):
+    """b-006 (fail-closed): if protected-scenario resolution RAISES (the caller-
+    selected registry cannot resolve protection), an anonymous M8-scenario sweep
+    must fail CLOSED before any provider contact — it may never be swallowed into
+    an empty map and silently reclassified as an ordinary non-policy sweep that
+    reaches the provider boundary without an ExecutionPolicy. Before the fix the
+    `except Exception: protmap = {}` did exactly that (fail-open); now the
+    exception aborts the sweep."""
+    _poison_provider(monkeypatch,
+                     "a sweep that cannot prove non-protection must refuse first")
+
+    def _boom(_registry_path):
+        raise RuntimeError("registry cannot resolve protected scenarios")
+
+    # run_sweep imports protected_scenarios from the registry module at call
+    # time, so patching the source name is what the local import resolves.
+    monkeypatch.setattr(R, "protected_scenarios", _boom)
+
+    # anonymous (no experiment_id) sweep that names a real M8 scenario
+    spec = _min_spec(tmp_path, registry_path=REGISTRY,
+                     scenarios=["scramble_dev_m8"], models=["llama3.1:latest"])
+    del spec["experiment_id"]
+    with pytest.raises(SweepAborted) as exc:
+        run_sweep(spec)
+    msg = str(exc.value)
+    assert "cannot resolve protected scenarios" in msg
+    assert "provider" in msg and "closed" in msg.lower()
+
+
+def test_run_sweep_allows_a_benign_empty_protected_map(tmp_path, monkeypatch):
+    """The other side of b-006: a benign EMPTY protected map (a registry that
+    simply has no policy-required designs) must STILL be allowed — only an
+    EXCEPTION fails closed. An anonymous non-protected sweep gets past the
+    protected-scenario gate and fails (if at all) for an unrelated reason, never
+    with the fail-closed resolution abort."""
+    monkeypatch.setattr(R, "protected_scenarios", lambda _p: {})
+    # a non-protected scenario, anonymous; provider seams left intact so any
+    # downstream failure is a normal execution error, not the resolution gate.
+    spec = _min_spec(tmp_path, registry_path=REGISTRY,
+                     scenarios=["corrupt_king"], models=[], seeds=[],
+                     sampler_seeds=[])
+    spec["config_dir"] = os.path.join(ROOT, "configs", "scenarios")
+    spec.pop("experiment_id", None)
+    try:
+        run_sweep(spec)
+    except SweepAborted as e:
+        # whatever it aborts on, it is NOT the protected-resolution fail-closed
+        assert "cannot resolve protected scenarios" not in str(e)
+    except Exception:
+        pass  # a non-abort execution error is acceptable; the gate did not fire
+
+
 def test_load_verified_bundle_refuses_a_rehashed_primary_event(tmp_path):
     # a-006 B-2: the decision rule / analysis identity is anchored by its
     # sha256; a self-rehash that alters primary_event (recomputing design_hash so

@@ -1288,11 +1288,34 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
             "alpha": alpha}
 
 
+def frozen_grid_from_design(planned_design: dict) -> dict:
+    """The frozen matched-unit expectation for the M8 Phase-2 order report,
+    sourced from the pre-registered (design-hashed, profile-anchored)
+    planned_design. Production entrypoints thread the return value into
+    `order_sensitivity_report` as `frozen_grid=` so the matched-unit gate
+    enforces the FROZEN unit count (`effective_units_per_condition`) and the
+    FROZEN (variant, scenario_seed) group axis (`scenario_seeds`), never a
+    count derived from whatever groups the caller-supplied evidence contains
+    (audit d-006). Raises SchemaError on a malformed design."""
+    seeds = planned_design.get("scenario_seeds")
+    units = planned_design.get("effective_units_per_condition")
+    if not isinstance(seeds, list) or not seeds:
+        raise SchemaError("frozen_grid_from_design: planned_design.scenario_seeds "
+                          "must be a non-empty list")
+    if isinstance(units, bool) or not isinstance(units, int) or units <= 0:
+        raise SchemaError("frozen_grid_from_design: planned_design."
+                          "effective_units_per_condition must be a positive int "
+                          f"(got {units!r})")
+    return {"scenario_seeds": list(seeds),
+            "matched_units_per_condition": units}
+
+
 def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                              admissibility_policy: dict, thresholds: dict,
                              replay_attestation: dict, terminal_dp_id: str,
                              surviving_counts: dict | None = None,
-                             retries_per_unit: int | None = None) -> dict:
+                             retries_per_unit: int | None = None,
+                             frozen_grid: dict | None = None) -> dict:
     """Distributional order-sensitivity report for the m8 Phase-2 live experiment.
 
     Versioned successor to `scramble_terminal_distribution` (which is UNCHANGED
@@ -1325,6 +1348,20 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     `run_dirs`, so only the execution layer can count it. The report always also
     charges its own observed per-condition unit counts against the same bound,
     so an incomplete pack refuses even when a caller omits the census.
+
+    `frozen_grid` (v6, audit d-006) is the pre-registered matched-unit
+    expectation, {"scenario_seeds": [...], "matched_units_per_condition": int},
+    built from the frozen VERIFIED design (see `frozen_grid_from_design`). When
+    supplied the matched-unit gate enforces the FROZEN count and the FROZEN
+    (variant, scenario_seed) GROUP AXIS: the required matched-unit count is the
+    frozen `matched_units_per_condition`, never `|S1 ∪ S2| × #observed groups`,
+    and any observed (variant, scenario_seed) group whose scenario_seed is not
+    in the frozen set — or any EXTRA group beyond the frozen count — is
+    inadmissible and refuses pre-statistics. Without it the count reverts to the
+    evidence-derived derivation (the historical behaviour), so PRODUCTION
+    ENTRYPOINTS FOR THE POLICY-REQUIRED M8 EXPERIMENT MUST PASS IT: otherwise a
+    caller could admit an unfrozen third group whose presence merely scales the
+    "required" count to match — exactly the d-006 fail-open.
 
     Semantics (all frozen in the preregistration
     docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md):
@@ -1703,6 +1740,43 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
     # an entire scenario row is not detectable from run evidence alone; that is
     # what the declared execution census above exists to bound.
     frozen_seeds = s1 | s2
+    # d-006: when the frozen matched-unit expectation is threaded from the
+    # verified design, the required count is FIXED by the pre-registration and
+    # the (variant, scenario_seed) group axis is closed to the frozen
+    # scenario_seeds — the gate no longer scales with whatever groups the
+    # caller-supplied evidence happens to carry. The frozen grid is validated
+    # for internal consistency here so a self-contradictory design refuses
+    # before any statistic rather than silently enforcing a wrong count.
+    frozen_group_seeds = None
+    frozen_matched = None
+    if frozen_grid is not None:
+        if not frozen_seeds:
+            raise SchemaError(
+                "frozen_grid was supplied without a noise_floor_split — the "
+                "frozen matched-unit grid needs the frozen sampler-seed set to "
+                "derive per-group realization; an M8 order report freezes both "
+                "or neither")
+        try:
+            frozen_group_seeds = set(frozen_grid["scenario_seeds"])
+            frozen_matched = frozen_grid["matched_units_per_condition"]
+        except (KeyError, TypeError) as exc:
+            raise SchemaError(
+                "frozen_grid must be {'scenario_seeds': [...], "
+                f"'matched_units_per_condition': int}} — {exc!r}")
+        if not frozen_group_seeds:
+            raise SchemaError("frozen_grid.scenario_seeds must be non-empty")
+        if isinstance(frozen_matched, bool) or not isinstance(frozen_matched, int) \
+                or frozen_matched <= 0:
+            raise SchemaError("frozen_grid.matched_units_per_condition must be a "
+                              f"positive int (got {frozen_matched!r})")
+        want = len(frozen_seeds) * len(frozen_group_seeds)
+        if frozen_matched != want:
+            raise SchemaError(
+                "frozen_grid is self-inconsistent: matched_units_per_condition="
+                f"{frozen_matched} != |frozen sampler seeds|({len(frozen_seeds)}) "
+                f"x |frozen scenario_seeds|({len(frozen_group_seeds)})={want} — "
+                "the frozen matched-unit count must equal the frozen grid it "
+                "claims to cover")
     for agent_id in sorted(per_agent):
         cells = per_agent[agent_id]
         idents = {label: set(cells[label]["units"]) if label in cells else set()
@@ -1722,6 +1796,27 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                     "fixed")
         if frozen_seeds:
             groups = sorted({(v, ss) for (v, ss, _k) in union}, key=repr)
+            # d-006 (fail-closed): when the frozen grid is threaded, the
+            # (variant, scenario_seed) group axis is CLOSED to the frozen
+            # scenario_seeds and the group COUNT is fixed. An extra/unfrozen
+            # group (a new scenario_seed, or a second variant on a frozen seed)
+            # is inadmissible — its presence must NOT be allowed to scale the
+            # required matched-unit count up to meet it.
+            if frozen_group_seeds is not None:
+                obs_seeds = {ss for (_v, ss) in groups}
+                if obs_seeds != frozen_group_seeds \
+                        or len(groups) != len(frozen_group_seeds):
+                    _refuse_pre_statistics(
+                        f"matched_unit_grid — {agent_id} realizes "
+                        f"{len(groups)} (variant, scenario_seed) group(s) "
+                        f"{groups} over scenario_seeds "
+                        f"{sorted(obs_seeds, key=repr)}, not the frozen "
+                        f"{len(frozen_group_seeds)}-group grid over frozen "
+                        f"scenario_seeds {sorted(frozen_group_seeds, key=repr)}; "
+                        "an extra or unfrozen (variant, scenario_seed) group is "
+                        "inadmissible — the frozen matched-unit count is fixed "
+                        "by the pre-registered design and is never scaled to "
+                        "whatever groups the evidence happens to contain")
             for label in cond_labels:
                 for group in groups:
                     have = {k for (v, ss, k) in idents[label]
@@ -1737,7 +1832,10 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                             "); the frozen matched-unit grid must be fully "
                             "realized before the paired permutation null "
                             "decides anything")
-            required = len(frozen_seeds) * len(groups)
+            # d-006: the required count is the FROZEN expectation when the
+            # verified design is threaded, never the evidence-derived product.
+            required = (frozen_matched if frozen_matched is not None
+                        else len(frozen_seeds) * len(groups))
             # matched_units is the ADMISSIBLE paired count (audit d-002 finding
             # 0), not a placeholder echo of `required`: a unit present as a
             # non-decision (empty draws) is NOT a matched pair. The admissible
@@ -1820,7 +1918,11 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                    for label in cond_labels}
             groups = sorted({(v, ss) for lbl in cond_labels
                              for (v, ss, _k) in adm[lbl]}, key=repr)
-            required_pairs = len(frozen_seeds) * len(groups)
+            # d-006: pin the admissible-pair requirement to the FROZEN count
+            # when the verified grid is threaded (the grid gate above already
+            # closed the group axis), never the evidence-derived product.
+            required_pairs = (frozen_matched if frozen_matched is not None
+                              else len(frozen_seeds) * len(groups))
             for x, y in (("A", "B"), ("A", "C")):
                 paired = len(adm.get(x, set()) & adm.get(y, set()))
                 if paired != required_pairs:
