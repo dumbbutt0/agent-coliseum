@@ -102,11 +102,18 @@ STATELESS_EVENTS = frozenset({"WATCHER_ERROR", "STATUS_CHANGED",
                               # keyed by matter_id and carries NO source-request
                               # authority; exactly-once + authority are enforced at
                               # the append boundary (policy.evaluate_matter_accepted).
-                              "MATTER_ACCEPTED"})
+                              "MATTER_ACCEPTED",
+                              # audit-throughput slice 1: a commit-bound test
+                              # receipt is EVIDENCE about a commit, not progress
+                              # on any request — it changes no request state.
+                              "TEST_RECEIPT_RECORDED"})
 
 # events exempt from the commit binding (they record incidents, not progress)
 BINDING_EXEMPT = frozenset({"WATCHER_ERROR", "AUTONOMY_PAUSED",
-                            "REQUEST_CANCELED"})
+                            "REQUEST_CANCELED",
+                            # the receipt carries its OWN target_commit in its
+                            # payload; it is not bound to a request's commit.
+                            "TEST_RECEIPT_RECORDED"})
 
 # once a request is in one of these states, its target_commit is bound
 _BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,

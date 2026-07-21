@@ -54,6 +54,14 @@ EVENT_TYPES = (
     "EXPERIMENT_COMPLETE",
     "REQUEST_CANCELED",
     "WATCHER_ERROR",
+    # audit-throughput slice 1: a COMMIT-BOUND TAMPER-EVIDENT test receipt. One
+    # full-suite run at a target commit records this event; other section audits
+    # of the SAME commit VERIFY it (recompute its content digest + check the
+    # commit binding + green count) instead of re-running the whole suite. It is
+    # STATELESS — it records evidence and never changes any request's state — and
+    # it is NOT "signed": tamper-evidence is the content digest plus the
+    # append-only hash-linked chain, no keys.
+    "TEST_RECEIPT_RECORDED",
     # bounded-autonomy extension (owner amendment): policy-gated automatic
     # approval for explicitly safe sandbox_local experiments
     "POLICY_VALIDATION_REQUIRED",
@@ -134,6 +142,9 @@ SENDER_ALLOWED = {
     "EXPERIMENT_COMPLETE": frozenset({"claude", "human"}),
     "REQUEST_CANCELED": frozenset({"claude", "human"}),
     "WATCHER_ERROR": frozenset({"claude", "codex", "human"}),
+    # the auditor that ran the suite (codex) or the Director (claude) may record
+    # the tamper-evident receipt; the verifier re-checks its digest regardless.
+    "TEST_RECEIPT_RECORDED": frozenset({"claude", "codex"}),
     "POLICY_VALIDATION_REQUIRED": frozenset({"claude"}),
     "AUTO_APPROVED": frozenset({"claude"}),
     "RESULT_VALIDATION_REQUIRED": frozenset({"claude"}),
@@ -238,6 +249,17 @@ EXPERIMENT_TEST_COMMAND = (
     "tests/test_autonomy_runner.py::test_human_approved_without_binding_refused_before_driver "
     "-q")
 ALLOWED_TEST_COMMANDS = (FULL_TEST_COMMAND, EXPERIMENT_TEST_COMMAND)
+
+# audit-throughput slice 1: the domain tag for the commit-bound test receipt
+# digest. `receipt_digest = domain_hash(TEST_RECEIPT_DOMAIN, content)` over the
+# receipt content WITHOUT the digest field, so the digest is tamper-evident
+# (any edit to a covered field changes it) and domain-separated (a receipt can
+# never be reinterpreted as another schema that happens to canonicalize alike).
+TEST_RECEIPT_DOMAIN = "test-receipt.v1"
+# the exact keys the digest covers. target_commit binds the receipt to ONE commit.
+TEST_RECEIPT_CONTENT_KEYS = frozenset({
+    "target_commit", "test_command", "tests_passed", "tests_skipped",
+    "tree_clean", "env_fingerprint"})
 
 # H2 item 11 bounds on request AND verdict content (reject unbounded
 # strings/arrays). Finding prose (evidence, failure_mode, ...) gets a
@@ -492,6 +514,63 @@ def validate_sender(event_type: str, sender: str) -> None:
 SUPPORTED_PROTOCOL_VERSIONS = ("1.0", "2.0")
 
 
+def test_receipt_content(payload: dict) -> dict:
+    """The exact content the receipt digest covers (the payload minus the digest
+    itself). Recomputing `domain_hash(TEST_RECEIPT_DOMAIN, ...)` over this must
+    reproduce `receipt_digest` — that equality IS the tamper-evidence."""
+    return {k: payload[k] for k in TEST_RECEIPT_CONTENT_KEYS if k in payload}
+
+
+def validate_test_receipt_payload(event: dict) -> None:
+    """A TEST_RECEIPT_RECORDED payload is a commit-bound, tamper-evident record
+    that a test command was observed GREEN at an exact commit. It must carry
+    exactly the content keys plus `receipt_digest`, and the digest must recompute
+    from the content (no keys — a domain-separated content hash)."""
+    payload = event["payload"]
+    required = set(TEST_RECEIPT_CONTENT_KEYS) | {"receipt_digest"}
+    if set(payload) != required:
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED payload keys must be exactly "
+            f"{sorted(required)} (got {sorted(payload)})")
+    if not (isinstance(payload["target_commit"], str)
+            and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",
+                             payload["target_commit"])):
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED target_commit must be a 40- or 64-hex sha")
+    if payload["test_command"] not in ALLOWED_TEST_COMMANDS:
+        raise SchemaViolation(
+            f"TEST_RECEIPT_RECORDED test_command {payload['test_command']!r} "
+            "is not an allowed test command")
+    for name in ("tests_passed", "tests_skipped"):
+        v = payload[name]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise SchemaViolation(
+                f"TEST_RECEIPT_RECORDED {name} must be a non-negative int")
+    if payload["tests_passed"] <= 0:
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED tests_passed must be > 0 — a receipt records "
+            "a GREEN run; a red or empty run is never a receipt")
+    if payload["tree_clean"] is not True:
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED tree_clean must be exactly True — a receipt "
+            "at a commit is meaningless if the working tree carried edits")
+    if not isinstance(payload["env_fingerprint"], str) \
+            or not payload["env_fingerprint"] \
+            or len(payload["env_fingerprint"]) > _MAX_FIELD_STRING:
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED env_fingerprint must be a non-empty bounded "
+            "string")
+    digest = payload["receipt_digest"]
+    if not (isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED receipt_digest must be a sha256 hex digest")
+    if domain_hash(TEST_RECEIPT_DOMAIN, test_receipt_content(payload)) != digest:
+        raise SchemaViolation(
+            "TEST_RECEIPT_RECORDED receipt_digest does not match its content — "
+            "the receipt is tamper-evident and a mismatch is a forged/edited "
+            "receipt, refused at the append boundary")
+
+
 def _validate_result_ready_payload(event: dict) -> None:
     """Validate the self-authenticating event-first handoff journal entry.
 
@@ -549,6 +628,8 @@ def validate_event(event: dict, for_append: bool = False) -> None:
         raise SchemaViolation("event payload must be an object")
     if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
         validate_verdict_event_payload(event)
+    if event["event_type"] == "TEST_RECEIPT_RECORDED":
+        validate_test_receipt_payload(event)
     if event["event_type"] in CLASS_C_PAYLOAD_EVENT_TYPES:
         validate_class_c_event_payload(event)
     if event["event_type"] in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
@@ -600,12 +681,36 @@ def validate_request(request: dict, repo_roots) -> None:
     # SOURCE tasks change code and MUST run the full suite; the fast
     # experiment subset is only for experiment run requests, which bind an
     # already-integrated commit whose full suite was verified at integration.
+    # ...UNLESS the request opts into a commit-bound tamper-evident receipt
+    # (audit-throughput slice 1): in a source audit ROUND, one section runs the
+    # full suite and records a receipt, and the others run only the focused
+    # subset for their OWN dimension while VERIFYING that receipt for the
+    # no-regression guarantee. The DEFAULT is unchanged.
+    suite_receipt_required = request.get("suite_receipt_required", False)
+    if not isinstance(suite_receipt_required, bool):
+        raise SchemaViolation("suite_receipt_required must be a bool")
+    if suite_receipt_required and task_kind != "source":
+        raise SchemaViolation(
+            "suite_receipt_required is only meaningful for a source audit round")
     if task_kind == "source" and \
             request["expected_test_command"] != FULL_TEST_COMMAND:
-        raise SchemaViolation(
-            "task_kind 'source' must run the full suite "
-            f"({FULL_TEST_COMMAND!r}); the experiment subset is only for "
-            "experiment run requests binding already-integrated code")
+        if not suite_receipt_required:
+            raise SchemaViolation(
+                "task_kind 'source' must run the full suite "
+                f"({FULL_TEST_COMMAND!r}) unless it sets suite_receipt_required "
+                "and verifies a commit-bound receipt for the full suite")
+        if request["expected_test_command"] != EXPERIMENT_TEST_COMMAND:
+            raise SchemaViolation(
+                "a receipt-backed source audit must still run the focused "
+                f"subset for its own dimension ({EXPERIMENT_TEST_COMMAND!r})")
+    if suite_receipt_required:
+        n = request.get("suite_receipt_expected_count")
+        if not isinstance(n, int) or isinstance(n, bool) \
+                or not (0 < n <= _MAX_TEST_COUNT):
+            raise SchemaViolation(
+                "suite_receipt_expected_count must be an int in "
+                f"1..{_MAX_TEST_COUNT} when suite_receipt_required — it is the "
+                "full-suite green count the receipt must match")
     # H2 item 11: bool is not an int (isinstance(True, int) is True in
     # Python) and the count is bounded
     if not isinstance(request["expected_test_count"], int) \
@@ -831,6 +936,28 @@ def validate_verdict(verdict: dict, result_audit: bool = False) -> None:
     if matter_class is not None and matter_class not in ("A", "B", "C", "D"):
         raise SchemaViolation(
             f"matter_class must be one of 'A'/'B'/'C'/'D' (got {matter_class!r})")
+    # audit-throughput slice 1: an OPTIONAL reference to the commit-bound receipt
+    # this section relied on for the no-regression suite (instead of re-running
+    # it). When present, `tests_observed` is this section's FOCUSED count. The ref
+    # only NAMES the receipt; the binding CHECK (verify_test_receipt against the
+    # chain) is fail-closed at record time in codex_watch, so a ref to a receipt
+    # that does not verify can never yield a GO.
+    ref = verdict.get("suite_receipt_ref")
+    if ref is not None:
+        if result_audit:
+            raise SchemaViolation(
+                "suite_receipt_ref applies only to source audits")
+        if not isinstance(ref, dict) or set(ref) != {"target_commit",
+                                                     "receipt_digest"}:
+            raise SchemaViolation(
+                "suite_receipt_ref must be {'target_commit', 'receipt_digest'}")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}",
+                            str(ref["target_commit"])):
+            raise SchemaViolation(
+                "suite_receipt_ref.target_commit must be a git commit sha")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(ref["receipt_digest"])):
+            raise SchemaViolation(
+                "suite_receipt_ref.receipt_digest must be a sha256 hex digest")
     want = compute_verdict_payload_hash(verdict)
     if verdict["verdict_payload_hash"] != want:
         raise SchemaViolation("verdict_payload_hash does not match content")

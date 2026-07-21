@@ -19,6 +19,7 @@ import time
 from tools.council import (events, get_config, locking, state_machine,
                            storage, strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
+                                   FULL_TEST_COMMAND,
                                    VERDICT_TO_EVENT, RESULT_VERDICT_TO_EVENT,
                                    compute_verdict_payload_hash,
                                    validate_verdict,
@@ -247,6 +248,34 @@ def submit_verdict(root: str, cfg, verdict: dict,
     verdict["verdict_payload_hash"] = compute_verdict_payload_hash(verdict)
     validate_verdict(verdict, result_audit=result_audit)
 
+    # audit-throughput slice 1 (FAIL-CLOSED): a receipt-backed source audit ran
+    # only the focused subset for its own dimension and relies on a commit-bound
+    # receipt for the no-regression suite. Before a GO is recorded the receipt
+    # MUST verify against the chain — recompute its digest, match the request's
+    # target_commit, and equal the frozen full-suite green count. No verifiable
+    # receipt => no GO (a section cannot certify a suite it neither ran nor
+    # verified). A BLOCKED verdict asserts nothing green, so it is exempt.
+    if not result_audit and request.get("suite_receipt_required") \
+            and verdict["verdict"] in ("AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS"):
+        from tools.council.test_receipt import verify_test_receipt
+        ref = verdict.get("suite_receipt_ref")
+        if not ref:
+            raise SchemaViolation(
+                "receipt-backed source GO must carry a suite_receipt_ref — it "
+                "ran only the focused subset and cannot certify the suite "
+                "without a verified commit-bound receipt")
+        if ref["target_commit"] != request["target_commit"]:
+            raise SchemaViolation(
+                "suite_receipt_ref.target_commit does not match the request's "
+                "target_commit — a receipt for another commit is inadmissible")
+        ok, reason = verify_test_receipt(
+            root, request["target_commit"],
+            request["suite_receipt_expected_count"],
+            test_command=FULL_TEST_COMMAND,
+            expected_digest=ref["receipt_digest"])
+        if not ok:
+            raise SchemaViolation(f"receipt-backed source GO refused: {reason}")
+
     table = RESULT_VERDICT_TO_EVENT if result_audit else VERDICT_TO_EVENT
     if verdict["verdict"] not in table:
         raise SchemaViolation(
@@ -254,6 +283,33 @@ def submit_verdict(root: str, cfg, verdict: dict,
     event = events.append_event(
         root, cfg, table[verdict["verdict"]], SENDER, rid,
         request["repository"], request["target_commit"], verdict)
+    # audit-throughput slice 1: when a source section OBSERVED a green FULL
+    # SUITE at the target commit, auto-record the commit-bound receipt so the
+    # remaining sections of the same round can VERIFY it instead of re-running.
+    # The receipt is therefore produced by an AUDITOR's own observed run, never
+    # by the builder. Idempotent per commit, and never allowed to fail a verdict
+    # that is already durable (the receipt is an optimization, not authority).
+    if not result_audit \
+            and request.get("expected_test_command") == FULL_TEST_COMMAND \
+            and verdict.get("working_tree_clean") is True \
+            and verdict.get("tests_observed") == request.get(
+                "expected_test_count"):
+        try:
+            from tools.council.test_receipt import (find_test_receipt,
+                                                    record_test_receipt)
+            if find_test_receipt(root, request["target_commit"]) is None:
+                record_test_receipt(
+                    root, cfg, target_commit=request["target_commit"],
+                    repository=request["repository"],
+                    tests_passed=verdict["tests_observed"],
+                    # the verdict schema reports only the PASSED count; skipped
+                    # is not part of the green criterion the receipt certifies.
+                    tests_skipped=0, tree_clean=True,
+                    env_fingerprint=f"{sys.platform}:py{sys.version_info.major}."
+                                    f"{sys.version_info.minor}",
+                    sender=SENDER)
+        except Exception:
+            pass
     # The event append above is the AUTHORITY: the state machine refuses a
     # second verdict regardless of locks or file locations, so an absent
     # lock never permits one. Everything below is finalization — the claim
