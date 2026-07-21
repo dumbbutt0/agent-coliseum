@@ -1026,6 +1026,42 @@ def test_verdict_distributional_order_effect_states_the_marginal_claim(tmp_path)
     assert "marginal" in rep["claim_limitation"]
 
 
+def test_tie_fix_is_internal_and_display_bytes_unchanged(tmp_path):
+    """d-005 F1 regression. The full-precision tie correction is INTERNAL to
+    verdict evaluation: the raw decision basis (observed / quantile_raw) is
+    consumed to decide and then stripped, so the serialized report and the
+    recomputed package carry ONLY the 6-decimal display members — the tie fix
+    leaves the display report byte-unchanged. And the conservative tie tolerance
+    is a pinned sub-grid constant that resolves an exact tie to a NON-rejection.
+    """
+    from coliseum.textlab.metrics import ORDER_DECISION_TIE_EPS
+    # a null pack: A/B/C unit-identical over the frozen 48-seed grid => TV(A,B)=0
+    # sits exactly on its permutation quantile (0), an exact tie that must NOT
+    # reject. This is the boundary the old asymmetric rounding turned positive.
+    dirs = _build(tmp_path, {c: _mixed(0) for c in ("A", "B", "C")})
+    rep = _report(dirs, _BIG_POLICY, THRESH(_HALF1, _HALF2))
+    agent = rep["per_agent"]["live"]
+    assert agent["tv_distances"]["A|B"] == 0.0                 # observed == quantile
+    assert agent["verdict"] == "no_distributional_order_effect_observed"
+
+    # F1: the serialized permutation_null carries ONLY the display members; the
+    # raw decision internals (observed / quantile_raw) never reach the bytes.
+    display_keys = {"quantile", "median", "max", "matched_units",
+                    "iterations", "alpha"}
+    for pair in ("A|B", "A|C"):
+        assert set(agent["permutation_null"][pair]) == display_keys, pair
+        assert "observed" not in agent["permutation_null"][pair]
+        assert "quantile_raw" not in agent["permutation_null"][pair]
+    # and no raw-precision key leaks into the canonical report bytes
+    assert "quantile_raw" not in canonical_json(rep)
+
+    # the tolerance is a pinned sub-grid constant: strictly between 0 and one
+    # 1/48 grid step, so float-noise ties never reject and genuine >=1-step
+    # exceedances always do.
+    assert ORDER_DECISION_TIE_EPS == 1e-9
+    assert 0 < ORDER_DECISION_TIE_EPS < 1.0 / 48
+
+
 def test_failed_sham_voids_a_large_ab_distance(tmp_path):
     """The load-bearing negative case: TV(A,B) clears its own null, but the sham —
     A's own order with only agent-facing wording changed — also moves. The verdict

@@ -550,27 +550,34 @@ The artifact's `mde_selection` block recomputes that choice from the
 committed run, so the frozen value regenerates from the artifact alone.
 `power_target` is never shrunk to rescue a smaller boundary.
 
-**Measured result (committed artifact, 10000-iteration null, 400 trials per
-charged arm).** The rule yielded:
+**Measured result (committed artifact, ORDER_REPORT_VERSION 6, 10000-iteration
+null; 400 outer trials per copy-mode / power arm, 3000 for the law-exchangeable
+type-I arms).** The rule yielded:
 
 | Effect (TV) | Measured power | CP-95 interval | Meets `power_target = 0.8`? |
 |---|---|---|---|
-| 0.25 | 0.800 | [0.757, 0.838] | **no** — lower bound 0.757 < 0.8 |
-| **0.35** | **0.9925** | **[0.978, 0.998]** | **yes — frozen MDE** |
+| 0.25 | 0.780 | [0.736, 0.820] | **no** — lower bound 0.736 < 0.8 |
+| **0.35** | **0.9875** | **[0.971, 0.996]** | **yes — frozen MDE** |
 | 0.50 | 1.000 | [0.991, 1.000] | yes |
 | 0.75 | 1.000 | [0.991, 1.000] | yes |
 | 1.00 | 1.000 | [0.991, 1.000] | yes |
 
-So **`min_detectable_effect` is frozen at `0.35`** — the **distributional
-detectable-effect floor**, the honest smallest grid effect the design reliably
-resolves (value unchanged at the a-005 re-framing; only its description is now
-distributional). The point estimate at 0.25 was exactly
-0.80, but its lower confidence bound fell short of the target, and neither the
-value nor `power_target` was adjusted to make 0.25 pass. **Effects between
-`0.25` and `0.35` total variation are real possibilities this design cannot
-reliably detect at `n = 48`; an inconclusive outcome in that band is expected
-and is not a null result.** The four distributional-null type-I arms all measured
-`0/400` (CP-95 upper bound `0.0092 <= alpha = 0.05`).
+So **`min_detectable_effect` is frozen at `0.35`** — **demonstrated sensitivity**
+under the specific simulated marginal-shift alternative families, the smallest
+grid effect whose measured-power CP-95 lower bound reaches `power_target`. This
+is NOT a universal detection guarantee; a-006 keeps this sensitivity layer
+strictly separate from the swap-invariance null and from the marginal-TV
+estimand. The point estimate at 0.25 fell to 0.780 and its lower confidence
+bound fell short of the target, and neither the value nor `power_target` was
+adjusted to make 0.25 pass. **Effects between `0.25` and `0.35` total variation
+are real possibilities this design cannot reliably detect at `n = 48`; an
+inconclusive outcome in that band is expected and is not a null result.** Type-I
+is charged in TWO null modes (a-006). The four **copy-mode** swap-invariance arms
+measured `0/400` (CP-95 upper `0.0092 <= alpha = 0.05`); the three
+**law-exchangeable** swap-invariance arms, charged at 3000 trials, measured
+`0.0327` (uniform, CP-95 `[0.0266, 0.0397]`), `0.0370` (graded, `[0.0305,
+0.0444]`), and `0.0340` (concentrated, `[0.0278, 0.0411]`) — every charged type-I
+CP-95 upper bound `<= alpha`, so `all_criteria_pass` holds.
 
 **The sham-equivalence margin is intentionally tighter than the MDE.**
 `sham_equivalence_margin = 0.25 < min_detectable_effect = 0.35`: the sham
@@ -580,49 +587,57 @@ scientifically conservative direction — raising the margin to 0.35 to "match"
 the MDE would *weaken* the sham warrant (`q_AC < margin` becomes easier to
 grant) — so the two bounds are deliberately decoupled.
 
-**The null arms must mechanically satisfy the canonical distributional null**
-(audit a-004 finding 0, held through a-005): a distributional-null H0 trial
-generates each matched unit's terminal action **once** and copies it across
-A/B/C exactly — identical schedules have identical marginals, the design
-declares no condition-independent noise, so none is applied — and every
-generated schedule is verified **unit-by-unit before analysis** (concordant by
-construction); named alternative arms are verified to violate it on
-their declared axis. Under seeded per-unit decoding this is the faithful
-model, not a convenience: if order (or the sham rewording) truly makes no
-difference to a unit's computation, the realized terminal action is
-identical. A structural consequence, stated honestly: under the distributional
-null so constructed the observed pack is condition-invariant, so the
-false-rejection rate is exactly zero and the frozen type-I bound holds
-mechanically — the paired permutation test at its own reference distribution,
-exercised end-to-end rather than assumed.
+**The null arms must mechanically satisfy the swap-invariance null**
+(a-004 finding 0, held through a-006), in TWO modes verified unit-by-unit before
+analysis. In **copy mode** each matched unit's terminal action is generated
+**once** and copied across A/B/C exactly (identical realizations, so every
+matched pair is byte-identical and trivially swap-invariant; the design declares
+no condition-independent noise, so none is applied); under seeded per-unit
+decoding this is the faithful model — if order truly makes no difference to a
+unit's computation the realized terminal action is identical, the pack is
+condition-invariant, and the false-rejection rate is exactly zero. In
+**law-exchangeable mode** A/B/C are drawn iid from ONE per-condition law, so the
+realizations differ unit by unit while the pair is exchangeable and independent
+across units — a genuine swap-invariance null case verified BY LAW (equal
+per-condition laws + iid generation), NOT by realization identity, and charged
+type-I at 3000 trials for a tight CP-95 bound. Named alternative arms are
+verified to violate the null on their declared axis. The paired permutation test
+is exercised at its own reference distribution end-to-end, never assumed.
 
-**The former iid equal-marginal "H0" arms are relabeled, not deleted**: A, B,
-C drawn iid from one distribution makes the *pair* distribution exchangeable
-— so the test still rejects near or below `alpha` for that broader family,
-reported as robustness context — but each such pack has equal marginals only in
-expectation while disagreeing unit by unit (the audit measured 27–44 discordant
-units per pack), so those rates are exchangeability-robustness context, never
-charged as distributional-null type-I. The dependent shared-latent two-mode
-process from audit 001828 finding 1 is characterised in both halves: the null
-holds within mode (equal marginals across conditions, charged type-I) and the
-separating case where within-pack A/B marginals differ (reported as correct
-detection).
+**The iid equal-marginal arms are now CHARGED type-I (a-006), not context**: A,
+B, C drawn iid from one per-condition law makes the pair exchangeable and
+independent across units, so the generating law IS swap-invariant — a genuine
+null the test must control, charged at 3000 trials (measured `0.0327` / `0.0370`
+/ `0.0340`, all CP-95 upper `<= alpha`). Their realizations differ unit by unit
+(the prior audit measured 27–44 discordant units per pack), which is exactly why
+the test is verified BY LAW rather than by realization identity. Separately, the
+**non-exchangeable equal-marginal ALTERNATIVES** (a-006) hold the population
+marginals equal (TV(A,B) = 0 exactly, via a balanced base) while the within-unit
+joint is NOT swap-symmetric: swap invariance is FALSE yet the marginal TV
+statistic is identically zero, so the frozen rule cannot reject (both arms
+`0/400`). These DOCUMENT the design's outside-null sensitivity limitation — TV=0
+is never evidence the null holds — and are never charged type-I. The dependent
+shared-latent process is characterised as a copy-mode dependence-robustness arm
+(swap-invariant within mode, dependent across units; charged type-I, `0/400`).
 
 **Power is characterised with the sham axis holding the null** (`C` copied from
-`A`, verified): under the unified null form that is what "the sham is truly
-null" means. The exchangeability-context arms show the design's behavior
-when the sham axis is null only in distribution — the warrant frequently
-refuses and the pack goes inconclusive, which is conservative, never
-anti-conservative. The sham-gate's residual process-level leakage over a
-contaminated-at-MDE sham is reported with its CI as context; the frozen
-fitness criteria are exactly `type_i_criterion` and `power_target`, and the
-absolute observation-level sham guarantees (the boundary pack never
-promotes; every positive carries the warrant) are pinned deterministically
-in the test suite.
+`A`, verified): under the swap-invariance null that is what "the sham is truly
+null" means. The sham-gate's residual process-level leakage over a
+contaminated-at-margin sham is reported with its CI as context (measured `0.030`,
+CP-95 `[0.011, 0.064]`); the frozen fitness criteria are exactly
+`type_i_criterion` and `power_target`, and the absolute observation-level sham
+guarantees (the boundary pack never promotes; every positive carries the
+warrant) are pinned deterministically in the test suite. The decision rule uses
+a conservative full-precision tie handling: the observed statistic is the
+identity permutation on the null's own scale, and an exact tie with the
+`(1 - alpha)` quantile is a NON-rejection (a `1e-9` sub-grid tolerance absorbs
+float noise without ever masking a genuine `>=` one-grid-step effect); the raw
+decision basis stays internal and is not serialized into the report.
 
 The characterisation uses the exact frozen decision parameters — including
 `permutation_iterations = 10000` and `bootstrap_iterations = 10000`, never
-substituted smaller values — with 400 outer trials per charged arm and exact
+substituted smaller values — with 400 outer trials per copy-mode/power arm (3000
+for the law-exchangeable type-I arms) and exact
 Clopper-Pearson intervals reported, not point estimates (audit 001828
 finding 3). It is committed as an artifact produced by the same frozen
 threshold bundle the production path loads; a CI regression asserts echo and

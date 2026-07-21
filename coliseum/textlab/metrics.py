@@ -827,6 +827,15 @@ def scramble_terminal_distribution(run_dirs: list, conditions: dict) -> dict:
 # definition moved.
 ORDER_REPORT_VERSION = "6"
 
+# Conservative sub-grid tie tolerance for the paired-permutation decision. The
+# observed (identity, no-swap) TV and the (1 - alpha) percentile rep are the SAME
+# rational at a genuine tie but float-accumulate differently; every achievable TV
+# on the frozen n=48 design lies on the k/48 grid (spacing ~0.0208), so a gap
+# below this tolerance is float noise on an exact tie (a NON-rejection), while a
+# genuine >= one-grid-step exceedance (~2e7x the tolerance) still rejects. Named
+# at module scope so the tie contract is importable and regression-pinned.
+ORDER_DECISION_TIE_EPS = 1e-9
+
 # Required keys. Both argument dicts are validated up front and fail closed:
 # an order-sensitivity statistic computed without declared bounds is exactly the
 # artifact this whole module exists to prevent.
@@ -1866,24 +1875,31 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         # reject. `observed` is the identity permutation on the null's own
         # scale, `quantile_raw` the unrounded (1 - alpha) percentile. The
         # rounded tv_ab/tv_ac/q_ab/q_ac remain the DISPLAY values in
-        # decision_inputs and every verdict_reason string, so the reported
-        # numbers and replay are byte-unchanged — only the branch test changes.
+        # decision_inputs and every verdict_reason string.
         tv_ab_dec = out["permutation_null"]["A|B"]["observed"]
         tv_ac_dec = out["permutation_null"]["A|C"]["observed"]
         q_ab_dec = out["permutation_null"]["A|B"]["quantile_raw"]
         q_ac_dec = out["permutation_null"]["A|C"]["quantile_raw"]
-        # CONSERVATIVE TIE TOLERANCE. The observed (identity, unswapped) TV and
-        # the (1 - alpha) percentile REP (a swapped pool) are the SAME rational
-        # at a genuine tie, but their float-accumulation paths differ, so a raw
-        # `>` still turned ~half of the true ties into spurious rejections
-        # (concentrated stayed anti-conservative at ~4.9%). Every achievable TV
-        # on this frozen design lies on the k/48 grid (spacing ~0.0208), so any
-        # gap below _ORDER_DECISION_TIE_EPS is float noise on an exact tie, never
-        # a real exceedance: a rejection requires the observed to exceed the
-        # quantile by MORE than the tolerance. This is the tie half of
-        # "full-precision conservative tie handling"; it never suppresses a
-        # genuine effect (>= one grid step, ~2e7 x the tolerance).
-        _ORDER_DECISION_TIE_EPS = 1e-9
+        # d-005 F1: the raw decision basis is consumed ABOVE into the *_dec
+        # locals and is NOT part of the serialized contract. Strip observed /
+        # quantile_raw from the permutation_null dicts now, so the emitted
+        # report and the recomputed result package carry only the 6-dp display
+        # members (quantile/median/max/matched_units/iterations/alpha). Raw
+        # precision stays INTERNAL to verdict evaluation; the display report
+        # and replay bytes are then genuinely unchanged by the tie fix — only
+        # the branch test moved to full precision.
+        for _pn in (out["permutation_null"]["A|B"],
+                    out["permutation_null"]["A|C"]):
+            _pn.pop("observed", None)
+            _pn.pop("quantile_raw", None)
+        # CONSERVATIVE TIE TOLERANCE (module constant ORDER_DECISION_TIE_EPS).
+        # The observed (identity, unswapped) TV and the (1 - alpha) percentile
+        # REP (a swapped pool) are the SAME rational at a genuine tie, but their
+        # float-accumulation paths differ, so a raw `>` still turned ~half of the
+        # true ties into spurious rejections (concentrated stayed anti-
+        # conservative at ~4.9%). A rejection requires the observed to exceed the
+        # quantile by MORE than the tolerance; it never suppresses a genuine
+        # effect (>= one grid step, ~2e7 x the tolerance).
         # RETAINED, DIAGNOSTIC ONLY. TV_null and its bootstrap interval describe
         # within-condition stability across the frozen sampler-seed halves. They
         # GATE NOTHING at ORDER_REPORT_VERSION 6 and appear in no branch of the
@@ -1925,7 +1941,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         # q_AC < sham_equivalence_margin, STRICT. The audit's pinned boundary
         # case (TV(A,C) = q_AC = sham_equivalence_margin = 0.25 with decisive
         # A/B separation) is therefore `inconclusive`, never a positive.
-        if tv_ac_dec > q_ac_dec + _ORDER_DECISION_TIE_EPS:
+        if tv_ac_dec > q_ac_dec + ORDER_DECISION_TIE_EPS:
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
                 f"sham not null: observed TV(A,C)={tv_ac} exceeds its paired "
@@ -1940,7 +1956,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             # the null (clause 4) has its control warrant.
             rejected = ("the A/B comparison did reject its swap-invariance null "
                         f"(TV(A,B)={tv_ab} > q_AB={q_ab}), but "
-                        if tv_ab_dec > q_ab_dec + _ORDER_DECISION_TIE_EPS else "")
+                        if tv_ab_dec > q_ab_dec + ORDER_DECISION_TIE_EPS else "")
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
                 f"sham warrant missing: {rejected}q_AC={q_ac} >= "
@@ -1950,7 +1966,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                 "verdict is unreachable and no null may be asserted — an "
                 "observed sham shift at the design's own effect bound must "
                 "never be labelled null")
-        elif tv_ab_dec > q_ab_dec + _ORDER_DECISION_TIE_EPS:
+        elif tv_ab_dec > q_ab_dec + ORDER_DECISION_TIE_EPS:
             # Clause 3. A rejection WITH the sham warrant. Stated as the
             # SWAP-INVARIANCE conclusion (a-006 A-0 owner decision): the paired
             # permutation test rejects the within-unit swap-invariance null, so

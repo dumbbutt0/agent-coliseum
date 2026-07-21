@@ -188,7 +188,7 @@ def cmd_dataset_export(args):
 # analysis (prereg clause 0), a smoke pack is never claim-bearing, and a typed
 # SchemaError refusal exits nonzero WITHOUT writing a distances-bearing file.
 #
-# NOTE on imports: sweep.verify_pack_replay and the ORDER_REPORT_VERSION-4
+# NOTE on imports: sweep.verify_pack_replay and the ORDER_REPORT_VERSION-6
 # signature of metrics.order_sensitivity_report are Director-defined contracts
 # implemented concurrently; they are imported LATE (inside the commands) so
 # this module always imports, and a missing contract symbol surfaces as a
@@ -693,7 +693,7 @@ def main(argv=None):
     s.add_argument("--out-root", required=True)
     s.add_argument("--config-dir", default="configs/scenarios")
 
-    s = sub.add_parser("order-report", help="ORDER_REPORT_VERSION-4 analysis "
+    s = sub.add_parser("order-report", help="ORDER_REPORT_VERSION-6 analysis "
                        "of a replay-attested pack (refuses smoke packs and "
                        "unattested evidence)")
     s.set_defaults(fn=cmd_order_report)
