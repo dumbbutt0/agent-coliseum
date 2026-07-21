@@ -10,7 +10,7 @@ all be regenerated against the values below, never inherited across a change.
 | Field | Value |
 |---|---|
 | `experiment_id` | `m8-phase2-live-order-sensitivity` |
-| `design_hash` | `ce8eff3eaa9f891029bcdc5b79ef9634145601e462b14fc9742503dea00e37bd` (post-a-005; pending recompute at the a-006 swap-invariance re-framing — see below) |
+| `design_hash` | `431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533` (post-a-006 swap-invariance recompute; reconstructs from `planned_design`, registry lint clean — see below) |
 | Rule version pinned by the design | `ORDER_REPORT_VERSION 6` |
 | `null_form` | `swap_invariance` |
 
@@ -182,12 +182,21 @@ keeping the three inferential layers explicitly separate (swap-invariance null =
 the inferential hypothesis; marginal `TV(P_A,P_B)` = the effect-size estimand;
 MDE 0.35 = demonstrated sensitivity). `null_form` becomes `swap_invariance`, the
 `null_statement`, `type_i_criterion` wording, claim limitation, and verdict-reason
-prose are re-framed, and the callable version bumped `5 → 6`. The arithmetic and
-every numeric threshold are again unchanged, so the operating-characteristics
-numbers are unchanged. The `design_hash` recompute (from `ce8eff3e…`) and the
-operating-characteristics artifact regeneration are a **subsequent milestone**;
-until then the registry entry still carries `ce8eff3e…` and the design-hash
-reconstruction lint reports exactly that one expected mismatch.
+prose are re-framed, and the callable version bumped `5 → 6`. The frozen decision
+**parameters** (alpha, permutation/bootstrap iterations, seeds, thresholds) are
+unchanged, but a-006 is NOT wording-only: (i) the operating-characteristics study
+was rebuilt around two control families — the `iid_equal_marginals_*` arms are
+reclassified from context to charged type-I at 2000 trials (law-exchangeable null
+mode), and non-exchangeable equal-marginal alternatives (TV=0, swap invariance
+false) are added to document the outside-null sensitivity limitation; and (ii)
+the decision rule's tie handling was corrected to full precision with a
+conservative sub-grid tie tolerance (`_ORDER_DECISION_TIE_EPS = 1e-9`), so an
+observed-equals-quantile tie is a NON-rejection — this changes the verdict only
+on exact ties (the displayed `tv_distances`/quantiles and replay stay
+byte-unchanged). The `design_hash` recompute is complete: `ce8eff3e…` →
+`431871d3…`, reconstructing from `planned_design`, and the operating-
+characteristics artifact is regenerated at ORDER_REPORT_VERSION 6 under the
+corrected rule. The registry lint reports zero m8 issues.
 
 Phase-1 evidence regenerates byte-identically: scripted and mock agents never
 carry these keys in their sampling dict (a key enters lineage only when present),

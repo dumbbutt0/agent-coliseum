@@ -2,7 +2,7 @@
 smoke-pack / result-package, all OFFLINE.
 
 The Director-defined contracts (sweep.verify_pack_replay and the
-ORDER_REPORT_VERSION-5 signature of metrics.order_sensitivity_report) are
+ORDER_REPORT_VERSION-6 signature of metrics.order_sensitivity_report) are
 implemented by concurrent builders; here they are monkeypatched with
 contract-shaped fakes so these tests exercise the OPERATOR surface — argument
 plumbing, refusal ordering, marker discipline, and package integrity — without
@@ -115,7 +115,7 @@ def _fake_verdict_report(conditions):
                      "non_decision_n": 0, "non_decision_rate": 0.0,
                      "non_decision_reasons": {}}
              for label in ("A", "B", "C", "A|S1", "A|S2")}
-    return {"report_id": "order_sensitivity", "order_report_version": "5",
+    return {"report_id": "order_sensitivity", "order_report_version": "6",
             "conditions": dict(conditions), "excluded": [],
             "per_agent": {f"llm:ollama:{MODEL}": {
                 "agent_regime_id": "a" * 64,
@@ -228,7 +228,7 @@ def test_order_report_end_to_end_reaches_verdict_json(tmp_path, monkeypatch,
     rp = os.path.join(out_root, "order_report.json")
     assert os.path.isfile(rp)
     report = json.load(open(rp, encoding="utf-8"))
-    assert report["order_report_version"] == "5"
+    assert report["order_report_version"] == "6"
     # ALL contract kwargs were supplied, from the right sources
     assert captured["conditions"] == EXPECTED_CONDITIONS
     assert captured["surviving_counts"] == {s: 2 for s in SCENARIOS}
@@ -380,10 +380,14 @@ def test_smoke_pack_builds_scaled_spec_and_marker(tmp_path, monkeypatch,
     assert spec["interaction"] == "sequential_history"
     assert "smoke" in os.path.basename(spec["manifest"])
     assert spec["out_root"] == out_root
-    # execution discipline + integrity gates travel with the run
-    assert captured["kwargs"]["execution_order"] == "interleaved"
+    # execution discipline + integrity gates travel with the run as ONE typed
+    # ExecutionPolicy (b-003/c-003), not loose kwargs a caller could omit
+    policy = captured["kwargs"]["execution_policy"]
+    assert policy.execution_order == "interleaved"
+    assert policy.retries_per_unit == 0
+    assert policy.max_surviving_delta == 2
+    assert policy.record_execution_index is True
     assert captured["kwargs"]["expected_digests"] == {MODEL: DIGEST}
-    assert captured["kwargs"]["max_surviving_delta"] == 2
 
 
 # ------------------------------------- smoke-pack authorization gate (B-002)
@@ -413,7 +417,18 @@ def _fixture_registry(tmp_path):
           "temperature": 0.7,
           "arbitration": "planner_priority",
           "interaction_mode": "sequential_history",
+          # the smoke-pack routes through load_verified_bundle (B-0/C-0), which
+          # requires the frozen admissibility bounds to be present; a stochastic
+          # live design must freeze its bounds. Fixture values, on_violation=refuse.
+          "admissibility_policy": {"policy_version": "1",
+                                   "admissibility_version": "1",
+                                   "max_non_decision_rate": 0.2,
+                                   "max_non_decision_rate_delta": 0.1,
+                                   "min_admissible_effective_n": 1,
+                                   "on_violation": "refuse"},
           "thresholds": {"permutation_seed": 20260719},
+          # c-003 frozen contract: no re-rolls; the balance gate needs the delta.
+          "retries_per_unit": 0,
           "max_surviving_delta": 2}
     dh = design_hash(pd)
     reg = {"registry_version": "1",
@@ -687,7 +702,7 @@ def test_result_package_builds_and_verifies(tmp_path):
     entry = _find_entry(REGISTRY, EID)
     assert pkg["design_hash"] == entry["design_hash"]
     assert pkg["design_hash"] == design_hash(entry["planned_design"])
-    assert pkg["order_report_version"] == "5"
+    assert pkg["order_report_version"] == "6"
     # the verdict is the DERIVED one, keyed by the real pack's agent id
     assert pkg["verdicts"] == {REAL_AGENT:
                                "no_distributional_order_effect_observed"}
@@ -783,7 +798,7 @@ def test_result_package_refuses_verdictless_report_and_missing_attestation(
         tmp_path, monkeypatch):
     manifest, out_root, report_path = _analyzed_pack(tmp_path, monkeypatch)
     # refusal-shaped report (no verdict) is never packaged
-    refusal = {"report_id": "order_sensitivity", "order_report_version": "5",
+    refusal = {"report_id": "order_sensitivity", "order_report_version": "6",
                "per_agent": {f"llm:ollama:{MODEL}": {
                    "agent_regime_id": "a" * 64, "cells": {}}}}
     bad_report = os.path.join(out_root, "refusal_report.json")

@@ -202,12 +202,16 @@ def test_config_without_execution_order_refuses(tmp_path, monkeypatch):
     assert calls == []
 
 
-class _HollowBundle:
-    """A verified-bundle stand-in whose frozen design carries no dropout bound —
-    ExecutionPolicy.from_verified_bundle must refuse before any sweep."""
-    experiment_id = EID
-    retries_per_unit = 0
-    max_surviving_delta = None
+def _genuine_bundle_without_dropout_bound():
+    """A GENUINE registry.VerifiedBundle whose frozen design carries no dropout
+    bound. Must be a real VerifiedBundle (not a duck-typed stand-in) so the
+    refusal fires on the MISSING max_surviving_delta (a-006 c-003), not on the
+    isinstance guard (a-006 B-1) that rejects forged/duck-typed bundles first."""
+    from coliseum.textlab.registry import VerifiedBundle
+    return VerifiedBundle(
+        experiment_id=EID, design_hash="0" * 64,
+        planned_design={"retries_per_unit": 0},   # NO max_surviving_delta
+        thresholds={}, admissibility_policy={})
 
 
 def test_registry_bundle_without_dropout_bound_refuses(tmp_path,
@@ -220,7 +224,7 @@ def test_registry_bundle_without_dropout_bound_refuses(tmp_path,
     _install_recorder(monkeypatch, calls)
 
     monkeypatch.setattr(registry_mod, "load_verified_bundle",
-                        lambda path, eid: _HollowBundle())
+                        lambda path, eid: _genuine_bundle_without_dropout_bound())
     with pytest.raises(RunnerRefusal) as exc:
         _drive_ollama_local(ROOT, _m8_config(tmp_path), _far_deadline())
     assert "max_surviving_delta" in str(exc.value)

@@ -24,6 +24,7 @@
     "docs/first-gladiator/M8-AUDIT-COVERAGE-MAP.md",
     "docs/first-gladiator/M8-C1-BUNDLE.md",
     "docs/first-gladiator/M8-CHANGED-PATH-ALLOWLIST.json",
+    "docs/first-gladiator/M8-M6.6-CLAIM-TRACEABILITY.md",
     "docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md",
     "scripts/m8_operating_characteristics.py",
     "tests/fixtures/llm/garbled_m8_seeded.json",
@@ -46,6 +47,6 @@
     "tests/test_textlab_stochastic.py",
     "tools/autonomy/drivers.py"
   ],
-  "path_count": 42,
-  "paths_sha256": "6b1807aa6607440c3ff3259958d5e9ecb2da0f3abbce62362b1e5b2097b3108e"
+  "path_count": 43,
+  "paths_sha256": "640cbd5e84a692aa28649a8521b4515187fc563bc7894e05c0c6d3d165835206"
 }

@@ -537,6 +537,7 @@ def cmd_smoke_pack(args):
             "experiment_id": args.experiment_id,
             "registry_path": args.registry}
     from .registry import load_verified_bundle
+    from .schema import SchemaError
     try:
         _vb = load_verified_bundle(args.registry, args.experiment_id)
         policy = sweep.ExecutionPolicy.from_verified_bundle(

@@ -1,37 +1,43 @@
 """m8 Phase-2 — frozen operating characteristics of the finite-sample decision rule.
 
-RESTRUCTURED AT THE a-004 SCIENTIFIC RE-FREEZE, then re-framed at the a-005
-DISTRIBUTIONAL narrowing (owner decision): the operative null is now the
-canonical distributional (population-marginal) null, the emitted verdicts are
-distributional_order_effect_observed / no_distributional_order_effect_observed,
-and ORDER_REPORT_VERSION is 5. The arithmetic is unchanged, so the committed
-numbers are unchanged. This module regresses the repairs:
+RESTRUCTURED AT THE a-004 SCIENTIFIC RE-FREEZE, re-framed at the a-005
+DISTRIBUTIONAL narrowing, then sharpened at the a-006 WITHIN-UNIT SWAP-INVARIANCE
+null (owner decision): the operative confirmatory null is within-unit JOINT swap
+invariance under across-unit independence, ORDER_REPORT_VERSION is 6, and the
+verdict enum literals distributional_order_effect_observed /
+no_distributional_order_effect_observed are DELIBERATELY retained. The arithmetic
+is unchanged, so the committed numbers of the shared arms are unchanged. This
+module regresses the repairs:
 
-* ONE NULL. The iid equal-marginal packs have equal marginals only in
-  expectation while disagreeing unit by unit in every generated trial (the
-  independent probe measured 27-44 discordant units per pack). The type-I H0
-  arms now generate each unit's terminal action ONCE and copy it across A/B/C
-  exactly (identical marginals by construction), every schedule is MECHANICALLY
-  verified unit-by-unit before analysis, and the iid arms are relabeled
-  exchangeability-robustness context, never charged as type-I. The canonical
-  null statement is echoed verbatim by the committed artifact and anchored in
-  registry.M8_NULL_STATEMENT.
+* THE TWO-MODE NULL. Swap-invariance null arms are charged type-I in BOTH modes:
+  - null_mode "copy" — one draw per unit copied across A/B/C exactly (byte-
+    identical pair). The sharp_h0_* arms. Verified by identical realization.
+  - null_mode "law_exchangeable" — A/B/C drawn iid from the SAME per-condition
+    law (realizations differ, pair exchangeable, independent across units). The
+    iid_equal_marginals_* arms. Verified by LAW (equal per-condition laws + iid
+    generation), NOT by realization identity. Charged type-I at 3000 trials.
 
-* Finding 1 — FROZEN CRITERIA, honest directions. The fitness criteria live
-  in planned_design.thresholds (power_target = 0.8; type_i_criterion = the
-  CP-95 UPPER-bound rule), loaded from the registry — never invented in the
-  script — and min_detectable_effect is frozen as the smallest power-grid
-  effect whose measured power CP-95 LOWER bound reaches power_target. The
-  artifact's mde_selection block recomputes that choice so the frozen value
-  regenerates from the committed run alone.
+* THE NON-EXCHANGEABLE ALTERNATIVES. Equal marginals (TV(A,B)=0) but a
+  non-exchangeable within-unit joint — swap invariance is FALSE yet the marginal
+  statistic is identically zero, so the rule cannot reject (power ~ 0). These
+  document the design's outside-null sensitivity limitation and are NEVER charged
+  type-I.
+
+* FROZEN CRITERIA, honest directions. The fitness criteria live in
+  planned_design.thresholds (power_target = 0.8; type_i_criterion = the CP-95
+  UPPER-bound rule applied to EVERY charged type-I arm, both null modes), loaded
+  from the registry — never invented in the script — and min_detectable_effect is
+  the smallest power-grid effect whose measured power CP-95 LOWER bound reaches
+  power_target. The artifact's mde_selection block recomputes that choice.
 
 The characterisation lives in TWO places with a clean division of labour:
-`scripts/m8_operating_characteristics.py` runs the SLOW study at the exact
-frozen decision parameters (10 000 permutation/bootstrap iterations, 400
-outer trials per charged arm) and writes the committed artifact
-`derived/textlab/m8-operating-characteristics.json`; THIS module is fast —
-structural branch regressions at simulation-harness iteration counts (clearly
-NOT the characterisation) plus the CI regression on the committed artifact.
+`scripts/m8_operating_characteristics.py` runs the SLOW study at the exact frozen
+decision parameters (10 000 permutation/bootstrap iterations; 400 outer trials
+per charged arm, 3000 for the law-exchangeable type-I arms) and writes the
+committed artifact `derived/textlab/m8-operating-characteristics.json`; THIS
+module is fast — structural branch regressions at simulation-harness iteration
+counts (clearly NOT the characterisation) plus the CI regression on the committed
+artifact.
 """
 import importlib.util
 import json
@@ -56,7 +62,7 @@ ARTIFACT = os.path.join(ROOT, "derived", "textlab",
 SCRIPT = os.path.join(ROOT, "scripts", "m8_operating_characteristics.py")
 
 # importing the script module ALSO exercises its two import-time freezes:
-# ORDER_REPORT_VERSION == "5" and CANONICAL_NULL_STATEMENT == the audited
+# ORDER_REPORT_VERSION == "6" and CANONICAL_NULL_STATEMENT == the audited
 # registry.M8_NULL_STATEMENT anchor.
 _spec = importlib.util.spec_from_file_location("m8oc", SCRIPT)
 m8oc = importlib.util.module_from_spec(_spec)
@@ -65,6 +71,14 @@ _spec.loader.exec_module(m8oc)
 # simulation-harness values for the STRUCTURAL tests only — the committed
 # characterisation uses the frozen 10 000s (see the module docstring)
 _SIM_ITERATIONS = 300
+
+# the charged type-I arms, by null mode
+COPY_TYPE_I = {"sharp_h0_iid_uniform", "sharp_h0_iid_graded",
+               "sharp_h0_iid_concentrated", "sharp_h0_shared_latent"}
+LAW_TYPE_I = {"iid_equal_marginals_uniform", "iid_equal_marginals_graded",
+              "iid_equal_marginals_concentrated"}
+NONEXCH_ALT = {"alternative_nonexch_cycle4",
+               "alternative_nonexch_cycle3_fixed"}
 
 
 def _sim_thresholds():
@@ -134,74 +148,150 @@ def test_script_bundle_equals_the_registry_served_bundle():
     assert m8oc.POWER_TARGET == 0.8
     assert m8oc.FROZEN_THRESHOLDS["type_i_criterion"] == M8_TYPE_I_CRITERION
     assert m8oc.CANONICAL_NULL_STATEMENT == M8_NULL_STATEMENT
+    assert m8oc.TYPE_I_HIGH_TRIALS >= 2000       # the >= 2000 "tight CI" floor
+    assert m8oc.TYPE_I_HIGH_TRIALS == 3000       # committed: margin for concentrated
 
 
-# ------------------- 1. THE MECHANICAL ASSERTION (a-004 finding 0 regression)
+# ------------------- 1. THE MECHANICAL ASSERTION (a-006 two-mode regression)
 
-def test_every_sharp_null_arm_generates_concordant_schedules():
-    """For each arm charged type_i, the generated potential-outcome schedule
-    holds the canonical distributional null by construction at EVERY matched
-    unit — one draw per unit, copied across A/B/C exactly (identical marginals),
-    no condition-dependent noise."""
-    charged = {n: a for n, a in m8oc.ARMS.items() if a["charged"] == "type_i"}
-    assert set(charged) == {"sharp_h0_iid_uniform", "sharp_h0_iid_graded",
-                            "sharp_h0_iid_concentrated",
-                            "sharp_h0_shared_latent"}
+def test_copy_mode_type_i_arms_generate_concordant_schedules():
+    """The COPY-mode swap-invariance null arms hold the null by construction at
+    EVERY matched unit — one draw per unit copied across A/B/C exactly (byte-
+    identical pair, identical marginals), no condition-dependent noise."""
+    charged = {n: a for n, a in m8oc.ARMS.items()
+               if a["charged"] == "type_i" and a["null_mode"] == "copy"}
+    assert set(charged) == COPY_TYPE_I
     for name, arm in charged.items():
         assert arm["axes"] == {"AB": True, "AC": True}, name
         for i in range(3):
             rng = random.Random(arm["seed"] + i)
             sched = m8oc.build_schedule(arm["kind"], arm.get("per"), rng)
-            counts = m8oc.verify_schedule(sched, arm["axes"], name)
+            counts = m8oc.verify_schedule(sched, arm["axes"], arm["null_mode"],
+                                          arm.get("per"), name)
             assert counts == {"AB": 0, "AC": 0}, (name, i)
             for unit in m8oc.UNITS:
                 assert sched[("A",) + unit] == sched[("B",) + unit] \
                     == sched[("C",) + unit], (name, i, unit)
 
 
+def test_law_exchangeable_type_i_arms_are_swap_invariant_by_law():
+    """The LAW-EXCHANGEABLE swap-invariance null arms (a-006) are charged type-I
+    and verified BY LAW, not by realization: A/B/C are drawn iid from the SAME
+    per-condition law, so the realizations DIFFER unit by unit (discordant > 0),
+    yet the generating law is swap-invariant. verify_schedule must ACCEPT them on
+    their declared null-holding axes without demanding identical realizations —
+    and reject them if the declared laws are ever unequal."""
+    charged = {n: a for n, a in m8oc.ARMS.items()
+               if a["charged"] == "type_i"
+               and a["null_mode"] == "law_exchangeable"}
+    assert set(charged) == LAW_TYPE_I
+    for name, arm in charged.items():
+        assert arm["kind"] == "law_exch", name
+        assert arm["axes"] == {"AB": True, "AC": True}, name
+        assert arm["coupling"] == "iid_same_law", name
+        assert arm["trials"] == m8oc.TYPE_I_HIGH_TRIALS, name
+        # the declared law is swap-invariant: A == B == C
+        per = arm["per"]
+        assert per["A"] == per["B"] == per["C"], name
+        for i in range(3):
+            rng = random.Random(arm["seed"] + i)
+            sched = m8oc.build_schedule(arm["kind"], per, rng)
+            counts = m8oc.verify_schedule(sched, arm["axes"], arm["null_mode"],
+                                          per, name)
+            # A/B realizations DIFFER (drawn iid from the same law) — this is the
+            # whole point — yet verification passes BY LAW, not by realization
+            # identity. C copies A to hold the sham axis clean (AC concordant),
+            # so the type-I characterization isolates the A/B permutation test.
+            assert counts["AB"] > 0, (name, i)
+            assert counts["AC"] == 0, (name, i)
+            for unit in m8oc.UNITS:
+                assert sched[("A",) + unit] == sched[("C",) + unit], (name, i)
+
+
 def test_every_alternative_arm_violates_the_null_on_its_declared_axis():
-    """The named separating/context/power arms must genuinely violate the
-    null where they claim to — an 'alternative' that holds the null
-    separates nothing."""
+    """The named non-exchangeable / power / sham arms must genuinely depart from
+    a trivial copy where they claim to — an 'alternative' axis that holds a copy
+    null separates nothing, and a copied AC axis must be concordant."""
     for name, arm in m8oc.ARMS.items():
         if arm["charged"] == "type_i":
             continue
         for i in range(3):
             rng = random.Random(arm["seed"] + i)
             sched = m8oc.build_schedule(arm["kind"], arm.get("per"), rng)
-            counts = m8oc.verify_schedule(sched, arm["axes"], name)
+            counts = m8oc.verify_schedule(sched, arm["axes"], arm["null_mode"],
+                                          arm.get("per"), name)
             for axis, null_holds in arm["axes"].items():
                 if null_holds:
                     assert counts[axis] == 0, (name, i, axis)
                 else:
                     assert counts[axis] >= 1, (name, i, axis)
-        # the power arms hold the sham axis SHARPLY null (C copied from A)
+        # the power arms hold the sham axis by copy (C copied from A)
         if arm["charged"] in ("power", "power_curve"):
             assert arm["axes"] == {"AB": False, "AC": True}, name
+            assert arm["null_mode"] == "marginal_shift", name
+
+
+def test_nonexchangeable_alternatives_have_equal_marginals_and_zero_tv():
+    """The non-exchangeable alternatives (a-006) hold the population marginals
+    EQUAL (empirical TV(A,B) = 0 exactly, via a balanced base) while the
+    within-unit joint is NOT swap-symmetric (A_i != B_i at one or more units) —
+    the coupling swap invariance forbids yet the marginal statistic cannot see."""
+    alts = {n: a for n, a in m8oc.ARMS.items()
+            if a["charged"] == "alternative_nonexchangeable"}
+    assert set(alts) == NONEXCH_ALT
+    for name, arm in alts.items():
+        assert arm["null_mode"] == "nonexchangeable_alternative", name
+        assert arm["marginals"]["equal_marginals"] is True, name
+        assert arm["coupling"].startswith("nonexchangeable_"), name
+        for i in range(5):
+            rng = random.Random(arm["seed"] + i)
+            sched = m8oc.build_schedule(arm["kind"], arm["per"], rng)
+            from collections import Counter
+            ca = Counter(sched[("A",) + u] for u in m8oc.UNITS)
+            cb = Counter(sched[("B",) + u] for u in m8oc.UNITS)
+            tv = sum(abs(ca[x] - cb[x]) for x in MENU) / 2 / len(m8oc.UNITS)
+            assert tv == 0.0, (name, i, tv)            # equal marginals, TV=0
+            # yet the joint is non-exchangeable: some unit differs
+            assert any(sched[("A",) + u] != sched[("B",) + u]
+                       for u in m8oc.UNITS), (name, i)
 
 
 def test_verification_refuses_a_mislabeled_schedule():
-    """The gate itself: a discordant schedule may not pass as a null arm, and
-    a concordant schedule may not pass as an alternative."""
-    rng = random.Random(1)
-    concordant = m8oc.build_schedule("sharp_iid", {"unit": m8oc.GRADED}, rng)
+    """The mode-specific gate: a discordant schedule may not pass as a COPY null;
+    a concordant schedule may not pass as an alternative; and a LAW-EXCHANGEABLE
+    null axis may not pass with unequal declared laws."""
+    concordant = m8oc.build_schedule("sharp_iid", {"unit": m8oc.GRADED},
+                                     random.Random(1))
     discordant = m8oc.build_schedule(
         "iid", {"A": m8oc.GRADED, "B": m8oc.GRADED, "C": m8oc.GRADED},
         random.Random(2))
-    with pytest.raises(AssertionError, match="NULL-HOLDING TRUE"):
-        m8oc.verify_schedule(discordant, {"AB": True, "AC": True}, "t")
+    # copy-mode proof: discordant realizations cannot be a copy null
+    with pytest.raises(AssertionError, match="COPY null"):
+        m8oc.verify_schedule(discordant, {"AB": True, "AC": True}, "copy",
+                             None, "t")
+    # alternative proof: a concordant schedule cannot be an alternative
     with pytest.raises(AssertionError, match="ALTERNATIVE"):
-        m8oc.verify_schedule(concordant, {"AB": False}, "t")
+        m8oc.verify_schedule(concordant, {"AB": False}, "copy", None, "t")
+    # law-mode proof: unequal declared laws are NOT swap-invariant by law
+    with pytest.raises(AssertionError, match="LAW-EXCHANGEABLE"):
+        m8oc.verify_schedule(discordant, {"AB": True},
+                             "law_exchangeable",
+                             {"A": m8oc.GRADED, "B": m8oc.UNIFORM}, "t")
+    # law-mode proof ACCEPTS the equal-law iid schedule (realizations differ)
+    counts = m8oc.verify_schedule(
+        discordant, {"AB": True, "AC": True}, "law_exchangeable",
+        {"A": m8oc.GRADED, "B": m8oc.GRADED, "C": m8oc.GRADED}, "t")
+    assert counts["AB"] > 0 and counts["AC"] > 0
 
 
 def test_run_trial_verifies_before_any_analysis():
-    """The verification sits INSIDE the trial path: a trial whose declared
-    axes disagree with its generated schedule refuses before any statistic
-    exists (an iid process declared null-holding true must raise)."""
-    with pytest.raises(AssertionError, match="NULL-HOLDING TRUE"):
+    """The verification sits INSIDE the trial path: a trial whose declared mode
+    disagrees with its generated schedule refuses before any statistic exists
+    (an iid process declared a COPY null must raise)."""
+    with pytest.raises(AssertionError, match="COPY null"):
         m8oc.run_trial(("iid",
                         {"A": m8oc.GRADED, "B": m8oc.GRADED, "C": m8oc.GRADED},
-                        {"AB": True, "AC": True}, 12345, "mislabeled"))
+                        {"AB": True, "AC": True}, "copy", 12345, "mislabeled"))
 
 
 # ---------------------------------------- 2. branch-structure regressions
@@ -263,9 +353,9 @@ def test_total_separation_is_reported_as_a_distributional_rejection(tmp_path):
     """A and C entirely `share_resource`, B entirely `decline_partnership` — the
     cleanest possible instrument and the most decisive possible effect. Within
     the realized pack the A and B marginals are maximally different, so the
-    frozen rule rejects and the claim is stated at the DISTRIBUTIONAL
-    (population-marginal) level only — a marginal-distribution difference, never
-    a per-unit claim — which is exactly what makes the rejection honest."""
+    frozen rule rejects and the claim is stated at the population-marginal level
+    only — a marginal-distribution difference, never a per-unit claim — which is
+    exactly what makes the rejection honest."""
     agent = _run_pack(tmp_path, lambda c, v, s: ("decline_partnership" if c == "B"
                                                  else "share_resource"))
     di = agent["decision_inputs"]
@@ -276,17 +366,17 @@ def test_total_separation_is_reported_as_a_distributional_rejection(tmp_path):
     assert agent["verdict"] == "distributional_order_effect_observed"
     assert agent["verdict"] != "no_distributional_order_effect_observed"   # never a false null
     reason = agent["verdict_reason"]
-    # the claim is capped at the population-marginal level, never per-unit
-    assert "marginal" in reason and "population-level" in reason
-    assert "does not identify which units changed" in reason
+    # a-006: the claim is the within-unit swap-invariance rejection, with the
+    # marginal TV as the effect-size estimand and NO per-unit claim
+    assert "swap-invariance null is rejected" in reason
+    assert "effect-size" in reason and "not a per-unit claim" in reason
 
 
-def test_shared_latent_sharp_true_process_reports_null_not_rejection(tmp_path):
+def test_shared_latent_swap_invariant_process_reports_null_not_rejection(tmp_path):
     """The HONEST half of the shared-latent family: a pack-level latent mode
-    moves every unit's action, but identically in A, B and C — the marginals
-    are equal across conditions, so the distributional null is TRUE (and the
-    process is
-    dependent across units). The frozen rule must not reject."""
+    moves every unit's action, but identically in A, B and C — the pair is
+    byte-identical, so swap invariance is TRUE (and the process is dependent
+    across units). The frozen rule must not reject."""
     sched = m8oc.build_schedule("sharp_latent", None, random.Random(4))
     agent = _run_pack(tmp_path, _sched_choose(sched))
     di = agent["decision_inputs"]
@@ -317,6 +407,20 @@ def test_a_quiet_instrument_still_reaches_both_substantive_verdicts(tmp_path):
     assert pos["verdict"] == "distributional_order_effect_observed"
 
 
+def test_nonexchangeable_coupling_holds_the_marginal_test_at_null(tmp_path):
+    """THE DOCUMENTED LIMITATION, exercised end to end: a non-exchangeable
+    equal-marginal coupling (B_i = perm(A_i), balanced base) drives the real
+    frozen rule and the marginal test sees TV(A,B) = 0 — the rule returns the
+    null verdict even though swap invariance is genuinely FALSE. This is why
+    TV=0 is never evidence the null holds."""
+    arm = m8oc.ARMS["alternative_nonexch_cycle4"]
+    sched = m8oc.build_schedule(arm["kind"], arm["per"], random.Random(7))
+    agent = _run_pack(tmp_path, _sched_choose(sched))
+    di = agent["decision_inputs"]
+    assert di["tv_ab"] == 0.0                    # the marginal statistic is blind
+    assert agent["verdict"] == "no_distributional_order_effect_observed"
+
+
 # --------------------------------- 3. the study harness itself is deterministic
 
 def test_study_trial_is_deterministic_at_the_frozen_parameters():
@@ -324,7 +428,8 @@ def test_study_trial_is_deterministic_at_the_frozen_parameters():
     the committed characterisation regenerates. One trial at the FROZEN 10 000
     iterations (this is the only slow item in CI, by design ~4 s)."""
     arm = m8oc.ARMS["power_at_tv_025"]
-    spec = (arm["kind"], arm["per"], arm["axes"], arm["seed"], "det")
+    spec = (arm["kind"], arm["per"], arm["axes"], arm["null_mode"],
+            arm["seed"], "det")
     assert m8oc.run_trial(spec) == m8oc.run_trial(spec)
 
 
@@ -391,17 +496,17 @@ def test_artifact_was_produced_under_the_exact_frozen_bundle(artifact):
     assert artifact["frozen_bundle_hashes"]["policy_hash"] == \
         config_hash(echo["admissibility_policy"]) == config_hash(registry_policy)
     # produced by the rule version under test, at full scale
-    assert artifact["order_report_version"] == "5"
+    assert artifact["order_report_version"] == "6"
     assert artifact["metrics_version"] == "1"
     assert artifact["trials_scale"] == 1.0
 
 
 def test_artifact_echoes_the_one_canonical_null_verbatim(artifact):
-    """a-004 finding 0 minimum_regression: the canonical null-form assertion
-    is shared by registry, preregistration, loader, report and artifact. Here:
-    the artifact echoes null_form and the exact statement, and declares the
+    """a-006: the canonical swap-invariance null-form assertion is shared by
+    registry, preregistration, loader, report and artifact. Here: the artifact
+    echoes null_form and the exact statement, and declares the mode-specific
     unit-by-unit schedule verification."""
-    assert artifact["null_form"] == "distributional"
+    assert artifact["null_form"] == "swap_invariance"
     assert artifact["null_statement"] == M8_NULL_STATEMENT
     raw = load_experiments_registry(REGISTRY)
     pd = next(e for e in raw["experiments"]
@@ -409,6 +514,8 @@ def test_artifact_echoes_the_one_canonical_null_verbatim(artifact):
     assert artifact["null_statement"] == pd["null_statement"]
     assert "unit-by-unit" in artifact["schedule_verification"]
     assert "BEFORE" in artifact["schedule_verification"]
+    assert "LAW" in artifact["schedule_verification"]
+    assert "IDENTICAL REALIZATION" in artifact["schedule_verification"]
 
 
 def test_artifact_arms_are_structurally_sound(artifact):
@@ -419,7 +526,11 @@ def test_artifact_arms_are_structurally_sound(artifact):
         assert arm["trials"] == declared["trials"], name
         assert arm["seed"] == declared["seed"], name
         assert arm["charged"] == declared["charged"], name
-        assert arm["sharp_null_axes"] == declared["axes"], name
+        assert arm["null_mode"] == declared["null_mode"], name
+        assert arm["coupling"] == declared["coupling"], name
+        assert arm["null_axes"] == declared["axes"], name
+        # every arm keys on BOTH marginals and coupling
+        assert "equal_marginals" in arm["marginals"], name
         assert sum(arm["tally"].values()) == arm["trials"], name
         k = arm["tally"].get("distributional_order_effect_observed", 0)
         assert arm["positive_rate"] == round(k / arm["trials"], 6), name
@@ -429,46 +540,55 @@ def test_artifact_arms_are_structurally_sound(artifact):
 
 
 def test_artifact_type_i_satisfies_the_frozen_upper_bound_criterion(artifact):
-    """a-004 finding 1: for every arm charged type_i, the exact CP-95 UPPER
-    bound of the distributional-null rejection rate is at or below alpha = 0.05,
-    judged against the frozen criterion string. Under the canonical
-    distributional null with seeded decoding the schedules are
-    condition-invariant, so the rate is structurally ZERO — pinned exactly,
-    since the study is deterministic."""
+    """a-006: EVERY arm charged type_i — copy-mode AND law-exchangeable-mode —
+    has its exact CP-95 UPPER bound of the swap-invariance-null rejection rate at
+    or below alpha = 0.05, judged against the frozen criterion string. Copy-mode
+    arms are structural zeros (identical schedules, rate exactly 0). Law-
+    exchangeable arms carry a small non-zero rate whose CP-95 upper bound must
+    still fall at or below alpha, resolved at 3000 trials. NOTHING is weakened to
+    pass: if any charged arm's upper bound exceeded alpha this assertion would
+    FAIL rather than reclassify the arm."""
     charged = {n: a for n, a in artifact["arms"].items()
                if a["charged"] == "type_i"}
-    assert set(charged) == {"sharp_h0_iid_uniform", "sharp_h0_iid_graded",
-                            "sharp_h0_iid_concentrated",
-                            "sharp_h0_shared_latent"}
+    assert set(charged) == COPY_TYPE_I | LAW_TYPE_I
     for name, arm in charged.items():
         lo, hi = arm["positive_rate_ci95"]
-        assert hi <= 0.05, (name, arm)
+        assert hi <= 0.05, (name, arm["positive_rate"], arm["positive_rate_ci95"])
         assert arm["criterion"]["pass"] is True, name
         assert arm["criterion"]["statement"] == M8_TYPE_I_CRITERION, name
-        assert arm["trials"] == 400, name
-        # structural zero, stated exactly: every trial returned the warranted
-        # null verdict and none rejected
-        assert arm["tally"] == {"no_distributional_order_effect_observed": 400}, name
-        assert arm["positive_rate"] == 0.0, name
+        if arm["null_mode"] == "copy":
+            assert arm["trials"] == 400, name
+            # structural zero, stated exactly
+            assert arm["tally"] == \
+                {"no_distributional_order_effect_observed": 400}, name
+            assert arm["positive_rate"] == 0.0, name
+        else:
+            assert arm["null_mode"] == "law_exchangeable", name
+            assert arm["trials"] == m8oc.TYPE_I_HIGH_TRIALS, name
 
 
-def test_iid_equal_marginal_arms_are_context_never_type_i(artifact):
-    """a-004 finding 0: the relabeling itself. The iid equal-marginal arms are
-    exchangeability-robustness context — present, reported with CIs, and
-    never charged as distributional-null type-I."""
-    context = {n: a for n, a in artifact["arms"].items()
-               if a["charged"] == "exchangeable_context"}
-    assert set(context) == {"iid_equal_marginals_uniform",
-                            "iid_equal_marginals_graded",
-                            "iid_equal_marginals_concentrated"}
-    for name, arm in context.items():
-        assert arm["charged"] != "type_i"
-        assert "never distributional-null type-I" in arm["criterion"]["statement"] \
-            or "not distributional-null false-positive" in arm["criterion"]["statement"]
-        assert arm["sharp_null_axes"] == {"AB": False, "AC": False}, name
-        # exchangeable pair distribution: rejection stays at or below ~alpha
-        # for the broader family (upper CI bounded well below 3*alpha)
-        assert arm["positive_rate_ci95"][1] <= 0.15, (name, arm)
+def test_iid_equal_marginal_arms_are_charged_type_i_law_exchangeable(artifact):
+    """a-006 core reclassification: the iid equal-marginal arms are jointly
+    exchangeable swap-invariance null cases (A/B/C iid from ONE per-condition
+    law) and are CHARGED type-I in law-exchangeable mode — not relabeled context.
+    Their realizations differ but the generating law is swap-invariant, so the
+    within-pair permutation test is empirically conservative and its CP-95 upper
+    bound sits at or below alpha."""
+    law = {n: a for n, a in artifact["arms"].items()
+           if a["null_mode"] == "law_exchangeable"}
+    assert set(law) == LAW_TYPE_I
+    for name, arm in law.items():
+        assert arm["charged"] == "type_i", name
+        assert arm["coupling"] == "iid_same_law", name
+        assert arm["marginals"]["equal_marginals"] is True, name
+        # A == B == C marginals (equal by law)
+        assert arm["marginals"]["A"] == arm["marginals"]["B"] \
+            == arm["marginals"]["C"], name
+        assert arm["null_axes"] == {"AB": True, "AC": True}, name
+        assert arm["trials"] == m8oc.TYPE_I_HIGH_TRIALS, name
+        # conservative: the exact CP-95 upper bound is at or below alpha
+        assert arm["positive_rate_ci95"][1] <= 0.05, (name, arm)
+        assert "LAW-EXCHANGEABLE" in arm["criterion"]["detail"], name
 
 
 def test_artifact_power_meets_the_frozen_target_at_the_frozen_mde(artifact):
@@ -518,27 +638,36 @@ def test_mde_selection_regenerates_from_the_committed_run(artifact):
              if r["effect_tv"] == frozen_mde)["positive_rate"]
 
 
-def test_artifact_reports_the_sharp_violation_arm_for_what_it_is(artifact):
-    """The audit's separating process — within-pack A/B marginals maximally
-    different (marginally equal only ACROSS latent modes) — must be present,
-    must NOT be charged against type-I, and must show the rule rejecting
-    essentially always (the correct distributional conclusion, licensed by the
-    claim ceiling)."""
-    arm = artifact["arms"]["sharp_false_marginal_true"]
-    assert arm["charged"] == "sharp_violation_detection"
-    assert arm["positive_rate"] >= 0.95
-    assert "distributional" in arm["criterion"]["statement"]
-    assert "Not charged against type-I" in arm["criterion"]["statement"]
+def test_artifact_reports_nonexchangeable_alternatives_for_what_they_are(artifact):
+    """a-006: the non-exchangeable equal-marginal couplings — swap invariance
+    genuinely FALSE but the marginal TV statistic identically zero — must be
+    present, must NOT be charged against type-I, and must show the rule
+    essentially never rejecting (the documented outside-null limitation, not a
+    type-I failure)."""
+    alts = {n: a for n, a in artifact["arms"].items()
+            if a["charged"] == "alternative_nonexchangeable"}
+    assert set(alts) == NONEXCH_ALT
+    for name, arm in alts.items():
+        assert arm["charged"] != "type_i", name
+        assert arm["null_mode"] == "nonexchangeable_alternative", name
+        assert arm["coupling"].startswith("nonexchangeable_"), name
+        assert arm["marginals"]["equal_marginals"] is True, name
+        # essentially never rejects — TV(A,B) is identically zero
+        assert arm["positive_rate"] <= 0.02, (name, arm)
+        st = arm["criterion"]["statement"]
+        assert "NON-EXCHANGEABLE" in st and "TV(A,B) = 0" in st
+        assert "NEVER charged against type-I" in st
+        assert "outside-null" in st
 
 
 def test_artifact_reports_sham_gate_leakage_as_context(artifact):
     """The sham-gate residual leakage over a contaminated-at-MARGIN sham
     process — contamination at the exact scale the clause-2 warrant polices
     (q_AC < sham_equivalence_margin = 0.25), the most probative leakage test —
-    is reported with its CI as CONTEXT. The frozen fitness criteria are
-    exactly type_i_criterion and power_target; the statement names the
-    deterministic observation-level guarantees pinned in the test suite (the
-    boundary pack never promotes; every positive carries the warrant)."""
+    is reported with its CI as CONTEXT. The frozen fitness criteria are exactly
+    type_i_criterion and power_target; the statement names the deterministic
+    observation-level guarantees pinned in the test suite (the boundary pack
+    never promotes; every positive carries the warrant)."""
     arm = artifact["arms"]["sham_contaminated_at_margin"]
     assert arm["charged"] == "sham_gate_context"
     assert "LEAKAGE" in arm["criterion"]["statement"]
@@ -554,8 +683,9 @@ def test_artifact_states_the_ci_math_and_measured_runtime(artifact):
     runtime measured — both live in the artifact, not in a docstring."""
     ci = artifact["ci_method"]
     assert ci["outer_trials_per_charged_arm"] == 400
+    assert ci["type_i_high_trials"] == m8oc.TYPE_I_HIGH_TRIALS >= 2000
     assert "Clopper-Pearson" in ci["interval"]
-    assert "0.10" in ci["math"] and "400" in ci["math"]
+    assert "3000" in ci["math"] and "400" in ci["math"]
     assert "0.8" in ci["math"]           # the power target's resolvability too
     assert artifact["runtime"]["seconds"] > 0
     assert artifact["all_criteria_pass"] is True

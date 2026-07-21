@@ -1243,7 +1243,35 @@ def _order_permutation_null(rng, units_x: dict, units_y: dict,
         py = {a: c / ny for a, c in cy.items()} if ny else {}
         reps.append(_tv_distance(px, py))
 
-    return {"quantile": round(_order_percentile(reps, 1.0 - alpha), 6),
+    # The IDENTITY (unswapped) permutation, computed by the SAME functional and
+    # the SAME per-unit pooling the reference reps use. This is the observed
+    # statistic ON THE NULL'S OWN SCALE: because the identity permutation is a
+    # member of the permutation reference set, the observed value is achievable
+    # in the null distribution, so comparing it against the (1 - alpha) quantile
+    # at FULL precision makes an observed-equals-quantile TIE a NON-rejection
+    # (conservative). Previously the decision compared a SEPARATELY, 6-decimal-
+    # ROUNDED cell-distribution TV against the rounded quantile, and rounding the
+    # two sides independently turned exact ties into spurious strict exceedances
+    # (anti-conservative for discrete/concentrated marginals). The DECISION path
+    # consumes `observed` and `quantile_raw`; `quantile` (and the report's
+    # tv_distances) stay 6-decimal-rounded for display and replay reproducibility.
+    ox, oy = {}, {}
+    onx = ony = 0
+    for unit in shared:
+        for action in units_x[unit]:
+            ox[action] = ox.get(action, 0) + 1
+            onx += 1
+        for action in units_y[unit]:
+            oy[action] = oy.get(action, 0) + 1
+            ony += 1
+    pox = {a: c / onx for a, c in ox.items()} if onx else {}
+    poy = {a: c / ony for a, c in oy.items()} if ony else {}
+    observed_raw = _tv_distance(pox, poy)
+    quantile_raw = _order_percentile(reps, 1.0 - alpha)
+
+    return {"quantile": round(quantile_raw, 6),
+            "quantile_raw": quantile_raw,
+            "observed": observed_raw,
             "median": round(_order_percentile(reps, 0.5), 6),
             "max": round(max(reps), 6) if reps else 0.0,
             "matched_units": len(shared),
@@ -1832,6 +1860,30 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         q_ac = out["permutation_null"]["A|C"]["quantile"]
         tv_ab = out["tv_distances"]["A|B"]
         tv_ac = out["tv_distances"]["A|C"]
+        # FULL-PRECISION DECISION BASIS (owner-approved tie fix). The clauses
+        # below compare the observed statistic against the permutation quantile
+        # at RAW precision so a genuine tie (observed == quantile) does not
+        # reject. `observed` is the identity permutation on the null's own
+        # scale, `quantile_raw` the unrounded (1 - alpha) percentile. The
+        # rounded tv_ab/tv_ac/q_ab/q_ac remain the DISPLAY values in
+        # decision_inputs and every verdict_reason string, so the reported
+        # numbers and replay are byte-unchanged — only the branch test changes.
+        tv_ab_dec = out["permutation_null"]["A|B"]["observed"]
+        tv_ac_dec = out["permutation_null"]["A|C"]["observed"]
+        q_ab_dec = out["permutation_null"]["A|B"]["quantile_raw"]
+        q_ac_dec = out["permutation_null"]["A|C"]["quantile_raw"]
+        # CONSERVATIVE TIE TOLERANCE. The observed (identity, unswapped) TV and
+        # the (1 - alpha) percentile REP (a swapped pool) are the SAME rational
+        # at a genuine tie, but their float-accumulation paths differ, so a raw
+        # `>` still turned ~half of the true ties into spurious rejections
+        # (concentrated stayed anti-conservative at ~4.9%). Every achievable TV
+        # on this frozen design lies on the k/48 grid (spacing ~0.0208), so any
+        # gap below _ORDER_DECISION_TIE_EPS is float noise on an exact tie, never
+        # a real exceedance: a rejection requires the observed to exceed the
+        # quantile by MORE than the tolerance. This is the tie half of
+        # "full-precision conservative tie handling"; it never suppresses a
+        # genuine effect (>= one grid step, ~2e7 x the tolerance).
+        _ORDER_DECISION_TIE_EPS = 1e-9
         # RETAINED, DIAGNOSTIC ONLY. TV_null and its bootstrap interval describe
         # within-condition stability across the frozen sampler-seed halves. They
         # GATE NOTHING at ORDER_REPORT_VERSION 6 and appear in no branch of the
@@ -1873,13 +1925,13 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
         # q_AC < sham_equivalence_margin, STRICT. The audit's pinned boundary
         # case (TV(A,C) = q_AC = sham_equivalence_margin = 0.25 with decisive
         # A/B separation) is therefore `inconclusive`, never a positive.
-        if tv_ac > q_ac:
+        if tv_ac_dec > q_ac_dec + _ORDER_DECISION_TIE_EPS:
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
                 f"sham not null: observed TV(A,C)={tv_ac} exceeds its paired "
                 f"permutation quantile q_AC={q_ac} — reported as instrument or "
                 "surface sensitivity; the order claim is void")
-        elif q_ac >= sem:
+        elif q_ac_dec >= sem:
             # Clause 2, second part. The sham warrant is MISSING: non-rejection
             # of A/C is not evidence that the control is null unless the
             # comparison could have resolved a contamination of the margin
@@ -1888,7 +1940,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
             # the null (clause 4) has its control warrant.
             rejected = ("the A/B comparison did reject its swap-invariance null "
                         f"(TV(A,B)={tv_ab} > q_AB={q_ab}), but "
-                        if tv_ab > q_ab else "")
+                        if tv_ab_dec > q_ab_dec + _ORDER_DECISION_TIE_EPS else "")
             out["verdict"] = "inconclusive"
             out["verdict_reason"] = (
                 f"sham warrant missing: {rejected}q_AC={q_ac} >= "
@@ -1898,7 +1950,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                 "verdict is unreachable and no null may be asserted — an "
                 "observed sham shift at the design's own effect bound must "
                 "never be labelled null")
-        elif tv_ab > q_ab:
+        elif tv_ab_dec > q_ab_dec + _ORDER_DECISION_TIE_EPS:
             # Clause 3. A rejection WITH the sham warrant. Stated as the
             # SWAP-INVARIANCE conclusion (a-006 A-0 owner decision): the paired
             # permutation test rejects the within-unit swap-invariance null, so
@@ -1918,7 +1970,7 @@ def order_sensitivity_report(run_dirs: list, conditions: dict, *,
                 f"q_AC={q_ac} and q_AC < sham_equivalence_margin={sem}. The "
                 f"sensitivity requirement (q_AB <= min_detectable_effect={mde}) "
                 "constrains only a null claim and does not bear on a rejection")
-        elif q_ab <= mde:
+        elif q_ab_dec <= mde:
             # Clause 4. The ONLY branch the sensitivity requirement gates: a null
             # claim asserts "no effect at or above min_detectable_effect", which
             # is unsupportable unless the test could have resolved one that size.

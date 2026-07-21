@@ -1,8 +1,10 @@
-"""PERMANENT cancellation guardrail (owner a-005 requirement).
+"""PERMANENT cancellation guardrail (owner a-005 requirement; a-006 framing).
 
-The distributional narrowing exists BECAUSE the aggregate TV(A,B) statistic is
-blind to balanced unit-level effects. This fixture pins that exact adversarial
-case forever and enforces the claim boundary:
+The confirmatory null is within-unit JOINT swap invariance, tested by a paired
+permutation whose statistic is the aggregate TV(A,B) — which is blind to
+balanced unit-level effects (a non-exchangeable coupling can hold TV=0 while
+violating swap invariance). This fixture pins that exact adversarial case
+forever and enforces the claim boundary:
 
   - unit 1..24: share_resource under A, decline_partnership under B
   - unit 25..48: decline_partnership under A, share_resource under B
@@ -26,14 +28,18 @@ from coliseum.textlab.metrics import order_sensitivity_report
 oc = pytest.importorskip("scripts.m8_operating_characteristics")
 
 # AFFIRMATIVE over-claims the report may never make on a non-rejection. NOTE:
-# the correct reason legitimately DISCLAIMS per-unit invariance ("does NOT
-# establish per-unit invariance"), so the bare phrase "per-unit invariance" is
-# NOT forbidden — only affirmative sharp/per-unit assertions are. The
-# distributional report never invokes "sharp" at all, so its presence is a
-# regression signal.
-_FORBIDDEN_SUBSTRINGS = (
-    "no order effect",          # owner's exact forbidden phrase
-    "sharp",                    # a distributional verdict never says "sharp"
+# the correct reason legitimately DISCLAIMS the removed claims (it says "does
+# NOT establish swap invariance, per-unit invariance, or marginal equality"),
+# so the negated phrases "swap invariance" / "per-unit invariance" are NOT
+# forbidden — only affirmative sharp/per-unit assertions are. The swap-
+# invariance report never invokes "sharp" at all, so its presence is a
+# regression signal. The owner's forbidden phrase "no order effect" is handled
+# separately (see the qualified-form check below): under the a-006 framing the
+# ONLY permitted appearance is the qualified honest non-detection ("no order
+# effect DETECTED at the threshold"); a bare/unqualified "no order effect"
+# affirmation stays unrepresentable.
+_FORBIDDEN_AFFIRMATIONS = (
+    "sharp",                    # a swap-invariance verdict never says "sharp"
     "no individual unit",
     "null was preserved",
     "null preserved",
@@ -101,29 +107,44 @@ def test_permits_the_distributional_non_rejection(tmp_path):
 
 
 def test_forbids_the_over_claim_vocabulary(tmp_path):
-    """The verdict text may never AFFIRM the per-unit / sharp claims the
-    narrowing removed — those claims are FALSE on this pack (every unit changed)
-    and must be unrepresentable, not merely discouraged. The report MUST instead
-    carry the disclaimer that per-unit invariance is not established."""
+    """The verdict text may never AFFIRM the per-unit / sharp / swap-invariance
+    claims — those claims are FALSE on this pack (every unit changed) and must be
+    unrepresentable, not merely discouraged. The report MUST instead carry the
+    disclaimer that a non-rejection establishes neither swap invariance nor
+    per-unit invariance nor marginal equality (a-006 three-layer scope)."""
+    import re
     agent = _run(tmp_path)["per_agent"]["live"]
     reason = agent["verdict_reason"].lower()
-    for bad in _FORBIDDEN_SUBSTRINGS:
-        assert bad not in reason, f"forbidden claim {bad!r} in: {reason}"
+    for bad in _FORBIDDEN_AFFIRMATIONS:
+        assert bad not in reason, f"forbidden affirmation {bad!r} in: {reason}"
+    # "no order effect" may appear ONLY as the qualified honest non-detection
+    # ("... DETECTED at the threshold"); a bare affirmation is forbidden.
+    for m in re.finditer(r"no order effect", reason):
+        assert reason[m.end():].lstrip().startswith("detected"), (
+            f"unqualified 'no order effect' over-claim in: {reason}")
     # the emitted verdict enum itself carries no "no_order_effect" literal
     assert agent["verdict"] == "no_distributional_order_effect_observed"
     assert "distributional" in agent["verdict"]
-    # the honest disclaimer IS required (this is the whole point of the scope)
-    assert ("does not establish per-unit invariance" in reason
-            or "out of scope" in reason)
+    # the honest disclaimer IS required (the whole point of the scope): the
+    # non-rejection explicitly establishes none of the removed claims, and TV=0
+    # is called out as outside the confirmatory null.
+    assert "does not establish" in reason
+    assert "per-unit invariance" in reason
+    assert "outside the confirmatory null" in reason
 
 
-def test_report_declares_the_distributional_null_and_scope(tmp_path):
-    """The report self-documents the operative null as distributional and
-    carries the per-unit claim limitation (marginals only; cancelling effects
-    out of scope; a non-rejection is not per-unit invariance). These fields are
-    at the report top level."""
+def test_report_declares_the_swap_invariance_null_and_scope(tmp_path):
+    """The report self-documents the operative null as within-unit swap
+    invariance and carries the three-layer claim limitation (inferential null
+    vs marginal-TV estimand vs demonstrated-sensitivity MDE; a non-rejection
+    establishes neither swap invariance nor per-unit invariance nor marginal
+    equality; a TV=0 cancellation coupling is OUTSIDE the confirmatory null).
+    These fields are at the report top level."""
     report = _run(tmp_path)
-    assert report["null_form"] == "distributional"
-    limitation = report.get("per_unit_claim_limitation", "").lower()
+    assert report["null_form"] == "swap_invariance"
+    limitation = report.get("claim_limitation", "").lower()
     assert "per-unit" in limitation
-    assert "out of scope" in limitation
+    # the cancellation blind spot is named as outside the null, and TV=0 is
+    # explicitly disclaimed as not-evidence-the-null-is-true (the teeth).
+    assert "outside the confirmatory null" in limitation
+    assert "tv=0 is not evidence the null is true" in limitation

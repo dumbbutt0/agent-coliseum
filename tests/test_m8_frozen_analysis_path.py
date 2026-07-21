@@ -173,8 +173,8 @@ def test_frozen_path_refuses_the_garbled_pack_and_emits_no_distances(
     # be mistaken for a result may accompany it
     body = getattr(excinfo.value, "report", None)
     assert body is not None, "refusal must carry its census"
-    assert body["order_report_version"] == "5"
-    assert body["null_form"] == "distributional"
+    assert body["order_report_version"] == "6"
+    assert body["null_form"] == "swap_invariance"
     assert body["terminal_dp_id"] == TERMINAL_DP_ID
     assert body["replay_verification"] == {"attestation_version": "1",
                                            "verified_run_n": 144}
