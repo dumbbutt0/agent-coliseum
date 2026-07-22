@@ -1,7 +1,8 @@
 # Agent Coliseum v1 — Gated Completion Charter
 
-> **Status:** proposed repository design source, pending Council ratification through
-> `first-gladiator-coliseum-v1-charter-001`.
+> **Status:** proposed repository design source, pending Council ratification
+> through the single-use `first-gladiator-coliseum-v1-charter-*` request
+> lineage initiated by `first-gladiator-coliseum-v1-charter-001`.
 >
 > This document grants no blanket execution authority. Integrating it adopts
 > the release sequence and its gates only. Every live experiment still requires
@@ -47,12 +48,17 @@ source verdict, because the Council schema records the source auditor role as
 
 Runtime repair work begins only after this exact sequence completes:
 
-1. freeze a clean doc-only charter commit;
-2. Claude publishes `first-gladiator-coliseum-v1-charter-001` with
+1. freeze a clean charter doc/metadata commit;
+2. the Director publishes the next unused request ID in the
+   `first-gladiator-coliseum-v1-charter-*` lineage with
    `live_experiment_allowed: false` and `human_approval_required: true`;
-3. an independent reviewer returns a plain GO bound to that exact doc commit;
-4. Claude records integration of the charter source;
-5. create the runtime repair as a descendant of the integrated charter.
+3. if that request is terminally blocked, preserve it as historical evidence,
+   correct the finding on a descendant commit, and publish a new single-use
+   successor request; no blocked request is required to become a GO;
+4. an independent reviewer returns a plain GO bound to the exact latest
+   charter doc/metadata commit;
+5. the Director records integration of that GO-bound charter source;
+6. create the runtime repair as a descendant of the integrated charter.
 
 The unratified charter and runtime repair must not be combined into one commit.
 
