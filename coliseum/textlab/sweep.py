@@ -18,7 +18,6 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -134,7 +133,12 @@ def _manifest_lock_identity(manifest_path: str) -> tuple[str, str]:
             f"manifest path {manifest_path!r} cannot be canonicalized for "
             f"exclusive execution ({exc})") from exc
     digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()
-    lock_root = os.path.join(tempfile.gettempdir(),
+    # The namespace must be process-invariant.  tempfile.gettempdir() is not:
+    # TMPDIR/TMP/TEMP and tempfile.tempdir can differ between two workers that
+    # share one manifest, which gives each a different inode and defeats flock.
+    # POSIX /tmp is an absolute host-shared namespace; inability to create or
+    # lock here is handled fail-closed by _manifest_advisory_lock.
+    lock_root = os.path.join(os.path.realpath("/tmp"),
                              "agent-coliseum-manifest-locks-v1")
     return canonical, os.path.join(lock_root, f"{digest}.lock")
 
@@ -178,7 +182,10 @@ def _manifest_advisory_lock(manifest_path: str):
             raise SweepAborted(
                 f"manifest {canonical!r} is already owned by another sweep; "
                 "concurrent execution is refused") from exc
-        yield
+        # The caller consumes this exact canonical target.  Lock selection and
+        # the ledger path therefore cannot diverge through a mutable/non-stable
+        # input mapping after ownership was acquired.
+        yield canonical
     finally:
         # POSIX releases this descriptor's flock on close.  Do not unlink the
         # persistent lock file: existence is not ownership and another holder
@@ -480,6 +487,11 @@ def tombstone_load(manifest_path: str) -> dict:
                     raise SchemaError(
                         f"{where}: tombstone {field}={rec[field]!r} must be a "
                         "non-empty string")
+            if rec["failure_kind"] not in FAILURE_KINDS:
+                raise SchemaError(
+                    f"{where}: tombstone failure_kind="
+                    f"{rec['failure_kind']!r} is not one of the declared "
+                    f"terminal failure kinds {FAILURE_KINDS!r}")
             key = (rec["regime_id"], rec["scenario_seed"], rec["sampler_seed"])
             if key in done:
                 raise SchemaError(
@@ -619,9 +631,11 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     execution, terminal writes, balance/completion checks, and return cleanup.
     """
     manifest_path = spec["manifest"]
-    with _manifest_advisory_lock(manifest_path):
+    locked_spec = dict(spec)
+    with _manifest_advisory_lock(manifest_path) as canonical_manifest:
+        locked_spec["manifest"] = canonical_manifest
         return _run_sweep_locked(
-            spec, deadline=deadline, expected_digests=expected_digests,
+            locked_spec, deadline=deadline, expected_digests=expected_digests,
             progress=progress, execution_order=execution_order,
             record_execution_index=record_execution_index,
             max_surviving_delta=max_surviving_delta,
@@ -858,49 +872,95 @@ def _run_sweep_locked(spec: dict, *, deadline: float | None = None,
             f"(e.g. {sorted(both)[0]!r}) — refusing evidence whose terminal "
             "outcomes disagree")
 
-    foreign = [
-        _row_coord(row) for row in initial_tombstones.values()
-        if _row_coord(row) not in planned_coords]
+    foreign = [_row_coord(row) for row in initial_tombstones.values()
+               if _row_coord(row) not in planned_coords]
     if foreign:
         raise SweepAborted(
             f"resume ledger contains {len(foreign)} tombstone(s) outside the "
             f"planned grid (e.g. {foreign[0]!r}) — foreign terminal evidence "
             "is refused before model construction")
 
-    done_coords = {_row_coord(r) for r in initial_done.values()}
-    tomb_coords = set()
+    def _planned_rows_by_coord(rows):
+        grouped = {}
+        for row in rows:
+            coord = _row_coord(row)
+            if coord in planned_coords:
+                grouped.setdefault(coord, []).append(row)
+        return grouped
+
+    done_by_coord = _planned_rows_by_coord(initial_done.values())
+    tombstones_by_coord = _planned_rows_by_coord(initial_tombstones.values())
+
+    # A planned coordinate is the experimental unit.  Different regime keys
+    # do not license that one unit to be both a success and a failure, nor to
+    # carry multiple durable failures.  Refuse these coordinate-level
+    # contradictions before a replay count or model construction.
+    coordinate_both = set(done_by_coord) & set(tombstones_by_coord)
+    if coordinate_both:
+        example = sorted(coordinate_both)[0]
+        raise SweepAborted(
+            f"resume ledger is contradictory at the same planned coordinate "
+            f"{example!r}: success and tombstone outcomes coexist under "
+            "different terminal identities")
+    duplicate_tombstone_coords = {
+        coord for coord, rows in tombstones_by_coord.items() if len(rows) > 1}
+    if duplicate_tombstone_coords:
+        example = sorted(duplicate_tombstone_coords)[0]
+        raise SweepAborted(
+            f"resume ledger contains multiple tombstones for one planned "
+            f"coordinate {example!r}; one unit may have only one terminal "
+            "outcome")
+
+    # Provider-free success accounting is safe only when each planned
+    # coordinate has exactly one recorded success. Multiple regimes for one
+    # coordinate require normal preflight to select the expected identity and
+    # must never be pooled by the replay-only path.
+    replay_successes = {
+        coord: rows[0] for coord, rows in done_by_coord.items()
+        if len(rows) == 1}
+    ambiguous_success_coords = {
+        coord for coord, rows in done_by_coord.items() if len(rows) > 1}
+
     replay_tombstones = (initial_tombstones
                          if retries_per_unit == 0 else {})
     # A tombstone counts toward replay-only completion only when a validated
-    # success row for the same scenario anchors its regime.  An unanchored
-    # tombstone remains a valid initial outcome but requires normal setup to
-    # establish the expected regime; it is never silently counted here.
+    # unique success regime for the same model/scenario anchors it. An
+    # unanchored or ambiguously anchored tombstone requires normal setup to
+    # establish the expected regime and is never counted here.
     anchors: dict = {}
-    for row in initial_done.values():
-        anchors.setdefault(row.get("scenario"), set()).add(row.get("regime_id"))
+    for row in replay_successes.values():
+        anchor_key = (row.get("model"), row.get("scenario"))
+        anchors.setdefault(anchor_key, set()).add(row.get("regime_id"))
+    ambiguous_anchor_groups = {
+        anchor_key for anchor_key, regimes in anchors.items()
+        if len(regimes) > 1}
+    anchored_tombstones = {}
     for row in replay_tombstones.values():
-        if row.get("regime_id") in anchors.get(row.get("scenario"), ()):
-            tomb_coords.add(_row_coord(row))
+        anchor_key = (row.get("model"), row.get("scenario"))
+        expected_anchors = anchors.get(anchor_key, ())
+        if len(expected_anchors) == 1 and row.get("regime_id") in expected_anchors:
+            anchored_tombstones[_row_coord(row)] = row
 
-    if total > 0 and planned_coords <= (done_coords | tomb_coords):
+    provider_free_complete = (
+        total > 0
+        and not ambiguous_success_coords
+        and not ambiguous_anchor_groups
+        and len(anchored_tombstones) == len(replay_tombstones)
+        and planned_coords <= (set(replay_successes)
+                               | set(anchored_tombstones)))
+    if provider_free_complete:
         say(f"sweep[{mode}|{interaction}]: all {total} planned units "
-            f"already resolved ({len(done_coords)} recorded, "
-            f"{len(tomb_coords)} tombstoned) — resuming WITHOUT provider "
+            f"already resolved ({len(replay_successes)} recorded, "
+            f"{len(anchored_tombstones)} tombstoned) — resuming WITHOUT provider "
             "contact")
-        for row in initial_done.values():
-            if _row_coord(row) not in planned_coords:
-                continue          # stale row from another grid: not ours
+        for row in replay_successes.values():
             cond = result._condition((row["model"], row["scenario"]))
             result.skipped_resumed += 1
             result.resumed[cond] += 1
             result.surviving[cond] += 1
-        for row in replay_tombstones.values():
-            # a durable typed failure re-registers as the same dropout. Only
-            # PLANNED, regime-anchored tombstones reach this point as part of
-            # the resolved set; unanchored rows use the normal path and a
-            # foreign row was already refused.
-            if _row_coord(row) not in planned_coords:
-                continue
+        for row in anchored_tombstones.values():
+            # Only the exact planned, uniquely anchored subset used by the
+            # completion predicate is eligible for counting.
             result.tombstoned_resumed += 1
             model = row.get("model")
             scenario_name = row.get("scenario")
@@ -943,9 +1003,44 @@ def _run_sweep_locked(spec: dict, *, deadline: float | None = None,
         probes[model] = probe
         result.digests[model] = probe.model_digest
 
-    # Only now that both terminal ledgers and the entire fleet are validated do
-    # we create evidence roots.  The validated initial snapshots are copied
-    # into local working state and are never reloaded during this call.
+    # Resolve every expected model/scenario regime before execution or terminal
+    # writes. Provider-free completion already admitted only uniquely anchored
+    # tombstones; on the normal path the live preflight identity is the
+    # authority, so a planned-coordinate tombstone from any other regime is
+    # refused rather than silently ignored or re-rolled.
+    contexts = {}
+    for model in spec["models"]:
+        probe = probes[model]
+        for scenario_name in scenarios:
+            path = os.path.join(config_dir, f"{scenario_name}.yaml")
+            scen = load_scenario(path)
+            bc = build_behavioral_config(
+                scen.scenario_id, scen.behavioral_hash(), probe.spec_dict(),
+                arbitration, ARBITRATION_VERSION,
+                validate_sampling(sampling, sampler_seeds[0]),
+                interaction_mode=interaction,
+                history_template_version=HISTORY_TEMPLATE_VERSION,
+                history_template_hash=HISTORY_TEMPLATE_HASH)
+            regime_id, _ = regime_hashes(bc)
+            contexts[(model, scenario_name)] = (path, regime_id)
+
+    mismatched_tombstones = []
+    for row in initial_tombstones.values():
+        context_key = (row["model"], row["scenario"])
+        expected_regime = contexts[context_key][1]
+        if row["regime_id"] != expected_regime:
+            mismatched_tombstones.append(
+                (_row_coord(row), row["regime_id"], expected_regime))
+    if mismatched_tombstones:
+        coord, got, want = mismatched_tombstones[0]
+        raise SweepAborted(
+            f"resume tombstone for planned coordinate {coord!r} carries "
+            f"regime {got!r}, not the preflight-validated regime {want!r}; "
+            "mismatched terminal evidence is refused before execution or writes")
+
+    # Only now that both terminal ledgers, the entire fleet, and every durable
+    # failure regime are validated do we create evidence roots. The validated
+    # initial snapshots are copied into local working state and never reloaded.
     os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
     os.makedirs(out_root, exist_ok=True)
     done = dict(initial_done)
@@ -970,29 +1065,8 @@ def _run_sweep_locked(spec: dict, *, deadline: float | None = None,
             say(f"== {model}  digest={probe.model_digest[:20]}  "
                 f"family={probe.model_family}  host={probe.host}  "
                 f"backend={probe.backend_version}  mode={mode}")
-            # per-scenario context is resolved LAZILY and cached: under
-            # "blocked" that reproduces exactly when each scenario file was
-            # first read today, and under "interleaved" the three conditions
-            # are each loaded once at the first unit that needs them
-            ctx = {}
-
-            def _ctx(scenario_name):
-                if scenario_name not in ctx:
-                    path = os.path.join(config_dir, f"{scenario_name}.yaml")
-                    scen = load_scenario(path)
-                    bc = build_behavioral_config(
-                        scen.scenario_id, scen.behavioral_hash(), probe.spec_dict(),
-                        arbitration, ARBITRATION_VERSION,
-                        validate_sampling(sampling, sampler_seeds[0]),
-                        interaction_mode=interaction,
-                        history_template_version=HISTORY_TEMPLATE_VERSION,
-                        history_template_hash=HISTORY_TEMPLATE_HASH)
-                    regime_id, _ = regime_hashes(bc)
-                    ctx[scenario_name] = (path, regime_id)
-                return ctx[scenario_name]
-
             for scenario_name, scenario_seed, sampler_seed in order:
-                path, regime_id = _ctx(scenario_name)
+                path, regime_id = contexts[(model, scenario_name)]
                 cond = result._condition((model, scenario_name))
                 unit_key = (regime_id, scenario_seed, sampler_seed)
                 if unit_key in done:

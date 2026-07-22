@@ -670,6 +670,111 @@ def test_success_tombstone_intersection_is_always_refused_before_model_setup(
     assert open(tomb_path, "rb").read() == tomb_before
 
 
+def test_same_coordinate_mismatched_regime_is_refused_before_model_setup(
+        tmp_path, monkeypatch):
+    """C-010: a different resume key cannot give one coordinate two outcomes."""
+    _install_offline_ollama(monkeypatch)
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    assert run_sweep(spec).rows_written == 1
+    success = json.loads(open(spec["manifest"], encoding="utf-8").readline())
+    tomb_path = _write_tombstones(spec, [_tombstone(
+        success["scenario"], success["scenario_seed"],
+        success["sampler_seed"], regime="foreign-regime-for-same-coordinate",
+        model=success["model"])])
+    manifest_before = open(spec["manifest"], "rb").read()
+    tomb_before = open(tomb_path, "rb").read()
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
+    monkeypatch.setattr(sweep_mod, "run_scenario", _model_setup_must_not_run)
+    with pytest.raises(SweepAborted, match="same planned coordinate"):
+        run_sweep(spec, retries_per_unit=0)
+
+    assert open(spec["manifest"], "rb").read() == manifest_before
+    assert open(tomb_path, "rb").read() == tomb_before
+
+
+def test_partial_grid_mismatched_regime_refuses_after_preflight_before_run(
+        tmp_path, monkeypatch):
+    """C-010 partial form: preflight validates every remaining tombstone."""
+    _install_offline_ollama(monkeypatch)
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    assert run_sweep(spec).rows_written == 1
+    success = json.loads(open(spec["manifest"], encoding="utf-8").readline())
+    tomb_path = _write_tombstones(spec, [_tombstone(
+        success["scenario"], 1, success["sampler_seed"],
+        regime="foreign-regime-for-unresolved-coordinate",
+        model=success["model"])])
+    manifest_before = open(spec["manifest"], "rb").read()
+    tomb_before = open(tomb_path, "rb").read()
+    calls = []
+
+    def _unexpected_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("scenario execution preceded tombstone validation")
+
+    monkeypatch.setattr(sweep_mod, "run_scenario", _unexpected_run)
+    resumed = dict(spec, seeds=[42, 1, 7])
+    with pytest.raises(SweepAborted, match="preflight-validated regime"):
+        run_sweep(resumed, retries_per_unit=0)
+
+    assert calls == []
+    assert open(spec["manifest"], "rb").read() == manifest_before
+    assert open(tomb_path, "rb").read() == tomb_before
+
+
+@pytest.mark.parametrize("failure_kind", [
+    "not-a-declared-failure-kind", "", None, 7])
+def test_undeclared_failure_kind_is_refused_during_initial_load(
+        tmp_path, monkeypatch, failure_kind):
+    """C-010: an unknown category never reaches replay dropout accounting."""
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    row = _tombstone(SCENARIO, 42, None)
+    row["failure_kind"] = failure_kind
+    tomb_path = _write_tombstones(spec, [row])
+    tomb_before = open(tomb_path, "rb").read()
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
+
+    with pytest.raises(sweep_mod.SchemaError, match="failure_kind"):
+        run_sweep(spec, retries_per_unit=0)
+    assert not os.path.exists(spec["manifest"])
+    assert open(tomb_path, "rb").read() == tomb_before
+
+
+@pytest.mark.parametrize("failure_kind", FAILURE_KINDS)
+def test_every_declared_failure_kind_loads_as_a_typed_tombstone(
+        tmp_path, failure_kind):
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    row = _tombstone(SCENARIO, 42, None)
+    row["failure_kind"] = failure_kind
+    _write_tombstones(spec, [row])
+    loaded = sweep_mod.tombstone_load(spec["manifest"])
+    assert list(loaded.values()) == [row]
+
+
+def test_mixed_success_regimes_never_pool_on_provider_free_path(
+        tmp_path, monkeypatch):
+    """One row per coordinate is still ambiguous when their regimes differ."""
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42, 1))
+    rows = [
+        {"regime_id": regime, "model": MODEL, "scenario": SCENARIO,
+         "scenario_seed": seed, "sampler_seed": None}
+        for regime, seed in (("regime-a", 42), ("regime-b", 1))]
+    loaded = {(row["regime_id"], row["scenario_seed"], None): row
+              for row in rows}
+    monkeypatch.setattr(sweep_mod, "manifest_load",
+                        lambda *_args, **_kwargs: loaded)
+    probes = []
+
+    def _preflight_reached(model, *_args, **_kwargs):
+        probes.append(model)
+        raise RuntimeError("provider preflight required for mixed regimes")
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _preflight_reached)
+    with pytest.raises(RuntimeError, match="preflight required"):
+        run_sweep(spec)
+    assert probes == [MODEL]
+
+
 def test_unrelated_tombstones_cannot_satisfy_the_planned_grid(tmp_path,
                                                               monkeypatch):
     """THE c-008 REGRESSION (the auditor's probe, generalised to N cells): a
@@ -772,7 +877,7 @@ def test_a_duplicate_tombstone_key_is_refused(tmp_path, monkeypatch):
     spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,),
                  sampler_seeds=[2001], temperature=0.7)
     row = _tombstone(SCENARIO, 42, 2001)
-    _write_tombstones(spec, [row, dict(row, failure_kind="refusal")])
+    _write_tombstones(spec, [row, dict(row, failure_kind="connection")])
     monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
     with pytest.raises(sweep_mod.SchemaError) as exc:
         run_sweep(spec, retries_per_unit=0)

@@ -63,6 +63,28 @@ Ownership is kernel-managed on the open descriptor; file presence or age never
 grants ownership. Closing releases only that descriptor's lock, and the file is
 not automatically removed.
 
+### Round 5 independent findings and descendant closure
+
+The first runtime repair commit `ec53d5884365a1425bd59bb6e61ecd77d636029d`
+received A-013 GO (`002197-8b91170e`) but was blocked independently by B-010
+(`002198-b2516f00`) and C-010 (`002199-f0f2ba35`). The A verdict is historical
+after this descendant. D-010 and E-010 were not used to transfer approval.
+
+| Finding | Descendant invariant | Owned paths |
+|---|---|---|
+| R5-B010-1 | The manifest-lock parent is the absolute host-shared POSIX `/tmp/agent-coliseum-manifest-locks-v1`, independent of `TMPDIR`, `TMP`, `TEMP`, and `tempfile.tempdir`; two independently started processes with distinct temporary-root settings still contend on one inode. Lock acquisition yields the canonical manifest target, and the locked body consumes an immutable copied spec carrying that exact target. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_locking.py` |
+| R5-C010-1 | One planned coordinate contributes at most one terminal outcome. Same-coordinate success/tombstone evidence is refused even when its regime keys differ; provider-free completion and counting consume the exact same uniquely anchored tombstone set and never pool ambiguous multi-regime successes. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_integrity.py` |
+| R5-C010-2 | After whole-fleet preflight, every planned tombstone must match the computed model/scenario regime before scenario execution or any terminal write. A mismatch is refused, never ignored or retried. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_integrity.py` |
+| R5-C010-3 | `tombstone_load` accepts only the closed `FAILURE_KINDS` vocabulary; unknown or ill-typed values raise `SchemaError` at the ledger boundary before setup, replay counting, or mutation. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_integrity.py` |
+
+The fixed lock namespace is deliberately not derived from a process-local
+temporary-directory API. Failure to create or lock the absolute shared path is
+a refusal. The persistent-file and non-blocking descriptor rules remain
+unchanged. Normal-path regime validation resolves every configured
+model/scenario context after fleet validation and before evidence-root creation;
+provider-free completion remains available only for an unambiguous, fully
+resolved terminal set.
+
 The ordering change deliberately supersedes the earlier test claim that model
 preflight precedes manifest validation. Ledger validation now comes first;
 whole-fleet digest validation still occurs before any scenario execution or

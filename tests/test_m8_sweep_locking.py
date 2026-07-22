@@ -8,6 +8,7 @@ ledger.
 import multiprocessing as mp
 import os
 import queue
+import tempfile
 
 import pytest
 
@@ -29,6 +30,11 @@ def _bounded_body(spec, **_kwargs):
 def _call_sweep(spec, result_queue):
     # Install the bounded body inside each independently started interpreter;
     # no inherited monkeypatch or parent Python state is needed.
+    if spec.get("_temp_root"):
+        temp_root = spec["_temp_root"]
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            os.environ[name] = temp_root
+        tempfile.tempdir = temp_root
     sweep_mod._run_sweep_locked = _bounded_body
     try:
         result = sweep_mod.run_sweep(spec)
@@ -80,6 +86,48 @@ def test_two_sweep_processes_same_manifest_refuse_nonholder_before_body(
     release.set()
     _join(p1)
     assert q1.get(timeout=2) == ("ok", "holder-complete")
+    assert os.path.exists(lock_path)
+
+
+def test_distinct_process_temp_roots_cannot_split_one_manifest_lock(tmp_path):
+    """B-010 reproduction: process-local temp roots must not select inodes."""
+    ctx = mp.get_context("spawn")
+    manifest = str(tmp_path / "shared-across-env" / "manifest.jsonl")
+    temp_roots = [str(tmp_path / name) for name in ("tmp-a", "tmp-b")]
+    for path in temp_roots:
+        os.makedirs(path)
+    entered = ctx.Queue()
+    release = ctx.Event()
+    queues = [ctx.Queue(), ctx.Queue()]
+    specs = [
+        {"manifest": manifest, "_entered": entered, "_release": release,
+         "_return": "holder-complete", "_temp_root": temp_root}
+        for temp_root in temp_roots]
+
+    holder = ctx.Process(target=_call_sweep, args=(specs[0], queues[0]))
+    holder.start()
+    assert entered.get(timeout=10) == holder.pid
+
+    contender = ctx.Process(target=_call_sweep, args=(specs[1], queues[1]))
+    contender.start()
+    _join(contender)
+    status, kind, detail = queues[1].get(timeout=2)
+    assert status == "error" and kind == "SweepAborted"
+    assert "already owned by another sweep" in detail
+    with pytest.raises(queue.Empty):
+        entered.get(timeout=0.2)
+    assert not os.path.exists(manifest)
+    assert not os.path.exists(manifest + ".tombstones.jsonl")
+
+    canonical, lock_path = sweep_mod._manifest_lock_identity(manifest)
+    assert canonical == os.path.realpath(manifest)
+    assert os.path.dirname(lock_path) == os.path.join(
+        os.path.realpath("/tmp"), "agent-coliseum-manifest-locks-v1")
+    assert all(not lock_path.startswith(root + os.sep) for root in temp_roots)
+
+    release.set()
+    _join(holder)
+    assert queues[0].get(timeout=2) == ("ok", "holder-complete")
     assert os.path.exists(lock_path)
 
 
@@ -174,3 +222,36 @@ def test_holder_exception_releases_only_kernel_lock_and_keeps_identity_file(
     second = os.stat(lock_path)
     assert second.st_ino == first.st_ino
     assert os.path.exists(lock_path), "lock identity file was auto-removed"
+
+
+def test_locked_body_consumes_the_captured_canonical_manifest(tmp_path,
+                                                               monkeypatch):
+    """A mutable/non-stable input cannot switch ledger targets after locking."""
+    first = str(tmp_path / "first" / "manifest.jsonl")
+    second = str(tmp_path / "second" / "manifest.jsonl")
+
+    class FlippingSpec(dict):
+        reads = 0
+
+        def __getitem__(self, key):
+            if key == "manifest":
+                self.reads += 1
+                return first if self.reads == 1 else second
+            return super().__getitem__(key)
+
+    original = FlippingSpec(manifest=second)
+    observed = []
+
+    def _capture(bound_spec, **_kwargs):
+        observed.append((bound_spec is original, bound_spec["manifest"]))
+        return bound_spec["manifest"]
+
+    monkeypatch.setattr(sweep_mod, "_run_sweep_locked", _capture)
+    assert sweep_mod.run_sweep(original) == os.path.realpath(first)
+    assert observed == [(False, os.path.realpath(first))]
+    assert original["manifest"] == second
+
+    _, first_lock = sweep_mod._manifest_lock_identity(first)
+    _, second_lock = sweep_mod._manifest_lock_identity(second)
+    assert os.path.exists(first_lock)
+    assert not os.path.exists(second_lock)
