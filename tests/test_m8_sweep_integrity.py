@@ -629,12 +629,54 @@ def _tombstone(scenario, seed, sampler_seed, *, regime=None, model=MODEL):
             "recorded_utc": "2026-07-21T00:00:00Z"}
 
 
+def _model_setup_must_not_run(*_args, **_kwargs):
+    raise AssertionError("terminal-ledger refusal reached model construction")
+
+
+@pytest.mark.parametrize(
+    "resume_seeds,retries",
+    [((42,), None), ((42, 1, 7), 0)],
+    ids=("fully-resolved-default-path", "partial-grid-with-unresolved-units"))
+def test_success_tombstone_intersection_is_always_refused_before_model_setup(
+        tmp_path, monkeypatch, resume_seeds, retries):
+    """Round 4 C-009: a unit cannot be both success and failure, even when the
+    grid is partial or this call did not opt into consuming tombstones."""
+    _install_offline_ollama(monkeypatch)
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    first = run_sweep(spec)
+    assert first.rows_written == 1
+    row = json.loads(open(spec["manifest"], encoding="utf-8").readline())
+    _write_tombstones(spec, [_tombstone(
+        row["scenario"], row["scenario_seed"], row["sampler_seed"],
+        regime=row["regime_id"], model=row["model"])])
+    manifest_before = open(spec["manifest"], "rb").read()
+    tomb_path = spec["manifest"] + ".tombstones.jsonl"
+    tomb_before = open(tomb_path, "rb").read()
+
+    attempted_setup = []
+
+    def _unexpected_model(*args, **kwargs):
+        attempted_setup.append((args, kwargs))
+        raise AssertionError("model constructed before contradiction refusal")
+
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _unexpected_model)
+    resumed = dict(spec, seeds=list(resume_seeds))
+    kwargs = {} if retries is None else {"retries_per_unit": retries}
+    with pytest.raises(SweepAborted, match="terminal outcomes disagree"):
+        run_sweep(resumed, **kwargs)
+
+    assert attempted_setup == []
+    assert open(spec["manifest"], "rb").read() == manifest_before
+    assert open(tomb_path, "rb").read() == tomb_before
+
+
 def test_unrelated_tombstones_cannot_satisfy_the_planned_grid(tmp_path,
                                                               monkeypatch):
     """THE c-008 REGRESSION (the auditor's probe, generalised to N cells): a
     one-cell plan whose ledger holds ONE tombstone for a DIFFERENT regime and a
-    DIFFERENT scenario seed is NOT resolved. The planned cell must actually be
-    executed, and the foreign tombstone must never count toward completion."""
+    DIFFERENT scenario seed is not resolved. Round 4 strengthens this from
+    "ignore and continue" to refusing the foreign terminal record before any
+    model construction or planned-cell execution."""
     _install_offline_ollama(monkeypatch)
     calls = []
     _install_stub_runner(monkeypatch, calls)
@@ -642,21 +684,18 @@ def test_unrelated_tombstones_cannot_satisfy_the_planned_grid(tmp_path,
                  sampler_seeds=[2001], temperature=0.7)
     _write_tombstones(spec, [_tombstone(SCENARIO, 999, 8888,
                                         regime="regime-somewhere-else")])
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
 
-    result = run_sweep(spec, retries_per_unit=0)
-
-    assert (SCENARIO, 42, 2001) in calls, \
-        "the planned cell was suppressed by an unrelated tombstone"
-    assert result.tombstoned_resumed == 0, \
-        "a foreign tombstone was counted toward completion"
-    assert result.rows_written == 1
+    with pytest.raises(SweepAborted, match="outside the planned grid"):
+        run_sweep(spec, retries_per_unit=0)
+    assert calls == [], "foreign terminal evidence reached execution"
+    assert not os.path.exists(spec["manifest"])
 
 
 def test_cardinality_alone_never_resolves_a_grid(tmp_path, monkeypatch):
-    """Cardinality vs containment, stated directly: enough foreign tombstones to
-    MATCH the planned count still resolve nothing. Under the old
-    `len(done | tomb) >= total` gate this returned a fully-resolved sweep with
-    zero provider calls."""
+    """Cardinality vs containment, stated directly: enough foreign tombstones
+    to match the planned count are refused as a ledger, never counted or
+    followed by execution."""
     _install_offline_ollama(monkeypatch)
     calls = []
     _install_stub_runner(monkeypatch, calls)
@@ -666,12 +705,12 @@ def test_cardinality_alone_never_resolves_a_grid(tmp_path, monkeypatch):
     # exactly `planned` tombstones, none of them a planned coordinate
     _write_tombstones(spec, [_tombstone(SCENARIO, 900 + i, 9000 + i)
                              for i in range(planned)])
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
 
-    result = run_sweep(spec, retries_per_unit=0)
-
-    assert len(calls) == planned, "planned cells were skipped on a false resolve"
-    assert result.tombstoned_resumed == 0
-    assert result.rows_written == planned
+    with pytest.raises(SweepAborted, match="outside the planned grid"):
+        run_sweep(spec, retries_per_unit=0)
+    assert calls == [], "foreign terminal evidence reached execution"
+    assert not os.path.exists(spec["manifest"])
 
 
 def test_genuine_full_tombstone_coverage_still_resumes_provider_free(
@@ -734,6 +773,7 @@ def test_a_duplicate_tombstone_key_is_refused(tmp_path, monkeypatch):
                  sampler_seeds=[2001], temperature=0.7)
     row = _tombstone(SCENARIO, 42, 2001)
     _write_tombstones(spec, [row, dict(row, failure_kind="refusal")])
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
     with pytest.raises(sweep_mod.SchemaError) as exc:
         run_sweep(spec, retries_per_unit=0)
     assert "duplicate tombstone resume key" in str(exc.value)
@@ -749,6 +789,7 @@ def test_a_tombstone_without_provenance_is_refused(tmp_path, monkeypatch):
     stripped = _tombstone(SCENARIO, 42, 2001)
     del stripped["model"], stripped["failure_kind"]
     _write_tombstones(spec, [stripped])
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _model_setup_must_not_run)
     with pytest.raises(sweep_mod.SchemaError) as exc:
         run_sweep(spec, retries_per_unit=0)
     assert "incomplete tombstone row" in str(exc.value)

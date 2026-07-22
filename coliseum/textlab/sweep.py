@@ -18,8 +18,11 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from coliseum.textlab.agents import (HISTORY_TEMPLATE_HASH,
                                      HISTORY_TEMPLATE_VERSION, OllamaAgent)
@@ -113,6 +116,74 @@ class SweepUnbalanced(SweepAborted):
     Differential dropout is observationally identical to a real effect (the
     survivors of the lossy condition are a biased subsample), so an unbalanced
     pack is refused as unanalyzable rather than reported with a caveat."""
+
+
+def _manifest_lock_identity(manifest_path: str) -> tuple[str, str]:
+    """Canonical manifest target and its persistent process-lock path.
+
+    The lock file lives outside the evidence tree so acquiring it before every
+    ledger read does not create or alter experiment evidence.  Its name is a
+    hash of the canonical target, so relative/absolute and symlink spellings of
+    one manifest converge.  The file is deliberately persistent: liveness is a
+    kernel property of the open descriptor, never file presence or age.
+    """
+    try:
+        canonical = os.path.realpath(os.path.abspath(os.fspath(manifest_path)))
+    except (TypeError, ValueError, OSError) as exc:
+        raise SweepAborted(
+            f"manifest path {manifest_path!r} cannot be canonicalized for "
+            f"exclusive execution ({exc})") from exc
+    digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()
+    lock_root = os.path.join(tempfile.gettempdir(),
+                             "agent-coliseum-manifest-locks-v1")
+    return canonical, os.path.join(lock_root, f"{digest}.lock")
+
+
+def _posix_lock_module():
+    """Load the required POSIX locking primitive without a silent fallback."""
+    try:
+        import fcntl
+    except (ImportError, OSError) as exc:
+        raise SweepAborted(
+            "manifest execution requires POSIX advisory locking; this "
+            "platform cannot provide it") from exc
+    if not hasattr(fcntl, "flock") or not hasattr(fcntl, "LOCK_NB"):
+        raise SweepAborted(
+            "manifest execution requires POSIX flock with non-blocking mode")
+    return fcntl
+
+
+@contextmanager
+def _manifest_advisory_lock(manifest_path: str):
+    """Hold one non-blocking lock for the complete manifest lifecycle.
+
+    Contention and unavailable locking refuse before the sweep body is entered.
+    The lock file is opened without truncation and is never removed, replaced,
+    expired, or overridden.  Closing this call's descriptor releases only this
+    holder's kernel-managed lock, including when the body raises.
+    """
+    canonical, lock_path = _manifest_lock_identity(manifest_path)
+    fcntl = _posix_lock_module()
+    try:
+        os.makedirs(os.path.dirname(lock_path), mode=0o700, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise SweepAborted(
+            f"cannot open manifest execution lock for {canonical!r} "
+            f"({exc})") from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            raise SweepAborted(
+                f"manifest {canonical!r} is already owned by another sweep; "
+                "concurrent execution is refused") from exc
+        yield
+    finally:
+        # POSIX releases this descriptor's flock on close.  Do not unlink the
+        # persistent lock file: existence is not ownership and another holder
+        # may already be waiting/open on the same inode.
+        os.close(fd)
 
 
 # Typed failure kinds for per-condition dropout accounting (m8 Phase 2, F6).
@@ -541,6 +612,31 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
               max_surviving_delta: int | None = None,
               retries_per_unit: int | None = None,
               execution_policy: "ExecutionPolicy | None" = None) -> SweepResult:
+    """Run one sweep while exclusively owning its manifest lifecycle.
+
+    The manifest-derived POSIX lock is acquired before the implementation can
+    inspect either terminal ledger and remains held through validation, setup,
+    execution, terminal writes, balance/completion checks, and return cleanup.
+    """
+    manifest_path = spec["manifest"]
+    with _manifest_advisory_lock(manifest_path):
+        return _run_sweep_locked(
+            spec, deadline=deadline, expected_digests=expected_digests,
+            progress=progress, execution_order=execution_order,
+            record_execution_index=record_execution_index,
+            max_surviving_delta=max_surviving_delta,
+            retries_per_unit=retries_per_unit,
+            execution_policy=execution_policy)
+
+
+def _run_sweep_locked(spec: dict, *, deadline: float | None = None,
+                      expected_digests: dict | None = None, progress=None,
+                      execution_order: str = "blocked",
+                      record_execution_index: bool | None = None,
+                      max_surviving_delta: int | None = None,
+                      retries_per_unit: int | None = None,
+                      execution_policy: "ExecutionPolicy | None" = None
+                      ) -> SweepResult:
     """Execute (models x scenarios x scenario-seeds x sampler-seeds), appending
     validated rows to spec['manifest'] and resuming past rows already present.
 
@@ -731,36 +827,10 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     def _deadline_hit():
         return deadline is not None and time.monotonic() > deadline
 
-    # ---- C-1 (a-006): PROVIDER-FREE resume of a FULLY-RESOLVED grid. Resuming a
-    # grid whose every planned unit is already a recorded success or a durable
-    # tombstone has nothing left to generate, so it must NOT construct an
-    # OllamaAgent or touch the network at all — the recorded rows were
-    # regime/digest-validated at generation time and the downstream analysis
-    # re-validates the regime, so a complete grid needs no fresh provider
-    # contact. To detect this WITHOUT weakening the "fleet preflight precedes any
-    # validating manifest_load / any generation" invariant on the partial path,
-    # a cheap read-only pre-scan (a raw NON-BLANK LINE COUNT of the existing
-    # ledgers — never the validating manifest_load, never a dir CREATE) gates the
-    # check: only when the ledgers ALREADY hold at least `total` rows do we pay
-    # for the full-validation load. A malformed or short manifest counts below
-    # `total` and falls straight through to the preflight, so a repulled model is
-    # still refused there before any manifest_load and before any compute.
-    #
-    # AUDIT c-008: the gate below tests EXACT PLANNED-COORDINATE CONTAINMENT,
-    #   planned_coords <= done_coords | valid_tombstone_coords
-    # never ledger CARDINALITY (`len(done | tomb) >= total`). Cardinality let N
-    # unrelated tombstones — wrong regime, wrong scenario seed, wrong grid —
-    # stand in for N missing planned cells, so a sweep returned "fully resolved"
-    # with zero provider calls, zero rows and no manifest while planned units
-    # were never executed. A false completion is worse than a slow one: it
-    # produces an experiment whose evidence is silently short.
-    #
-    # The planned coordinate is (model, scenario, scenario_seed, sampler_seed) —
-    # the grid's own axes — NOT the (regime_id, …) resume key, because regime_id
-    # is derived from `probe.spec_dict()` and is therefore not computable without
-    # constructing a provider, which is exactly what this path must avoid.
-    # regime_id is still checked, by ANCHORING every tombstone to the regime that
-    # validated manifest evidence recorded for that same scenario.
+    # The planned coordinate is the grid's own axes, not the regime-keyed
+    # terminal identity.  This lets the fully-resolved replay path establish
+    # exact planned-coordinate containment without model construction.  Regime
+    # identity for tombstones is still anchored by validated success evidence.
     planned_coords = {
         (model, scenario_name, scenario_seed, sampler_seed)
         for model in spec["models"]
@@ -773,110 +843,84 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
         return (row.get("model"), row.get("scenario"),
                 row.get("scenario_seed"), row.get("sampler_seed"))
 
-    def _nonblank_lines(p):
-        if not os.path.exists(p):
-            return 0
-        with open(p, encoding="utf-8") as fh:
-            return sum(1 for line in fh if line.strip())
+    # Round 4 C-009: validate BOTH complete terminal ledgers exactly once,
+    # before model construction, the replay-only return, counting, generation,
+    # terminal writes, or completion.  Tombstones are validated even for the
+    # historical retry mode: a contradictory ledger is invalid evidence on
+    # every path, not only when this call plans to consume failure outcomes.
+    initial_done = MappingProxyType(manifest_load(manifest_path, out_root))
+    initial_tombstones = MappingProxyType(tombstone_load(manifest_path))
+    both = set(initial_done) & set(initial_tombstones)
+    if both:
+        raise SweepAborted(
+            f"resume ledger is contradictory: {len(both)} unit(s) carry "
+            "BOTH a manifested success and a durable failure tombstone "
+            f"(e.g. {sorted(both)[0]!r}) — refusing evidence whose terminal "
+            "outcomes disagree")
 
-    tomb_ledger = _tombstone_path(manifest_path)
-    ledger_rows = _nonblank_lines(manifest_path) + (
-        _nonblank_lines(tomb_ledger) if retries_per_unit == 0 else 0)
-    if total > 0 and ledger_rows >= total:
-        try:
-            done0 = manifest_load(manifest_path, out_root)
-            tomb0 = (tombstone_load(manifest_path)
-                     if retries_per_unit == 0 else {})
-        except Exception:
-            # a malformed/short ledger cannot resolve the grid; defer to the
-            # normal preflight-first path, which surfaces the real error AFTER
-            # the fleet is validated (never masking a repulled model).
-            done0 = None
-        # a key that is BOTH a manifested success and a durable failure is
-        # contradictory evidence, not a resolved cell — refuse outright.
-        if done0 is not None:
-            both = set(done0) & set(tomb0)
-            if both:
-                raise SweepAborted(
-                    f"resume ledger is contradictory: {len(both)} unit(s) carry "
-                    "BOTH a manifested success and a durable failure tombstone "
-                    f"(e.g. {sorted(both)[0]!r}) — refusing to resolve a grid "
-                    "from evidence that disagrees with itself")
+    foreign = [
+        _row_coord(row) for row in initial_tombstones.values()
+        if _row_coord(row) not in planned_coords]
+    if foreign:
+        raise SweepAborted(
+            f"resume ledger contains {len(foreign)} tombstone(s) outside the "
+            f"planned grid (e.g. {foreign[0]!r}) — foreign terminal evidence "
+            "is refused before model construction")
 
-        done_coords, tomb_coords, foreign = set(), set(), []
-        if done0 is not None:
-            done_coords = {_row_coord(r) for r in done0.values()}
-            # a tombstone counts ONLY if its regime matches the one validated
-            # manifest evidence recorded for that same scenario. A scenario with
-            # no successful row has no anchor, so its tombstones cannot be
-            # verified provider-free and the fast path is declined (never
-            # silently accepted) — the normal preflight path then resolves it.
-            anchors: dict = {}
-            for r in done0.values():
-                anchors.setdefault(r.get("scenario"), set()).add(r.get("regime_id"))
-            for row in tomb0.values():
-                coord = _row_coord(row)
-                if coord not in planned_coords:
-                    foreign.append(f"{coord!r} is not a planned coordinate")
-                elif row.get("regime_id") not in anchors.get(row.get("scenario"), ()):
-                    foreign.append(
-                        f"{coord!r} carries regime "
-                        f"{str(row.get('regime_id'))[:12]}… which no validated "
-                        "manifest row for that scenario anchors")
-                else:
-                    tomb_coords.add(coord)
+    done_coords = {_row_coord(r) for r in initial_done.values()}
+    tomb_coords = set()
+    replay_tombstones = (initial_tombstones
+                         if retries_per_unit == 0 else {})
+    # A tombstone counts toward replay-only completion only when a validated
+    # success row for the same scenario anchors its regime.  An unanchored
+    # tombstone remains a valid initial outcome but requires normal setup to
+    # establish the expected regime; it is never silently counted here.
+    anchors: dict = {}
+    for row in initial_done.values():
+        anchors.setdefault(row.get("scenario"), set()).add(row.get("regime_id"))
+    for row in replay_tombstones.values():
+        if row.get("regime_id") in anchors.get(row.get("scenario"), ()):
+            tomb_coords.add(_row_coord(row))
 
-        if done0 is not None and foreign:
-            # contamination: do NOT let it count toward completion, and do NOT
-            # take a shortcut whose premise the evidence just failed.
-            say(f"sweep[{mode}|{interaction}]: declining the provider-free "
-                f"resume — {len(foreign)} tombstone(s) do not belong to this "
-                f"plan ({foreign[0]}); resolving through the normal "
-                "preflight-first path")
-            done0 = None
+    if total > 0 and planned_coords <= (done_coords | tomb_coords):
+        say(f"sweep[{mode}|{interaction}]: all {total} planned units "
+            f"already resolved ({len(done_coords)} recorded, "
+            f"{len(tomb_coords)} tombstoned) — resuming WITHOUT provider "
+            "contact")
+        for row in initial_done.values():
+            if _row_coord(row) not in planned_coords:
+                continue          # stale row from another grid: not ours
+            cond = result._condition((row["model"], row["scenario"]))
+            result.skipped_resumed += 1
+            result.resumed[cond] += 1
+            result.surviving[cond] += 1
+        for row in replay_tombstones.values():
+            # a durable typed failure re-registers as the same dropout. Only
+            # PLANNED, regime-anchored tombstones reach this point as part of
+            # the resolved set; unanchored rows use the normal path and a
+            # foreign row was already refused.
+            if _row_coord(row) not in planned_coords:
+                continue
+            result.tombstoned_resumed += 1
+            model = row.get("model")
+            scenario_name = row.get("scenario")
+            kind = row.get("failure_kind", "other")
+            cond = result._condition((model, scenario_name))
+            result.dropouts[cond][kind] += 1
+            result.execution_log.append(
+                {"execution_index": len(result.execution_log),
+                 "model": model, "scenario": scenario_name,
+                 "scenario_seed": row.get("scenario_seed"),
+                 "sampler_seed": row.get("sampler_seed"),
+                 "status": "failed_tombstoned", "failure_kind": kind})
+        if max_surviving_delta is not None:
+            result.check_condition_balance(max_surviving_delta)
+        return result
 
-        if done0 is not None and planned_coords <= (done_coords | tomb_coords):
-            say(f"sweep[{mode}|{interaction}]: all {total} planned units "
-                f"already resolved ({len(done_coords)} recorded, "
-                f"{len(tomb_coords)} tombstoned) — resuming WITHOUT provider "
-                "contact")
-            for row in done0.values():
-                if _row_coord(row) not in planned_coords:
-                    continue          # stale row from another grid: not ours
-                cond = result._condition((row["model"], row["scenario"]))
-                result.skipped_resumed += 1
-                result.resumed[cond] += 1
-                result.surviving[cond] += 1
-            for row in tomb0.values():
-                # a durable typed failure re-registers as the same dropout. Only
-                # PLANNED, regime-anchored tombstones reach this point as part of
-                # the resolved set (c-008); anything else already declined the
-                # fast path above, so no foreign row can be counted here.
-                if _row_coord(row) not in planned_coords:
-                    continue
-                result.tombstoned_resumed += 1
-                model = row.get("model")
-                scenario_name = row.get("scenario")
-                kind = row.get("failure_kind", "other")
-                cond = result._condition((model, scenario_name))
-                result.dropouts[cond][kind] += 1
-                result.execution_log.append(
-                    {"execution_index": len(result.execution_log),
-                     "model": model, "scenario": scenario_name,
-                     "scenario_seed": row.get("scenario_seed"),
-                     "sampler_seed": row.get("sampler_seed"),
-                     "status": "failed_tombstoned", "failure_kind": kind})
-            # the SAME fail-closed balance gate the normal path runs at the end
-            if max_surviving_delta is not None:
-                result.check_condition_balance(max_surviving_delta)
-            return result
-
-    # ---- ATOMIC fleet preflight (audit blocker, cycle-2): probe and validate
-    # the digest of EVERY configured model FIRST — before any filesystem touch
-    # (no out_root/manifest dir creation, no manifest read) and before any
-    # compute. A mismatched/unreachable model anywhere in the fleet refuses the
-    # whole sweep here, so a repulled LATER model can never be masked by an
-    # earlier model's runs OR by a malformed pre-existing manifest.
+    # ---- ATOMIC fleet preflight (audit blocker, cycle-2): after the Round 4
+    # terminal-ledger gate, probe and validate the digest of EVERY configured
+    # model before scenario execution or terminal evidence writes. A mismatch
+    # anywhere in the fleet still refuses the whole sweep before generation.
     probes = {}
     for model in spec["models"]:
         if _deadline_hit():
@@ -899,15 +943,14 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
         probes[model] = probe
         result.digests[model] = probe.model_digest
 
-    # only now that the ENTIRE fleet is pinned+validated do we touch the
-    # filesystem: create the evidence root and read any resumable manifest
+    # Only now that both terminal ledgers and the entire fleet are validated do
+    # we create evidence roots.  The validated initial snapshots are copied
+    # into local working state and are never reloaded during this call.
     os.makedirs(os.path.dirname(manifest_path) or ".", exist_ok=True)
     os.makedirs(out_root, exist_ok=True)
-    done = manifest_load(manifest_path, out_root)
-    # audit b-002 finding 1: under retries_per_unit=0, load durable failure
-    # tombstones so a resume never re-attempts a cell a prior call already
-    # failed. Absent/None -> empty, so default sweeps are untouched.
-    tombstoned = tombstone_load(manifest_path) if retries_per_unit == 0 else {}
+    done = dict(initial_done)
+    tombstoned = (dict(initial_tombstones)
+                  if retries_per_unit == 0 else {})
     tomb_path = _tombstone_path(manifest_path)
 
     def _write_tombstone(row: dict) -> None:
@@ -999,6 +1042,10 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                         (scenario_name, scenario_seed, sampler_seed,
                          f"{e.__class__.__name__}: {e}"))
                     if retries_per_unit == 0:
+                        if unit_key in done:
+                            raise SweepAborted(
+                                f"refusing failure write for {unit_key!r}: the "
+                                "working state already contains a success")
                         # audit b-002 finding 1: persist the typed failure so a
                         # resume can never re-roll this unit into a success.
                         _write_tombstone({
@@ -1020,6 +1067,10 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                         f"regime drift mid-sweep for "
                         f"{model}/{scenario_name} — digest or config "
                         "changed; the frozen regime is void")
+                if unit_key in tombstoned:
+                    raise SweepAborted(
+                        f"refusing success write for {unit_key!r}: the working "
+                        "state already contains a durable failure")
                 row = {"regime_id": r.run.comparison_regime_id,
                        "model": model, "scenario": scenario_name,
                        "scenario_seed": scenario_seed,
@@ -1046,6 +1097,7 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                     sorted(set(REQUIRED_ROW_FIELDS) - set(row))
                 manifest.write(json.dumps(row) + "\n")
                 manifest.flush()
+                done[unit_key] = row
                 result.rows_written += 1
                 result.surviving[cond] += 1
                 result.execution_log.append(
@@ -1059,8 +1111,15 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
                 say(f"  [{result.rows_written + len(done)}/{total}] "
                     f"{scenario_name} s{scenario_seed}{k}: "
                     f"{' -> '.join(r.final_actions)}")
-    # fail-closed LAST, after every failure is recorded: the refusal is a
-    # verdict on an already-complete evidence set, never a reason to discard it
+    # Completion/balance uses the combined initial + current-call working state,
+    # never a stale initial snapshot or a mid-call reload.
+    working_both = set(done) & set(tombstoned)
+    if working_both:
+        raise SweepAborted(
+            f"working terminal state became contradictory for "
+            f"{sorted(working_both)[0]!r}")
+    # Fail closed last, after every failure is recorded: the refusal is a
+    # verdict on an already-complete evidence set, never a reason to discard it.
     if max_surviving_delta is not None:
         result.check_condition_balance(max_surviving_delta)
     return result

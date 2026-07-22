@@ -30,6 +30,7 @@
     "scripts/m8_operating_characteristics.py",
     "tests/fixtures/llm/garbled_m8_seeded.json",
     "tests/fixtures/llm/steward_obedient_seeded.json",
+    "tests/test_autonomy_ollama_driver.py",
     "tests/test_decision_admissibility.py",
     "tests/test_m8_cancellation_guardrail.py",
     "tests/test_m8_coverage_conformance.py",
@@ -44,10 +45,11 @@
     "tests/test_m8_order_report.py",
     "tests/test_m8_seed_probe.py",
     "tests/test_m8_sweep_integrity.py",
+    "tests/test_m8_sweep_locking.py",
     "tests/test_textlab_scenario_registry.py",
     "tests/test_textlab_stochastic.py",
     "tools/autonomy/drivers.py"
   ],
-  "path_count": 44,
-  "paths_sha256": "2f55d8643348b064df1f053533015de3217aa0f49ce7c43910a883823a12386e"
+  "path_count": 46,
+  "paths_sha256": "c291da07b71e74c0df91ae63ec1c97cbc57f4a86ba22920abe236fdb9dce80ec"
 }

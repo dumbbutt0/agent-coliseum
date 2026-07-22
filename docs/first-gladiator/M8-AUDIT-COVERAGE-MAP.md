@@ -44,6 +44,37 @@ identity that disagrees with the frozen source.
 contacted at any point during its construction. It is a design-and-instrument
 slice only.
 
+## v1 Round 4 repair extension
+
+The Agent Coliseum v1 charter was integrated as a design source at exact commit
+`5708750ad9348d8975ce609c967f91c3ad41f443` after plain GO
+`002173-0e1d9c15`; integration event `002174-b1735e94` grants no live-run
+authority. The runtime descendant closes the complete Round 4 finding union:
+
+| Finding | Invariant | Owned paths |
+|---|---|---|
+| R4-C009-1 | Under the manifest lock, fully load and validate success and tombstone ledgers once; refuse every intersection and every malformed, duplicate, or foreign tombstone before model construction, replay return, counting, generation, terminal writes, or completion; use immutable initial snapshots plus local current-call working state. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_integrity.py`, `tests/test_autonomy_ollama_driver.py` |
+| R4-B009-1 | Acquire a non-blocking manifest-identity POSIX advisory lock before any ledger access and hold it through setup, execution, terminal writes, balance/completion, and cleanup; contention or unavailable locking refuses before the sweep body; never delete or replace the persistent identity file; aliases coalesce and distinct manifests remain independent. | `coliseum/textlab/sweep.py`, `tests/test_m8_sweep_locking.py` |
+
+The lock identity is the SHA-256 of the canonical absolute manifest target.
+Persistent lock files live in one process-shared temporary lock directory so
+locking precedes ledger access without adding files to the evidence tree.
+Ownership is kernel-managed on the open descriptor; file presence or age never
+grants ownership. Closing releases only that descriptor's lock, and the file is
+not automatically removed.
+
+The ordering change deliberately supersedes the earlier test claim that model
+preflight precedes manifest validation. Ledger validation now comes first;
+whole-fleet digest validation still occurs before any scenario execution or
+terminal evidence write. The changed test asserts both halves explicitly.
+
+The frozen repair commit is assigned only after focused tests, replay checks,
+M7/Phase-1 preservation, registry lint, exact allowlist equality, and one
+uninterrupted complete suite. Every A-011/B-009/C-009/D-009/E-009 verdict is
+historical for the runtime descendant. Fresh next-ID A–E requests must bind one
+exact clean repair commit, use 7,200-second deadlines, and return five plain GOs
+before integration.
+
 ## What changed and why
 
 Phase 1 calibrated the instrument using scripted deterministic deciders. Ten

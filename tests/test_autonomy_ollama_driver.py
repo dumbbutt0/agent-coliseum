@@ -151,15 +151,18 @@ def test_fleet_preflight_is_atomic(tmp_path, monkeypatch):
     assert rows == []
 
 
-def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
-    """Cycle-2 audit regression: the atomic fleet preflight must run BEFORE
-    manifest_load and before the out_root is created — so a later repulled
-    model is refused even when a malformed manifest already exists, and
-    manifest_load is never reached on a preflight refusal."""
+def test_terminal_ledger_validation_precedes_model_preflight(tmp_path,
+                                                              monkeypatch):
+    """Round 4 ordering: malformed terminal evidence is refused before any
+    model construction. Atomic fleet preflight still precedes scenario
+    execution and terminal writes once the ledgers validate."""
     good, bad = "llama3.1:latest", "gemma3:latest"
     fixture_dg = _fixture_digest()
 
+    probes = []
+
     def _probe(model, host=None):
+        probes.append(model)
         p = _mk_mock(model)
         if model == bad:
             p.model_digest = "sha256:repulled-second-model"
@@ -167,7 +170,7 @@ def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sweep_mod, "OllamaAgent", _probe)
 
-    # a manifest_load spy: if the preflight is correctly first, it is never hit
+    # The ledger loader is reached exactly once and refuses before _probe.
     calls = []
     real_load = sweep_mod.manifest_load
     monkeypatch.setattr(sweep_mod, "manifest_load",
@@ -175,7 +178,7 @@ def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
 
     out_root = str(tmp_path / "runs")
     os.makedirs(out_root)
-    # a MALFORMED prior manifest that WOULD raise if parsed before the probe
+    # A malformed prior manifest must now win the ordering race.
     manifest = os.path.join(out_root, "m.jsonl")
     with open(manifest, "w", encoding="utf-8") as fh:
         fh.write("{ this is not valid json\n")
@@ -185,10 +188,10 @@ def test_preflight_precedes_any_manifest_touch(tmp_path, monkeypatch):
             "interaction": "independent_vignettes",
             "config_dir": os.path.join(ROOT, "configs", "scenarios"),
             "out_root": out_root, "manifest": manifest}
-    # the abort is the DIGEST refusal (preflight), not a JSON/Schema error
-    with pytest.raises(SweepAborted, match="NEW regime"):
+    with pytest.raises(json.JSONDecodeError):
         run_sweep(spec, expected_digests={good: fixture_dg, bad: fixture_dg})
-    assert calls == [], "manifest_load ran before the fleet preflight"
+    assert len(calls) == 1
+    assert probes == [], "model construction preceded terminal-ledger refusal"
     produced = [p for p in os.listdir(out_root) if p != "m.jsonl"]
     assert produced == [], f"evidence created despite preflight refusal: {produced}"
 
