@@ -21,6 +21,7 @@
     "configs/scenarios/scramble_perm_m8.yaml",
     "configs/scenarios/scramble_sham_m8.yaml",
     "derived/textlab/m8-operating-characteristics.json",
+    "docs/first-gladiator/AGENT-COLISEUM-V1-CHARTER.md",
     "docs/first-gladiator/M8-AUDIT-COVERAGE-MAP.md",
     "docs/first-gladiator/M8-C1-BUNDLE.md",
     "docs/first-gladiator/M8-CHANGED-PATH-ALLOWLIST.json",
@@ -47,6 +48,6 @@
     "tests/test_textlab_stochastic.py",
     "tools/autonomy/drivers.py"
   ],
-  "path_count": 43,
-  "paths_sha256": "640cbd5e84a692aa28649a8521b4515187fc563bc7894e05c0c6d3d165835206"
+  "path_count": 44,
+  "paths_sha256": "2f55d8643348b064df1f053533015de3217aa0f49ce7c43910a883823a12386e"
 }
