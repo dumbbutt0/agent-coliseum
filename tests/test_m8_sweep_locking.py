@@ -165,6 +165,7 @@ def test_symlink_alias_resolves_to_the_same_manifest_lock(tmp_path,
     ctx = mp.get_context("spawn")
     target = tmp_path / "target" / "manifest.jsonl"
     target.parent.mkdir()
+    target.write_text("", encoding="utf-8")
     alias = tmp_path / "alias.jsonl"
     alias.symlink_to(target)
     target_identity, target_lock = sweep_mod._manifest_lock_identity(str(target))
@@ -188,6 +189,44 @@ def test_symlink_alias_resolves_to_the_same_manifest_lock(tmp_path,
         release.set()
         _join(holder)
     assert os.path.exists(target_lock)
+
+
+def test_hard_linked_manifest_names_both_refuse_before_body(tmp_path):
+    """B-013: one inode cannot select two adjacent terminal-ledger names."""
+    ctx = mp.get_context("spawn")
+    target = tmp_path / "target" / "manifest.jsonl"
+    target.parent.mkdir()
+    target.write_text("", encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    os.link(target, alias)
+    target_stat, alias_stat = os.stat(target), os.stat(alias)
+    assert (target_stat.st_dev, target_stat.st_ino) == (
+        alias_stat.st_dev, alias_stat.st_ino)
+    assert target_stat.st_nlink == alias_stat.st_nlink == 2
+    assert str(target) + ".tombstones.jsonl" != \
+        str(alias) + ".tombstones.jsonl"
+
+    entered = ctx.Queue()
+    release = ctx.Event()
+    queues = [ctx.Queue(), ctx.Queue()]
+    specs = [
+        {"manifest": str(path), "_entered": entered, "_release": release,
+         "_return": "must-not-enter"}
+        for path in (target, alias)]
+    processes = [ctx.Process(target=_call_sweep, args=(spec, result))
+                 for spec, result in zip(specs, queues)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        _join(process)
+    for result in queues:
+        status, kind, detail = result.get(timeout=2)
+        assert status == "error" and kind == "SweepAborted"
+        assert "multiply-linked manifests are unsupported" in detail
+    with pytest.raises(queue.Empty):
+        entered.get(timeout=0.2)
+    assert not os.path.exists(str(target) + ".tombstones.jsonl")
+    assert not os.path.exists(str(alias) + ".tombstones.jsonl")
 
 
 def test_unavailable_posix_locking_refuses_before_sweep_body(tmp_path,

@@ -121,6 +121,31 @@ class TerminalLedgerError(SchemaError, SweepAborted):
     """A terminal-ledger snapshot is invalid for execution or derivation."""
 
 
+def _require_single_link_manifest(canonical: str) -> None:
+    """Refuse an existing manifest inode reachable through multiple names.
+
+    The lock identity and adjacent tombstone path are both path-scoped.  Two
+    hard-linked manifest names would therefore select different lock and
+    tombstone paths for the same success bytes.  Inode-key locking cannot make
+    those adjacent ledgers agree, so multiply-linked manifests are unsupported
+    and fail closed before any lifecycle body is entered.  A missing target is
+    valid: first execution creates the manifest only after taking its path lock.
+    """
+    try:
+        links = os.stat(canonical).st_nlink
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SweepAborted(
+            f"manifest target {canonical!r} cannot be inspected before "
+            f"ownership ({exc})") from exc
+    if links != 1:
+        raise SweepAborted(
+            f"manifest target {canonical!r} has {links} hard links; "
+            "multiply-linked manifests are unsupported because adjacent "
+            "terminal ledgers would be ambiguous")
+
+
 def _manifest_lock_identity(manifest_path: str) -> tuple[str, str]:
     """Canonical manifest target and its persistent process-lock path.
 
@@ -136,6 +161,7 @@ def _manifest_lock_identity(manifest_path: str) -> tuple[str, str]:
         raise SweepAborted(
             f"manifest path {manifest_path!r} cannot be canonicalized for "
             f"exclusive execution ({exc})") from exc
+    _require_single_link_manifest(canonical)
     digest = hashlib.sha256(os.fsencode(canonical)).hexdigest()
     # The namespace must be process-invariant.  tempfile.gettempdir() is not:
     # TMPDIR/TMP/TEMP and tempfile.tempdir can differ between two workers that
@@ -186,6 +212,11 @@ def _manifest_advisory_lock(manifest_path: str):
             raise SweepAborted(
                 f"manifest {canonical!r} is already owned by another sweep; "
                 "concurrent execution is refused") from exc
+        # Close the selection/acquisition window: an alias added while this
+        # process was opening the persistent lock still refuses before the
+        # lifecycle body.  Cooperative contenders will likewise observe and
+        # refuse a multiply-linked target.
+        _require_single_link_manifest(canonical)
         # The caller consumes this exact canonical target.  Lock selection and
         # the ledger path therefore cannot diverge through a mutable/non-stable
         # input mapping after ownership was acquired.

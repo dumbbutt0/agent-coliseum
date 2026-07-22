@@ -124,6 +124,31 @@ threshold, model regime, stopping rule, or claim ceiling changes in this slice.
 Every Round 7 GO is historical after the descendant commit, which requires a
 fresh five-section review before integration.
 
+### Round 8 manifest-alias finding
+
+The first descendant repair froze at
+`6223baabcd3aaac108e1e875583efdb898608a33`. A-016 and C-013 returned plain GO
+at events `002266-ffd6dac4` and `002268-9d7d34dc`; both become historical after
+the next semantic descendant. B-013 returned `AUDIT_BLOCKED` at
+`002267-6a81823d` after independently creating two hard-linked names for one
+manifest inode. Because lock identity was derived from each canonical path,
+the names selected different persistent lock files and both spawned processes
+entered. Their adjacent tombstone paths also differed, so switching to an
+inode-key lock alone would not define one terminal-ledger namespace. Unclaimed
+D-013/E-013 were canceled as superseded at events `002269-dd697a6e` and
+`002270-b0bfd6be`.
+
+The bounded descendant refuses any existing resolved manifest whose link count
+is not exactly one before selecting its path lock, and repeats the check after
+lock acquisition before entering the lifecycle body. A missing manifest remains
+a valid first-execution target; stable symlink aliases to an existing
+single-link target still converge; distinct single-link manifests remain
+independent; and persistent lock files are still never automatically removed.
+A spawned-process regression gives both hard-linked names bounded bodies and
+requires both to refuse before body entry or adjacent tombstone writes. This is
+a fail-closed unsupported-alias rule, not a change to the frozen M8 design,
+analysis, model, stopping rule, or claim ceiling.
+
 The ordering change deliberately supersedes the earlier test claim that model
 preflight precedes manifest validation. Ledger validation now comes first;
 whole-fleet digest validation still occurs before any scenario execution or
