@@ -233,7 +233,8 @@ def cmd_replay_pack(args):
         sys.exit("REPLAY-PACK REFUSED: sweep.verify_pack_replay is not "
                  "available in this build (contract symbol missing)")
     try:
-        verify(args.manifest, args.out_root, args.config_dir)
+        verify(args.manifest, args.out_root, args.config_dir,
+               registry_path=args.registry, experiment_id=args.experiment_id)
     except Exception as e:  # any failure is a refusal, never a partial file
         sys.exit(f"REPLAY-PACK REFUSED: {e.__class__.__name__}: {e}")
     att_path = os.path.join(args.out_root, ATTESTATION_NAME)
@@ -246,7 +247,7 @@ def cmd_replay_pack(args):
     print(f"runs        : {len(att.get('runs', {}))} replay-verified")
 
 
-def cmd_order_report(args):
+def _cmd_order_report_locked(args):
     """Frozen ORDER_REPORT_VERSION-6 analysis over a completed pack.
 
     Order of refusals (each exits nonzero and writes NOTHING):
@@ -285,20 +286,6 @@ def cmd_order_report(args):
     except ValueError as e:
         sys.exit(f"ORDER-REPORT REFUSED: {att_path} is not valid JSON: {e}")
 
-    rows = sweep.manifest_load(args.manifest, args.out_root)
-    if not rows:
-        sys.exit(f"ORDER-REPORT REFUSED: manifest {args.manifest} resolves "
-                 "to zero validated rows")
-    run_dirs = sorted(os.path.join(args.out_root, rec["dir"])
-                      for rec in rows.values())
-    # Per-scenario surviving counts, derived from the validated manifest rows
-    # themselves: a dropped run is ABSENT from the manifest, so this is the
-    # census the max_surviving_delta bound is charged against.
-    surviving_counts: dict = {}
-    for rec in rows.values():
-        surviving_counts[rec["scenario"]] = \
-            surviving_counts.get(rec["scenario"], 0) + 1
-
     # d-003 findings 0 & 1: for a policy-required experiment the analysis MUST
     # load a VERIFIED bundle (profile-checked, not design_hash-only) and MUST
     # source retries_per_unit from the frozen design. A caller-selected
@@ -314,7 +301,8 @@ def cmd_order_report(args):
                      "against an unverified or self-rehashed design")
         policy = vb.admissibility_policy
         thresholds = vb.thresholds
-        conditions = _conditions_from_design(vb.planned_design)
+        planned_design = vb.planned_design
+        conditions = _conditions_from_design(planned_design)
         retries_per_unit = vb.retries_per_unit
         if isinstance(retries_per_unit, bool) or retries_per_unit != 0:
             sys.exit(f"ORDER-REPORT REFUSED: frozen retries_per_unit="
@@ -325,17 +313,37 @@ def cmd_order_report(args):
         # count and refuses an extra/unfrozen (variant, scenario_seed) group
         # rather than scaling "required" to whatever groups the pack contains.
         try:
-            frozen_grid = metrics_mod.frozen_grid_from_design(vb.planned_design)
+            frozen_grid = metrics_mod.frozen_grid_from_design(planned_design)
         except SchemaError as e:
             sys.exit(f"ORDER-REPORT REFUSED: frozen matched-unit grid could not "
                      f"be sourced from the verified design ({e})")
     else:
         policy = load_admissibility_policy(args.registry, args.experiment_id)
         thresholds = load_thresholds(args.registry, args.experiment_id)
-        conditions = _conditions_from_design(
-            _frozen_design(args.registry, args.experiment_id))
+        planned_design = _frozen_design(args.registry, args.experiment_id)
+        conditions = _conditions_from_design(planned_design)
         retries_per_unit = None
         frozen_grid = None
+
+    try:
+        rows, _tombstones = sweep.terminal_ledgers_load(
+            args.manifest, args.out_root, planned_design=planned_design,
+            require_tombstone_regime_anchors=True)
+        sweep.validate_terminal_ledger_attestation(attestation, args.manifest)
+    except SchemaError as e:
+        sys.exit(f"ORDER-REPORT REFUSED (terminal ledgers): {e}")
+    if not rows:
+        sys.exit(f"ORDER-REPORT REFUSED: manifest {args.manifest} resolves "
+                 "to zero validated rows")
+    run_dirs = sorted(os.path.join(args.out_root, rec["dir"])
+                      for rec in rows.values())
+    # Per-scenario surviving counts, derived from the validated manifest rows
+    # themselves: a dropped run is ABSENT from the manifest, so this is the
+    # census the max_surviving_delta bound is charged against.
+    surviving_counts: dict = {}
+    for rec in rows.values():
+        surviving_counts[rec["scenario"]] = \
+            surviving_counts.get(rec["scenario"], 0) + 1
     # terminal_dp_id is SCENARIO-DESIGN identity, DERIVED — never a CLI knob.
     # Under imposed history each m8 scenario carries exactly ONE decision-kind
     # point (the terminal probe); it must be unique within every scenario and
@@ -374,6 +382,18 @@ def cmd_order_report(args):
     from . import reports
     print(reports.render_order_report(report), end="")
     print("wrote", out_path)
+
+
+def cmd_order_report(args):
+    """Analyze one stable, manifest-locked terminal-ledger snapshot."""
+    from . import sweep
+    try:
+        with sweep._manifest_advisory_lock(args.manifest) as canonical:
+            locked_args = argparse.Namespace(**vars(args))
+            locked_args.manifest = canonical
+            return _cmd_order_report_locked(locked_args)
+    except sweep.SweepAborted as e:
+        sys.exit(f"ORDER-REPORT REFUSED (terminal lock): {e}")
 
 
 def _git_head() -> str | None:
@@ -700,8 +720,10 @@ def main(argv=None):
                        "pack -> replay_attestation.json (refuses on any "
                        "failure)")
     s.set_defaults(fn=cmd_replay_pack)
+    s.add_argument("--experiment-id", required=True)
     s.add_argument("--manifest", required=True)
     s.add_argument("--out-root", required=True)
+    s.add_argument("--registry", default="configs/registry/experiments.yaml")
     s.add_argument("--config-dir", default="configs/scenarios")
 
     s = sub.add_parser("order-report", help="ORDER_REPORT_VERSION-6 analysis "

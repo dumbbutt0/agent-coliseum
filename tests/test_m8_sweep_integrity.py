@@ -507,22 +507,33 @@ def _real_pack(tmp_path, monkeypatch, name="runs"):
     return spec, result
 
 
+def _replay_planned_design(spec):
+    return {
+        "models": list(spec["models"]),
+        "scenarios": list(spec["scenarios"]),
+        "scenario_seeds": list(spec["seeds"]),
+        "sampler_seeds": list(spec["sampler_seeds"] or [None]),
+    }
+
+
 def test_verify_pack_replay_writes_bound_attestation(tmp_path, monkeypatch):
     """The receipt the frozen analysis path authenticates: EXACTLY the
     director-defined shape, hashes of the exact evidence bytes."""
     spec, _ = _real_pack(tmp_path, monkeypatch)
     att = verify_pack_replay(spec["manifest"], spec["out_root"],
-                             spec["config_dir"])
+                             spec["config_dir"],
+                             planned_design=_replay_planned_design(spec))
     path = os.path.join(spec["out_root"], "replay_attestation.json")
     assert os.path.exists(path)
     on_disk = json.load(open(path, encoding="utf-8"))
     assert on_disk == att
     # top-level shape is exact — no extra keys, no missing keys
     assert set(att) == {"attestation_version", "verified_utc",
-                        "manifest_sha256", "runs"}
+                        "manifest_sha256", "tombstone_ledger", "runs"}
     assert att["attestation_version"] == "1"
     assert att["manifest_sha256"] == hashlib.sha256(
         open(spec["manifest"], "rb").read()).hexdigest()
+    assert att["tombstone_ledger"] == {"state": "absent", "sha256": None}
     rows = [json.loads(l) for l in open(spec["manifest"], encoding="utf-8")]
     assert set(att["runs"]) == {r["run_id"] for r in rows}
     for row in rows:
@@ -539,6 +550,34 @@ def test_verify_pack_replay_writes_bound_attestation(tmp_path, monkeypatch):
                 open(os.path.join(run_dir, fname), "rb").read()).hexdigest()
 
 
+def test_verify_pack_replay_accepts_and_binds_valid_disjoint_tombstone(
+        tmp_path, monkeypatch):
+    """A real failed coordinate is bound, not confused with contradiction."""
+    spec, _ = _real_pack(tmp_path, monkeypatch)
+    with open(spec["manifest"], encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh]
+    survivor, failed = rows
+    with open(spec["manifest"], "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(survivor) + "\n")
+    tombstone = {
+        "regime_id": failed["regime_id"], "model": failed["model"],
+        "scenario": failed["scenario"],
+        "scenario_seed": failed["scenario_seed"],
+        "sampler_seed": failed["sampler_seed"],
+        "failure_kind": "timeout", "error": "offline fixture",
+        "recorded_utc": "2026-07-22T00:00:00Z"}
+    _write_tombstones(spec, [tombstone])
+
+    att = verify_pack_replay(
+        spec["manifest"], spec["out_root"], spec["config_dir"],
+        planned_design=_replay_planned_design(spec))
+    tomb_path = spec["manifest"] + ".tombstones.jsonl"
+    assert att["tombstone_ledger"] == {
+        "state": "present",
+        "sha256": hashlib.sha256(open(tomb_path, "rb").read()).hexdigest()}
+    assert set(att["runs"]) == {survivor["run_id"]}
+
+
 def test_verify_pack_replay_fails_closed_and_leaves_no_receipt(
         tmp_path, monkeypatch):
     """The audited failure mode: a pack whose captures cannot replay must
@@ -546,28 +585,42 @@ def test_verify_pack_replay_fails_closed_and_leaves_no_receipt(
     an earlier pass, so a failure can never sit next to a valid-looking one."""
     spec, _ = _real_pack(tmp_path, monkeypatch)
     att_path = os.path.join(spec["out_root"], "replay_attestation.json")
-    verify_pack_replay(spec["manifest"], spec["out_root"], spec["config_dir"])
+    verify_pack_replay(
+        spec["manifest"], spec["out_root"], spec["config_dir"],
+        planned_design=_replay_planned_design(spec))
     assert os.path.exists(att_path)                     # stale receipt planted
     rows = [json.loads(l) for l in open(spec["manifest"], encoding="utf-8")]
     victim = os.path.join(spec["out_root"], rows[1]["dir"], "captures.jsonl")
     os.remove(victim)                                   # the auditor's fixture: no captures
     with pytest.raises(Exception):
         verify_pack_replay(spec["manifest"], spec["out_root"],
-                           spec["config_dir"])
+                           spec["config_dir"],
+                           planned_design=_replay_planned_design(spec))
     assert not os.path.exists(att_path), \
         "a failing pack kept a valid-looking attestation"
     assert not os.path.exists(att_path + ".tmp")
 
 
 def test_verify_pack_replay_refuses_missing_or_empty_manifest(tmp_path):
+    stale = tmp_path / "replay_attestation.json"
+    stale.write_text('{"stale": true}\n', encoding="utf-8")
     with pytest.raises(SweepAborted, match="no manifest"):
         verify_pack_replay(str(tmp_path / "absent.jsonl"), str(tmp_path),
-                           os.path.join(ROOT, "configs", "scenarios"))
+                           os.path.join(ROOT, "configs", "scenarios"),
+                           planned_design={"scenarios": [SCENARIO],
+                                           "models": [MODEL],
+                                           "scenario_seeds": [42],
+                                           "sampler_seeds": [None]})
+    assert not stale.exists()
     empty = tmp_path / "empty.jsonl"
     empty.write_text("", encoding="utf-8")
     with pytest.raises(SweepAborted, match="no rows"):
         verify_pack_replay(str(empty), str(tmp_path),
-                           os.path.join(ROOT, "configs", "scenarios"))
+                           os.path.join(ROOT, "configs", "scenarios"),
+                           planned_design={"scenarios": [SCENARIO],
+                                           "models": [MODEL],
+                                           "scenario_seeds": [42],
+                                           "sampler_seeds": [None]})
 
 
 def test_file_sha256_absent_captures_hash_as_empty_file(tmp_path):
@@ -749,6 +802,102 @@ def test_every_declared_failure_kind_loads_as_a_typed_tombstone(
     _write_tombstones(spec, [row])
     loaded = sweep_mod.tombstone_load(spec["manifest"])
     assert list(loaded.values()) == [row]
+
+
+def _terminal_snapshot_rows(*, tombstone_seed=1, tombstone_regime="regime-a"):
+    success = {
+        "regime_id": "regime-a", "model": MODEL, "scenario": SCENARIO,
+        "scenario_seed": 42, "sampler_seed": None}
+    tombstone = {
+        "regime_id": tombstone_regime, "model": MODEL,
+        "scenario": SCENARIO, "scenario_seed": tombstone_seed,
+        "sampler_seed": None, "failure_kind": "timeout",
+        "error": "offline", "recorded_utc": "2026-07-22T00:00:00Z"}
+    return success, tombstone
+
+
+def _terminal_snapshot_design():
+    return {"models": [MODEL], "scenarios": [SCENARIO],
+            "scenario_seeds": [42, 1],
+            "sampler_seeds": [None]}
+
+
+def test_terminal_snapshot_accepts_valid_disjoint_anchored_tombstone(
+        monkeypatch):
+    """A genuine failure coordinate remains valid terminal evidence."""
+    success, tombstone = _terminal_snapshot_rows()
+    monkeypatch.setattr(sweep_mod, "manifest_load", lambda *_a: {
+        (success["regime_id"], 42, None): success})
+    monkeypatch.setattr(sweep_mod, "tombstone_load", lambda *_a: {
+        (tombstone["regime_id"], 1, None): tombstone})
+    successes, tombstones = sweep_mod.terminal_ledgers_load(
+        "manifest.jsonl", "runs", planned_design=_terminal_snapshot_design(),
+        require_tombstone_regime_anchors=True)
+    assert list(successes.values()) == [success]
+    assert list(tombstones.values()) == [tombstone]
+
+
+def test_terminal_snapshot_refuses_foreign_and_regime_invalid_tombstones(
+        monkeypatch):
+    success, tombstone = _terminal_snapshot_rows(tombstone_seed=7)
+    monkeypatch.setattr(sweep_mod, "manifest_load", lambda *_a: {
+        (success["regime_id"], 42, None): success})
+    monkeypatch.setattr(sweep_mod, "tombstone_load", lambda *_a: {
+        (tombstone["regime_id"], 7, None): tombstone})
+    with pytest.raises(sweep_mod.TerminalLedgerError,
+                       match="outside the frozen"):
+        sweep_mod.terminal_ledgers_load(
+            "manifest.jsonl", "runs",
+            planned_design=_terminal_snapshot_design(),
+            require_tombstone_regime_anchors=True)
+
+    _, tombstone = _terminal_snapshot_rows(tombstone_regime="wrong-regime")
+    monkeypatch.setattr(sweep_mod, "tombstone_load", lambda *_a: {
+        (tombstone["regime_id"], 1, None): tombstone})
+    with pytest.raises(sweep_mod.TerminalLedgerError,
+                       match="expected anchored regime"):
+        sweep_mod.terminal_ledgers_load(
+            "manifest.jsonl", "runs",
+            planned_design=_terminal_snapshot_design(),
+            require_tombstone_regime_anchors=True)
+
+
+def test_terminal_snapshot_refuses_foreign_model_even_with_own_anchor(
+        monkeypatch):
+    """Foreign success rows cannot make a foreign tombstone look planned."""
+    success, tombstone = _terminal_snapshot_rows()
+    success["model"] = tombstone["model"] = "foreign-model"
+    monkeypatch.setattr(sweep_mod, "manifest_load", lambda *_a: {
+        (success["regime_id"], 42, None): success})
+    monkeypatch.setattr(sweep_mod, "tombstone_load", lambda *_a: {
+        (tombstone["regime_id"], 1, None): tombstone})
+    with pytest.raises(sweep_mod.TerminalLedgerError,
+                       match="outside the frozen"):
+        sweep_mod.terminal_ledgers_load(
+            "manifest.jsonl", "runs",
+            planned_design=_terminal_snapshot_design(),
+            require_tombstone_regime_anchors=True)
+
+def test_tombstone_loader_wraps_malformed_json_as_schema_error(tmp_path):
+    manifest = str(tmp_path / "manifest.jsonl")
+    with open(manifest + ".tombstones.jsonl", "w", encoding="utf-8") as fh:
+        fh.write("{not-json}\n")
+    with pytest.raises(sweep_mod.SchemaError, match="not valid JSON"):
+        sweep_mod.tombstone_load(manifest)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("error", ""), ("recorded_utc", None), ("scenario_seed", True),
+     ("sampler_seed", "2001")])
+def test_tombstone_loader_refuses_malformed_provenance_types(
+        tmp_path, field, value):
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,))
+    row = _tombstone(SCENARIO, 42, None)
+    row[field] = value
+    _write_tombstones(spec, [row])
+    with pytest.raises(sweep_mod.SchemaError, match=field):
+        sweep_mod.tombstone_load(spec["manifest"])
 
 
 def test_mixed_success_regimes_never_pool_on_provider_free_path(

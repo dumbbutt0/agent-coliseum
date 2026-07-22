@@ -117,6 +117,10 @@ class SweepUnbalanced(SweepAborted):
     pack is refused as unanalyzable rather than reported with a caveat."""
 
 
+class TerminalLedgerError(SchemaError, SweepAborted):
+    """A terminal-ledger snapshot is invalid for execution or derivation."""
+
+
 def _manifest_lock_identity(manifest_path: str) -> tuple[str, str]:
     """Canonical manifest target and its persistent process-lock path.
 
@@ -288,29 +292,33 @@ def _file_sha256(path: str, *, absent_as_empty: bool = False) -> str:
     return h.hexdigest()
 
 
-def verify_pack_replay(manifest_path: str, out_root: str, config_dir: str) -> dict:
+def _verify_pack_replay_locked(manifest_path: str, out_root: str,
+                               config_dir: str,
+                               planned_design: dict) -> dict:
     """Provider-free replay attestation for a WHOLE pack (M8 Phase-2 audit
     c-001, finding 0 — generator side).
 
     Runs verify_run_replay on EVERY manifest row and, only if every run
     replays, writes <out_root>/replay_attestation.json binding each run's
-    exact evidence bytes (run.json / decisions.jsonl / captures.jsonl sha256)
-    and the manifest bytes to the replay result. The frozen analysis path
-    authenticates this receipt instead of trusting mutable admission booleans.
+    exact evidence bytes (run.json / decisions.jsonl / captures.jsonl sha256),
+    the manifest bytes, and the adjacent tombstone-ledger bytes or canonical
+    absence to the replay result. The frozen analysis path authenticates this
+    receipt instead of trusting mutable admission booleans.
 
-    FAIL CLOSED: any replay failure (or a missing/empty manifest) raises and
-    writes NO attestation — not even a partial one — and a stale attestation
-    from a previous pass is removed before verification starts, so a failing
-    pack can never sit next to a valid-looking receipt. The attestation is
-    written atomically (temp file + rename) only after the last row verifies.
+    FAIL CLOSED: any invalid terminal snapshot, replay failure, or missing/empty
+    manifest raises and writes NO attestation — not even a partial one — and a
+    stale attestation from a previous pass is removed before verification
+    starts, so a failing pack can never sit next to a valid-looking receipt.
+    The attestation is written atomically (temp file + rename) only after the
+    last row verifies.
 
     Returns the attestation dict exactly as written."""
     if not os.path.exists(manifest_path):
         raise SweepAborted(f"verify_pack_replay: no manifest at {manifest_path}")
     attestation_path = os.path.join(out_root, "replay_attestation.json")
-    if os.path.exists(attestation_path):
-        os.remove(attestation_path)       # a receipt must postdate its verification
-    rows = manifest_load(manifest_path, out_root)
+    rows, _tombstones = terminal_ledgers_load(
+        manifest_path, out_root, planned_design=planned_design,
+        require_tombstone_regime_anchors=True)
     if not rows:
         raise SweepAborted(f"verify_pack_replay: {manifest_path} has no rows — "
                            "refusing to attest an empty pack")
@@ -331,9 +339,14 @@ def verify_pack_replay(manifest_path: str, out_root: str, config_dir: str) -> di
                                             absent_as_empty=True),
         }
     attestation = {
+        # Version 1 names the frozen per-run replay record contract consumed by
+        # metrics.  The terminal-ledger identity is an additive top-level
+        # envelope field; changing that frozen version would alter the admitted
+        # analysis identity despite leaving every per-run record unchanged.
         "attestation_version": "1",
         "verified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "manifest_sha256": _file_sha256(manifest_path),
+        "tombstone_ledger": tombstone_ledger_identity(manifest_path),
         "runs": runs,
     }
     tmp_path = attestation_path + ".tmp"
@@ -342,6 +355,34 @@ def verify_pack_replay(manifest_path: str, out_root: str, config_dir: str) -> di
         fh.write("\n")
     os.replace(tmp_path, attestation_path)
     return attestation
+
+
+def verify_pack_replay(manifest_path: str, out_root: str, config_dir: str,
+                       *, planned_design: dict | None = None,
+                       registry_path: str | None = None,
+                       experiment_id: str | None = None) -> dict:
+    """Replay and attest one stable, validated terminal-ledger snapshot.
+
+    The adjacent tombstone ledger is part of the evidence identity even when
+    it is absent.  Holding the same manifest-scoped lock used by ``run_sweep``
+    prevents either terminal ledger from changing between validation, replay,
+    and the atomic attestation write.
+    """
+    with _manifest_advisory_lock(manifest_path) as canonical_manifest:
+        attestation_path = os.path.join(out_root, "replay_attestation.json")
+        if os.path.exists(attestation_path):
+            os.remove(attestation_path)  # every post-lock refusal clears stale output
+        if planned_design is None:
+            if not registry_path or not experiment_id:
+                raise SweepAborted(
+                    "verify_pack_replay requires planned_design or both "
+                    "registry_path and experiment_id")
+            from .registry import load_verified_bundle
+            planned_design = load_verified_bundle(
+                registry_path, experiment_id).planned_design
+        return _verify_pack_replay_locked(
+            canonical_manifest, out_root, config_dir,
+            planned_design=planned_design)
 
 
 def surviving_counts_from_result(result: "SweepResult") -> dict:
@@ -473,7 +514,12 @@ def tombstone_load(manifest_path: str) -> dict:
             if not line:
                 continue
             where = f"{path}:{i + 1}"
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except (TypeError, ValueError) as exc:
+                raise SchemaError(
+                    f"{where}: tombstone row is not valid JSON ({exc})"
+                ) from exc
             if not isinstance(rec, dict):
                 raise SchemaError(f"{where}: tombstone row is not an object")
             missing = [f for f in REQUIRED_TOMBSTONE_FIELDS if f not in rec]
@@ -482,11 +528,25 @@ def tombstone_load(manifest_path: str) -> dict:
                     f"{where}: incomplete tombstone row — missing {missing}. A "
                     "tombstone suppresses a planned unit, so one without full "
                     "provenance can never stand in for that unit")
-            for field in ("regime_id", "model", "scenario", "failure_kind"):
+            for field in ("regime_id", "model", "scenario", "failure_kind",
+                          "error", "recorded_utc"):
                 if not isinstance(rec[field], str) or not rec[field]:
                     raise SchemaError(
                         f"{where}: tombstone {field}={rec[field]!r} must be a "
                         "non-empty string")
+            scenario_seed = rec["scenario_seed"]
+            if isinstance(scenario_seed, bool) or not isinstance(
+                    scenario_seed, int):
+                raise SchemaError(
+                    f"{where}: tombstone scenario_seed={scenario_seed!r} "
+                    "must be an integer")
+            sampler_seed = rec["sampler_seed"]
+            if (isinstance(sampler_seed, bool)
+                    or (sampler_seed is not None
+                        and not isinstance(sampler_seed, int))):
+                raise SchemaError(
+                    f"{where}: tombstone sampler_seed={sampler_seed!r} must "
+                    "be an integer or null")
             if rec["failure_kind"] not in FAILURE_KINDS:
                 raise SchemaError(
                     f"{where}: tombstone failure_kind="
@@ -500,6 +560,162 @@ def tombstone_load(manifest_path: str) -> dict:
                     "silently collapse into one resolved cell)")
             done[key] = rec
     return done
+
+
+def _terminal_coord(row: dict) -> tuple:
+    """The experiment-coordinate identity shared by both terminal ledgers."""
+    return (row.get("model"), row.get("scenario"),
+            row.get("scenario_seed"), row.get("sampler_seed"))
+
+
+def _planned_design_coords(planned_design: dict) -> set:
+    """Model/scenario/seed coordinates frozen without provider construction.
+
+    Regime membership is checked against surviving success anchors; every
+    remaining coordinate axis is available directly in the planned design.
+    """
+    if not isinstance(planned_design, dict):
+        raise SchemaError("planned_design must be an object")
+    axes = {}
+    for field in ("models", "scenarios", "scenario_seeds", "sampler_seeds"):
+        values = planned_design.get(field)
+        if not isinstance(values, list) or not values:
+            raise SchemaError(
+                f"planned_design.{field} must be a non-empty list")
+        if len(values) != len(set(values)):
+            raise SchemaError(
+                f"planned_design.{field} contains duplicate values")
+        axes[field] = values
+    return {
+        (model, scenario, scenario_seed, sampler_seed)
+        for model in axes["models"]
+        for scenario in axes["scenarios"]
+        for scenario_seed in axes["scenario_seeds"]
+        for sampler_seed in axes["sampler_seeds"]
+    }
+
+
+def tombstone_ledger_identity(manifest_path: str) -> dict:
+    """Exact adjacent-ledger identity, including authenticated absence."""
+    path = _tombstone_path(manifest_path)
+    if not os.path.exists(path):
+        return {"state": "absent", "sha256": None}
+    if not os.path.isfile(path):
+        raise SchemaError(
+            f"tombstone ledger path is not a regular file: {path}")
+    try:
+        digest = _file_sha256(path)
+    except OSError as exc:
+        raise SchemaError(
+            f"tombstone ledger cannot be hashed: {path} ({exc})") from exc
+    return {"state": "present", "sha256": digest}
+
+
+def terminal_ledgers_load(
+        manifest_path: str, out_root: str, *,
+        planned_design: dict | None = None,
+        require_tombstone_regime_anchors: bool = False) -> tuple[dict, dict]:
+    """Load one validated success/tombstone snapshot.
+
+    Key- and coordinate-level contradictions are invalid on every consumer,
+    not only during execution.  When a frozen design is supplied, tombstones
+    must lie in its scenario/seed grid.  Derived provider-free consumers also
+    require each tombstone's model/scenario regime to be uniquely anchored by
+    validated surviving evidence from that same group.
+
+    The caller owns the manifest advisory lock while consuming the returned
+    snapshot; this function intentionally does not acquire it recursively.
+    """
+    successes = manifest_load(manifest_path, out_root)
+    tombstones = tombstone_load(manifest_path)
+
+    key_both = set(successes) & set(tombstones)
+    if key_both:
+        example = sorted(key_both, key=repr)[0]
+        raise TerminalLedgerError(
+            f"terminal ledgers are contradictory: success and tombstone "
+            f"share terminal key {example!r}; terminal outcomes disagree")
+
+    success_coords = {}
+    for row in successes.values():
+        success_coords.setdefault(_terminal_coord(row), []).append(row)
+    tombstone_coords = {}
+    for row in tombstones.values():
+        tombstone_coords.setdefault(_terminal_coord(row), []).append(row)
+
+    coordinate_both = set(success_coords) & set(tombstone_coords)
+    if coordinate_both:
+        example = sorted(coordinate_both, key=repr)[0]
+        raise TerminalLedgerError(
+            f"terminal ledgers are contradictory at the same planned "
+            f"coordinate {example!r}: success and tombstone outcomes coexist")
+
+    duplicate_tombstones = {
+        coord for coord, rows in tombstone_coords.items() if len(rows) > 1}
+    if duplicate_tombstones:
+        example = sorted(duplicate_tombstones, key=repr)[0]
+        raise TerminalLedgerError(
+            f"terminal ledger carries multiple tombstones for planned "
+            f"coordinate {example!r}")
+
+    if planned_design is not None:
+        planned = _planned_design_coords(planned_design)
+        foreign = []
+        for row in tombstones.values():
+            coord = (row.get("model"), row.get("scenario"),
+                     row.get("scenario_seed"),
+                     row.get("sampler_seed"))
+            if coord not in planned:
+                foreign.append(coord)
+        if foreign:
+            raise TerminalLedgerError(
+                f"terminal ledger contains tombstone outside the frozen "
+                f"model/scenario/seed grid: {foreign[0]!r}")
+
+    if require_tombstone_regime_anchors and tombstones:
+        if planned_design is None:
+            raise SchemaError(
+                "tombstone regime validation requires planned_design")
+        anchors = {}
+        for row in successes.values():
+            group = (row.get("model"), row.get("scenario"))
+            anchors.setdefault(group, set()).add(row.get("regime_id"))
+        for row in tombstones.values():
+            group = (row.get("model"), row.get("scenario"))
+            regimes = anchors.get(group, set())
+            if len(regimes) != 1:
+                raise TerminalLedgerError(
+                    f"tombstone for {group!r} has no unique validated success "
+                    "regime anchor")
+            (expected_regime,) = tuple(regimes)
+            if row.get("regime_id") != expected_regime:
+                raise TerminalLedgerError(
+                    f"tombstone for {group!r} carries regime_id "
+                    f"{row.get('regime_id')!r}, expected anchored regime "
+                    f"{expected_regime!r}")
+
+    return successes, tombstones
+
+
+def validate_terminal_ledger_attestation(attestation: dict,
+                                         manifest_path: str) -> dict:
+    """Bind downstream use to the current bytes or absence of both ledgers."""
+    if not isinstance(attestation, dict):
+        raise SchemaError("replay attestation must be an object")
+    try:
+        manifest_sha = _file_sha256(manifest_path)
+    except OSError as exc:
+        raise SchemaError(
+            f"manifest cannot be hashed: {manifest_path} ({exc})") from exc
+    if attestation.get("manifest_sha256") != manifest_sha:
+        raise SchemaError(
+            "replay attestation does not bind the current manifest bytes")
+    current_tombstone = tombstone_ledger_identity(manifest_path)
+    if attestation.get("tombstone_ledger") != current_tombstone:
+        raise SchemaError(
+            "replay attestation does not bind the current tombstone ledger "
+            "bytes or its authenticated absence")
+    return current_tombstone
 
 
 def resolve_sampling(temperature: float, sampler_seeds):
@@ -862,8 +1078,10 @@ def _run_sweep_locked(spec: dict, *, deadline: float | None = None,
     # terminal writes, or completion.  Tombstones are validated even for the
     # historical retry mode: a contradictory ledger is invalid evidence on
     # every path, not only when this call plans to consume failure outcomes.
-    initial_done = MappingProxyType(manifest_load(manifest_path, out_root))
-    initial_tombstones = MappingProxyType(tombstone_load(manifest_path))
+    loaded_done, loaded_tombstones = terminal_ledgers_load(
+        manifest_path, out_root)
+    initial_done = MappingProxyType(loaded_done)
+    initial_tombstones = MappingProxyType(loaded_tombstones)
     both = set(initial_done) & set(initial_tombstones)
     if both:
         raise SweepAborted(

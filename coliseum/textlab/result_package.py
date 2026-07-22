@@ -14,6 +14,8 @@ Fail-closed refusals (SchemaError):
   - the replay attestation is missing (unattested evidence is not evidence);
   - the attestation's manifest_sha256 disagrees with the manifest on disk
     (the attestation must bind to THIS manifest, not some manifest);
+  - the success/tombstone snapshot is contradictory, malformed, outside the
+    frozen grid, or has changed since replay (authenticated absence included);
   - the registry design_hash does not reconstruct (tampered frozen design).
 
 The git commit is RECORDED, not hashed: it names where the code stood, but the
@@ -28,7 +30,7 @@ import subprocess
 
 from .schema import SchemaError, canonical_json
 
-PACKAGE_VERSION = "1"
+PACKAGE_VERSION = "2"
 PACKAGE_NAME = "result_package.json"
 ATTESTATION_NAME = "replay_attestation.json"
 # every key a per-run attestation record must carry into the package
@@ -63,7 +65,9 @@ _CONDITION_LABELS = ("A", "B", "C")
 
 def _recompute_order_report(experiment_id: str, registry_path: str,
                             manifest_path: str, out_root: str, config_dir: str,
-                            attestation: dict) -> dict:
+                            attestation: dict,
+                            terminal_snapshot: tuple[dict, dict] | None = None
+                            ) -> dict:
     """Independently RE-DERIVE the order report from the bound raw evidence and
     the frozen VERIFIED design (d-003 finding 2). Returns the report dict, or
     raises SchemaError if the evidence does not admit a verdict — in which case
@@ -92,7 +96,12 @@ def _recompute_order_report(experiment_id: str, registry_path: str,
             "!= 0 — cannot recompute the package report under the frozen "
             "one-effective-unit contract")
 
-    rows = sweep.manifest_load(manifest_path, out_root)
+    if terminal_snapshot is None:
+        terminal_snapshot = sweep.terminal_ledgers_load(
+            manifest_path, out_root, planned_design=vb.planned_design,
+            require_tombstone_regime_anchors=True)
+    rows, _tombstones = terminal_snapshot
+    sweep.validate_terminal_ledger_attestation(attestation, manifest_path)
     if not rows:
         raise SchemaError(f"{experiment_id}: manifest resolves to zero rows")
     run_dirs = sorted(os.path.join(out_root, rec["dir"])
@@ -131,16 +140,17 @@ def _recompute_order_report(experiment_id: str, registry_path: str,
         frozen_grid=frozen_grid)
 
 
-def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
-                         registry_path: str, report_path: str,
-                         extra: dict, config_dir: str = "configs/scenarios"
-                         ) -> str:
+def _build_result_package_locked(
+        experiment_id: str, manifest_path: str, out_root: str,
+        registry_path: str, report_path: str, extra: dict,
+        config_dir: str = "configs/scenarios") -> str:
     """Assemble and write <out_root>/result_package.json; returns its path.
 
     For a POLICY_REQUIRED experiment the supplied report is NOT trusted: the
     verdict is RE-DERIVED from the bound manifest/attestation evidence and the
     frozen verified design, and must match the supplied report canonically
     (d-003 finding 2). A caller-authored or stale verdict cannot be packaged."""
+    from . import sweep
     from .registry import _find_entry, POLICY_REQUIRED_EXPERIMENTS
     from .registry import design_hash as compute_design_hash
 
@@ -212,6 +222,12 @@ def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
             f"{str(entry.get('design_hash'))[:16]}… != recomputed "
             f"{want[:16]}… — the frozen design was mutated")
 
+    terminal_snapshot = sweep.terminal_ledgers_load(
+        manifest_path, out_root, planned_design=pd,
+        require_tombstone_regime_anchors=True)
+    tombstone_identity = sweep.validate_terminal_ledger_attestation(
+        attestation, manifest_path)
+
     # d-003 finding 2: for a policy-required experiment the packaged verdict is
     # RE-DERIVED from the bound evidence, never trusted from the caller's report.
     # Recompute the order report from the current run evidence + the frozen
@@ -222,7 +238,8 @@ def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
         try:
             recomputed = _recompute_order_report(
                 experiment_id, registry_path, manifest_path, out_root,
-                config_dir, attestation)
+                config_dir, attestation,
+                terminal_snapshot=terminal_snapshot)
         except SchemaError as e:
             raise SchemaError(
                 f"{experiment_id}: the supplied report carries a verdict but an "
@@ -245,12 +262,17 @@ def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
         "models": list(pd.get("models") or []),
         "model_digests": dict(pd.get("model_digests") or {}),
         "manifest": {"path": manifest_path, "sha256": manifest_sha},
+        "tombstone_ledger": {
+            "path": manifest_path + ".tombstones.jsonl",
+            **tombstone_identity,
+        },
         "replay_attestation": {
             "path": att_path,
             "sha256": att_sha,
             "attestation_version": attestation.get("attestation_version"),
             "verified_utc": attestation.get("verified_utc"),
             "manifest_sha256": att_manifest_sha,
+            "tombstone_ledger": tombstone_identity,
         },
         "report": {"path": report_path, "sha256": report_sha, "body": report},
         "runs": run_evidence,
@@ -265,7 +287,25 @@ def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
     return out_path
 
 
-def verify_result_package(package_path: str) -> dict:
+def build_result_package(experiment_id: str, manifest_path: str, out_root: str,
+                         registry_path: str, report_path: str,
+                         extra: dict, config_dir: str = "configs/scenarios"
+                         ) -> str:
+    """Build from one stable, manifest-locked terminal-ledger snapshot."""
+    from . import sweep
+    try:
+        with sweep._manifest_advisory_lock(manifest_path) as canonical_manifest:
+            return _build_result_package_locked(
+                experiment_id, canonical_manifest, out_root, registry_path,
+                report_path, extra, config_dir=config_dir)
+    except sweep.SweepAborted as exc:
+        raise SchemaError(f"result-package terminal lock refused ({exc})") \
+            from exc
+
+
+def _verify_result_package_locked(
+        package_path: str, *, expected_manifest_path: str | None = None
+        ) -> dict:
     """Re-verify a package from disk. Returns the parsed package on success;
     raises SchemaError on ANY mismatch — body tamper, referenced-artifact
     tamper, or embedded-report drift. `git_commit` is deliberately NOT
@@ -274,6 +314,16 @@ def verify_result_package(package_path: str) -> dict:
         raise SchemaError(f"package not found: {package_path}")
     with open(package_path, encoding="utf-8") as fh:
         pkg = json.load(fh)
+    locked_manifest_path = (pkg.get("manifest") or {}).get("path")
+    if (expected_manifest_path is not None
+            and locked_manifest_path != expected_manifest_path):
+        raise SchemaError(
+            "package manifest reference changed while verification acquired "
+            "terminal-ledger ownership")
+    if pkg.get("package_version") != PACKAGE_VERSION:
+        raise SchemaError(
+            f"package_version {pkg.get('package_version')!r} != "
+            f"{PACKAGE_VERSION!r}")
     claimed = pkg.get("package_sha256")
     body = {k: v for k, v in pkg.items() if k != "package_sha256"}
     got = _sha256_body(body)
@@ -293,4 +343,47 @@ def verify_result_package(package_path: str) -> dict:
             raise SchemaError(
                 f"package {label} artifact tampered: {path} hashes to "
                 f"{have[:16]}… but the package recorded {want[:16]}…")
+    from . import sweep
+    tombstone_ref = pkg.get("tombstone_ledger")
+    if not isinstance(tombstone_ref, dict):
+        raise SchemaError("package tombstone_ledger reference is missing")
+    expected_tombstone_path = pkg["manifest"]["path"] + ".tombstones.jsonl"
+    if tombstone_ref.get("path") != expected_tombstone_path:
+        raise SchemaError(
+            "package tombstone_ledger path is not adjacent to its manifest")
+    current_identity = sweep.tombstone_ledger_identity(
+        pkg["manifest"]["path"])
+    recorded_identity = {
+        "state": tombstone_ref.get("state"),
+        "sha256": tombstone_ref.get("sha256"),
+    }
+    if recorded_identity != current_identity:
+        raise SchemaError(
+            "package tombstone ledger was created, removed, or modified "
+            "after packaging")
+    with open(pkg["replay_attestation"]["path"], encoding="utf-8") as fh:
+        replay_attestation = json.load(fh)
+    if replay_attestation.get("tombstone_ledger") != current_identity:
+        raise SchemaError(
+            "packaged replay attestation does not bind the current "
+            "tombstone ledger")
     return pkg
+
+
+def verify_result_package(package_path: str) -> dict:
+    """Verify package and both terminal ledgers under manifest ownership."""
+    if not os.path.isfile(package_path):
+        raise SchemaError(f"package not found: {package_path}")
+    with open(package_path, encoding="utf-8") as fh:
+        preview = json.load(fh)
+    manifest_path = (preview.get("manifest") or {}).get("path")
+    if not manifest_path:
+        raise SchemaError("package manifest reference is incomplete")
+    from . import sweep
+    try:
+        with sweep._manifest_advisory_lock(manifest_path) as canonical_manifest:
+            return _verify_result_package_locked(
+                package_path, expected_manifest_path=canonical_manifest)
+    except sweep.SweepAborted as exc:
+        raise SchemaError(f"result-package verification lock refused ({exc})") \
+            from exc

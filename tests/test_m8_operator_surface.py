@@ -18,6 +18,7 @@ import pytest
 
 from coliseum.textlab import cli
 from coliseum.textlab import metrics as metrics_mod
+from coliseum.textlab import result_package as result_package_mod
 from coliseum.textlab import sweep as sweep_mod
 from coliseum.textlab.result_package import (build_result_package,
                                              verify_result_package)
@@ -91,9 +92,15 @@ def _mk_pack(tmp_path, sampler_seeds=(2001, 2002)):
 
 def _write_attestation(manifest_path, out_root, run_ids):
     """Contract-shaped attestation, hashes built inline with hashlib."""
+    tombstone_path = manifest_path + ".tombstones.jsonl"
+    tombstone_identity = (
+        {"state": "present", "sha256": _sha256(tombstone_path)}
+        if os.path.isfile(tombstone_path)
+        else {"state": "absent", "sha256": None})
     att = {"attestation_version": "1",
            "verified_utc": "2026-07-19T00:00:00Z",
            "manifest_sha256": _sha256(manifest_path),
+           "tombstone_ledger": tombstone_identity,
            "runs": {}}
     for rid in run_ids:
         rd = os.path.join(out_root, rid)
@@ -136,13 +143,15 @@ def test_replay_pack_writes_contract_shaped_attestation(tmp_path, monkeypatch,
                                                         capsys):
     manifest, out_root, run_ids = _mk_pack(tmp_path)
 
-    def fake_verify(manifest_path, out_root_arg, config_dir):
+    def fake_verify(manifest_path, out_root_arg, config_dir, **_kwargs):
         assert manifest_path == manifest and out_root_arg == out_root
         return _write_attestation(manifest_path, out_root_arg, run_ids)[0]
 
     monkeypatch.setattr(sweep_mod, "verify_pack_replay", fake_verify,
                         raising=False)
-    cli.main(["replay-pack", "--manifest", manifest, "--out-root", out_root,
+    cli.main(["replay-pack", "--experiment-id", EID,
+              "--manifest", manifest, "--out-root", out_root,
+              "--registry", REGISTRY,
               "--config-dir", "configs/scenarios"])
     out = capsys.readouterr().out
     att_path = os.path.join(out_root, "replay_attestation.json")
@@ -167,11 +176,24 @@ def test_replay_pack_refuses_on_failure_and_writes_nothing(tmp_path,
     monkeypatch.setattr(sweep_mod, "verify_pack_replay", fake_verify,
                         raising=False)
     with pytest.raises(SystemExit) as e:
-        cli.main(["replay-pack", "--manifest", manifest,
-                  "--out-root", out_root])
+        cli.main(["replay-pack", "--experiment-id", EID,
+                  "--manifest", manifest, "--out-root", out_root,
+                  "--registry", REGISTRY])
     assert "REPLAY-PACK REFUSED" in str(e.value.code)
     assert not os.path.exists(os.path.join(out_root,
                                            "replay_attestation.json"))
+
+
+def test_replay_pack_invalid_registry_removes_stale_receipt(tmp_path):
+    manifest, out_root, _run_ids = _mk_pack(tmp_path)
+    attestation_path = os.path.join(out_root, "replay_attestation.json")
+    with open(attestation_path, "w", encoding="utf-8") as fh:
+        json.dump({"stale": True}, fh)
+    with pytest.raises(SystemExit, match="REPLAY-PACK REFUSED"):
+        cli.main(["replay-pack", "--experiment-id", EID,
+                  "--manifest", manifest, "--out-root", out_root,
+                  "--registry", str(tmp_path / "missing-registry.yaml")])
+    assert not os.path.exists(attestation_path)
 
 
 # --------------------------------------------------------------- order-report
@@ -649,13 +671,15 @@ def _recomputable_pack(tmp_path, subdir="pack", law=0):
                 with open(rj, encoding="utf-8") as fh:
                     run = json.load(fh)
                 run["comparison_regime_id"] = f"regime_{cond}"
+                run.setdefault("agent_config", {})["model"] = MODEL
+                run["agent_config"]["model_digest"] = DIGEST
                 with open(rj, "w", encoding="utf-8") as fh:
                     json.dump(run, fh)
-                rows.append({"regime_id": f"regime_{cond}", "model": "",
+                rows.append({"regime_id": f"regime_{cond}", "model": MODEL,
                              "scenario": oc.CONDITIONS[cond],
                              "scenario_seed": scen_seed, "sampler_seed": samp,
                              "variant_id": variant, "temperature": 0.7,
-                             "sampling_mode": "stochastic", "digest": "",
+                             "sampling_mode": "stochastic", "digest": DIGEST,
                              "scenario_hash": "",
                              "arbitration": "planner_priority", "run_id": rid,
                              "dir": rid, "reportable": True,
@@ -686,6 +710,80 @@ def _recomputable_pack(tmp_path, subdir="pack", law=0):
     return manifest, out_root, report_path
 
 
+def _write_terminal_tombstone(manifest, *, same_coordinate=True,
+                              regime=None):
+    """Write one fully shaped adjacent tombstone from a real manifest row."""
+    with open(manifest, encoding="utf-8") as fh:
+        row = json.loads(fh.readline())
+    tombstone = {
+        "regime_id": regime or row["regime_id"],
+        "model": row["model"],
+        "scenario": row["scenario"],
+        "scenario_seed": (row["scenario_seed"] if same_coordinate else 1),
+        "sampler_seed": row["sampler_seed"],
+        "failure_kind": "timeout",
+        "error": "offline terminal-ledger fixture",
+        "recorded_utc": "2026-07-22T00:00:00Z",
+    }
+    path = manifest + ".tombstones.jsonl"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(tombstone, sort_keys=True) + "\n")
+    return path
+
+
+def test_all_derived_surfaces_refuse_same_coordinate_terminal_conflict(
+        tmp_path):
+    """D-012: replay, analysis, and packaging share the sweep refusal."""
+    from coliseum.textlab.registry import load_verified_bundle
+
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
+    with open(report_path, "rb") as fh:
+        report_bytes = fh.read()
+    os.remove(report_path)
+    _write_terminal_tombstone(manifest)
+
+    with pytest.raises(SystemExit, match="terminal outcomes disagree"):
+        cli.main(_order_report_argv(manifest, out_root))
+    assert not os.path.exists(report_path)
+
+    with open(report_path, "wb") as fh:
+        fh.write(report_bytes)
+    with pytest.raises(SchemaError, match="terminal outcomes disagree"):
+        build_result_package(EID, manifest, out_root, REGISTRY, report_path,
+                             {}, config_dir="configs/scenarios")
+    assert not os.path.exists(os.path.join(out_root, "result_package.json"))
+
+    bundle = load_verified_bundle(REGISTRY, EID)
+    with pytest.raises(sweep_mod.TerminalLedgerError,
+                       match="terminal outcomes disagree"):
+        sweep_mod.verify_pack_replay(
+            manifest, out_root, "configs/scenarios",
+            planned_design=bundle.planned_design)
+    assert not os.path.exists(os.path.join(out_root,
+                                           "replay_attestation.json"))
+
+
+def test_authenticated_tombstone_absence_rejects_post_replay_creation(
+        tmp_path):
+    """An adjacent ledger created after replay invalidates later derivation."""
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
+    with open(report_path, "rb") as fh:
+        report_bytes = fh.read()
+    os.remove(report_path)
+    open(manifest + ".tombstones.jsonl", "w", encoding="utf-8").close()
+
+    with pytest.raises(SystemExit, match="authenticated absence"):
+        cli.main(_order_report_argv(manifest, out_root))
+    assert not os.path.exists(report_path)
+
+    with open(report_path, "wb") as fh:
+        fh.write(report_bytes)
+    with pytest.raises(SchemaError, match="authenticated absence"):
+        build_result_package(EID, manifest, out_root, REGISTRY, report_path,
+                             {}, config_dir="configs/scenarios")
+    assert not os.path.exists(os.path.join(out_root, "result_package.json"))
+
+
 def test_result_package_builds_and_verifies(tmp_path):
     manifest, out_root, report_path = _recomputable_pack(tmp_path)
     extra = {"suite_receipt": {"passed": 1766, "skipped": 13,
@@ -697,7 +795,7 @@ def test_result_package_builds_and_verifies(tmp_path):
                                 config_dir="configs/scenarios")
     assert path == os.path.join(out_root, "result_package.json")
     pkg = verify_result_package(path)   # raises on any mismatch
-    assert pkg["package_version"] == "1"
+    assert pkg["package_version"] == "2"
     assert pkg["experiment_id"] == EID
     # design identity from the registry (not hard-coded: the design may be
     # re-frozen pre-execution by the audit repair loop; the invariant is that
@@ -716,6 +814,11 @@ def test_result_package_builds_and_verifies(tmp_path):
     assert pkg["model_digests"] == {MODEL: DIGEST}
     # every referenced artifact identified by hash
     assert pkg["manifest"]["sha256"] == _sha256(manifest)
+    assert pkg["tombstone_ledger"] == {
+        "path": manifest + ".tombstones.jsonl",
+        "state": "absent", "sha256": None}
+    assert pkg["replay_attestation"]["tombstone_ledger"] == {
+        "state": "absent", "sha256": None}
     assert pkg["replay_attestation"]["sha256"] == _sha256(
         os.path.join(out_root, "replay_attestation.json"))
     assert pkg["report"]["sha256"] == _sha256(report_path)
@@ -725,6 +828,32 @@ def test_result_package_builds_and_verifies(tmp_path):
                             "decisions_sha256", "captures_sha256"}
     assert pkg["extra"] == extra
     assert "git_commit" in pkg   # recorded (may be None), never hashed
+
+
+def test_result_package_verification_rejects_later_tombstone_creation(
+        tmp_path):
+    """Package v2 authenticates that the adjacent ledger stayed absent."""
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
+    path = build_result_package(EID, manifest, out_root, REGISTRY,
+                                report_path, {},
+                                config_dir="configs/scenarios")
+    verify_result_package(path)
+    open(manifest + ".tombstones.jsonl", "w", encoding="utf-8").close()
+    with pytest.raises(SchemaError, match="created, removed, or modified"):
+        verify_result_package(path)
+
+
+def test_result_package_locked_verifier_rejects_manifest_reference_switch(
+        tmp_path):
+    """The package cannot select another ledger after lock acquisition."""
+    package_path = tmp_path / "result_package.json"
+    package_path.write_text(
+        json.dumps({"manifest": {"path": str(tmp_path / "second.jsonl")}}),
+        encoding="utf-8")
+    with pytest.raises(SchemaError, match="reference changed"):
+        result_package_mod._verify_result_package_locked(
+            str(package_path),
+            expected_manifest_path=str(tmp_path / "first.jsonl"))
 
 
 def test_result_package_refuses_on_tamper(tmp_path):

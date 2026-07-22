@@ -6,13 +6,18 @@ non-holder must not enter setup, call execution, or mutate either terminal
 ledger.
 """
 import multiprocessing as mp
+import json
 import os
 import queue
 import tempfile
+from argparse import Namespace
 
 import pytest
 
 import coliseum.textlab.sweep as sweep_mod
+from coliseum.textlab import cli as cli_mod
+from coliseum.textlab import result_package as package_mod
+from coliseum.textlab.schema import SchemaError
 from coliseum.textlab.sweep import SweepAborted
 
 
@@ -255,3 +260,48 @@ def test_locked_body_consumes_the_captured_canonical_manifest(tmp_path,
     _, second_lock = sweep_mod._manifest_lock_identity(second)
     assert os.path.exists(first_lock)
     assert not os.path.exists(second_lock)
+
+
+def test_derived_consumers_refuse_while_manifest_is_owned(
+        tmp_path, monkeypatch):
+    """Replay, analysis, package build, and verification share ownership."""
+    ctx = mp.get_context("spawn")
+    manifest = str(tmp_path / "pack" / "manifest.jsonl")
+    ready, release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(target=_hold_lock, args=(manifest, ready, release))
+    holder.start()
+    assert ready.wait(10)
+    entered = []
+    monkeypatch.setattr(
+        sweep_mod, "_verify_pack_replay_locked",
+        lambda *_a, **_k: entered.append("replay"))
+    monkeypatch.setattr(
+        cli_mod, "_cmd_order_report_locked",
+        lambda *_a, **_k: entered.append("report"))
+    monkeypatch.setattr(
+        package_mod, "_build_result_package_locked",
+        lambda *_a, **_k: entered.append("package"))
+    monkeypatch.setattr(
+        package_mod, "_verify_result_package_locked",
+        lambda *_a, **_k: entered.append("verify"))
+    package_path = str(tmp_path / "result_package.json")
+    with open(package_path, "w", encoding="utf-8") as fh:
+        json.dump({"manifest": {"path": manifest}}, fh)
+    try:
+        with pytest.raises(SweepAborted, match="already owned"):
+            sweep_mod.verify_pack_replay(
+                manifest, str(tmp_path), "configs/scenarios",
+                planned_design={"models": ["m"], "scenarios": ["s"],
+                                "scenario_seeds": [1],
+                                "sampler_seeds": [None]})
+        with pytest.raises(SystemExit, match="terminal lock"):
+            cli_mod.cmd_order_report(Namespace(manifest=manifest))
+        with pytest.raises(SchemaError, match="terminal lock"):
+            package_mod.build_result_package(
+                "e", manifest, str(tmp_path), "registry", "report", {})
+        with pytest.raises(SchemaError, match="verification lock"):
+            package_mod.verify_result_package(package_path)
+        assert entered == []
+    finally:
+        release.set()
+        _join(holder)

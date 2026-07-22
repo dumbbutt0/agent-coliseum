@@ -85,6 +85,45 @@ model/scenario context after fleet validation and before evidence-root creation;
 provider-free completion remains available only for an unambiguous, fully
 resolved terminal set.
 
+### Round 7 downstream finding and descendant closure
+
+The first requests for commit `7bbc40389cd1ceec142058fccee96005a6360967`
+were canceled without verdict at events `002218-41a5c46a` through
+`002222-970dc11c` because their hash-bound prose retained a stale suite count;
+they transfer no approval. Corrected A-015/B-012/C-012/E-012 returned plain GO
+at events `002241-8925e1b1`, `002242-7937d260`, `002243-8292c1ab`, and
+`002247-8aef14bc`. D-012 returned `AUDIT_BLOCKED` at
+`002246-5013094d`. Every verdict observed 2,213 passed and 13 skipped on the
+exact clean commit. A separate read-only protocol reconstruction verified the
+five request hashes, verdict bindings, event chain, cancellation states, and
+the locked 4/5 integration state.
+
+D-012 reproduced one downstream gap: `run_sweep` refused contradictory success
+and tombstone ledgers, but replay attestation, order-report, and result-package
+paths loaded only the success manifest. A complete 144-row fixture plus a valid
+tombstone for an already-successful coordinate still emitted both a verdict and
+a result package. Because the replay receipt did not bind the adjacent ledger
+or its absence, creating that ledger after replay did not invalidate later
+derivation.
+
+| Finding | Descendant invariant | Owned paths |
+|---|---|---|
+| R7-D012-1 | `terminal_ledgers_load` is the shared snapshot boundary for sweep, provider-free replay, order-report, and result-package recomputation. It loads both ledgers and refuses key- or coordinate-level contradictions, duplicate terminal coordinates, malformed provenance, foreign planned coordinates, unknown failure kinds, and provider-free regime mismatch before replay, metrics, or package writes. | `coliseum/textlab/sweep.py`, `coliseum/textlab/cli.py`, `coliseum/textlab/result_package.py` |
+| R7-D012-2 | Replay receipts bind the exact adjacent tombstone-ledger bytes or a canonical absent state. Order-report and package creation require that binding to match the current snapshot. Result package v2 carries the same identity, and package verification refuses later creation, removal, or mutation. | `coliseum/textlab/sweep.py`, `coliseum/textlab/result_package.py`, `tests/test_m8_operator_surface.py` |
+| R7-D012-3 | Replay, order-report, package creation, and package verification hold the same non-blocking canonical-manifest advisory lock used by sweep across snapshot loading and their terminal output. The persistent lock file is still never automatically removed or replaced. | `coliseum/textlab/sweep.py`, `coliseum/textlab/cli.py`, `coliseum/textlab/result_package.py`, `tests/test_m8_sweep_locking.py` |
+
+The replay CLI now requires an experiment id and verified registry bundle so a
+foreign or regime-invalid tombstone cannot be accepted without the frozen
+planned grid. Clean absent-ledger packs remain valid; a valid disjoint,
+uniquely anchored tombstone remains valid terminal evidence at the shared
+snapshot boundary. Dedicated regressions require every derived surface to
+refuse the D-012 contradiction, require post-replay ledger creation to
+invalidate derivation and package verification, and retain malformed,
+foreign, unknown-kind, regime-mismatch, and clean controls. No analysis rule,
+threshold, model regime, stopping rule, or claim ceiling changes in this slice.
+Every Round 7 GO is historical after the descendant commit, which requires a
+fresh five-section review before integration.
+
 The ordering change deliberately supersedes the earlier test claim that model
 preflight precedes manifest validation. Ledger validation now comes first;
 whole-fleet digest validation still occurs before any scenario execution or
