@@ -41,6 +41,14 @@ REQUIRED_ROW_FIELDS = (
     "interaction_mode", "path",
 )
 
+# a durable failure tombstone suppresses a planned unit, so it must prove which
+# planned coordinate it belongs to (model/scenario/seeds), under which regime,
+# and why it failed. Anything less cannot satisfy the plan (audit c-008).
+REQUIRED_TOMBSTONE_FIELDS = (
+    "regime_id", "model", "scenario", "scenario_seed", "sampler_seed",
+    "failure_kind", "error", "recorded_utc",
+)
+
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
@@ -370,18 +378,43 @@ def tombstone_load(manifest_path: str) -> dict:
     a key that carries one. Absent ledger -> no tombstones (a resume that never
     opted in behaves exactly as before). Keyed on the SAME resume identity as the
     manifest, so a manifested success and a tombstone can never target one key
-    without contradicting each other."""
+    without contradicting each other.
+
+    VALIDATED, not merely parsed (audit c-008). A tombstone can suppress the
+    generation of a planned unit, so it must carry the full provenance that
+    proves WHICH unit it belongs to and WHY it failed. Rows missing that
+    provenance, and duplicate resume keys, are REFUSED — the same
+    no-last-row-wins contract `manifest_load` enforces for successes."""
     done = {}
     path = _tombstone_path(manifest_path)
     if not os.path.exists(path):
         return done
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
+        for i, line in enumerate(fh):
             line = line.strip()
             if not line:
                 continue
+            where = f"{path}:{i + 1}"
             rec = json.loads(line)
+            if not isinstance(rec, dict):
+                raise SchemaError(f"{where}: tombstone row is not an object")
+            missing = [f for f in REQUIRED_TOMBSTONE_FIELDS if f not in rec]
+            if missing:
+                raise SchemaError(
+                    f"{where}: incomplete tombstone row — missing {missing}. A "
+                    "tombstone suppresses a planned unit, so one without full "
+                    "provenance can never stand in for that unit")
+            for field in ("regime_id", "model", "scenario", "failure_kind"):
+                if not isinstance(rec[field], str) or not rec[field]:
+                    raise SchemaError(
+                        f"{where}: tombstone {field}={rec[field]!r} must be a "
+                        "non-empty string")
             key = (rec["regime_id"], rec["scenario_seed"], rec["sampler_seed"])
+            if key in done:
+                raise SchemaError(
+                    f"{where}: duplicate tombstone resume key {key!r} — REFUSED "
+                    "(no last-row-wins: contradictory durable failures cannot "
+                    "silently collapse into one resolved cell)")
             done[key] = rec
     return done
 
@@ -712,8 +745,33 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
     # for the full-validation load. A malformed or short manifest counts below
     # `total` and falls straight through to the preflight, so a repulled model is
     # still refused there before any manifest_load and before any compute.
-    total = (len(spec["models"]) * len(scenarios) * len(seeds)
-             * len(sampler_seeds))
+    #
+    # AUDIT c-008: the gate below tests EXACT PLANNED-COORDINATE CONTAINMENT,
+    #   planned_coords <= done_coords | valid_tombstone_coords
+    # never ledger CARDINALITY (`len(done | tomb) >= total`). Cardinality let N
+    # unrelated tombstones — wrong regime, wrong scenario seed, wrong grid —
+    # stand in for N missing planned cells, so a sweep returned "fully resolved"
+    # with zero provider calls, zero rows and no manifest while planned units
+    # were never executed. A false completion is worse than a slow one: it
+    # produces an experiment whose evidence is silently short.
+    #
+    # The planned coordinate is (model, scenario, scenario_seed, sampler_seed) —
+    # the grid's own axes — NOT the (regime_id, …) resume key, because regime_id
+    # is derived from `probe.spec_dict()` and is therefore not computable without
+    # constructing a provider, which is exactly what this path must avoid.
+    # regime_id is still checked, by ANCHORING every tombstone to the regime that
+    # validated manifest evidence recorded for that same scenario.
+    planned_coords = {
+        (model, scenario_name, scenario_seed, sampler_seed)
+        for model in spec["models"]
+        for scenario_name in scenarios
+        for scenario_seed in seeds
+        for sampler_seed in sampler_seeds}
+    total = len(planned_coords)
+
+    def _row_coord(row):
+        return (row.get("model"), row.get("scenario"),
+                row.get("scenario_seed"), row.get("sampler_seed"))
 
     def _nonblank_lines(p):
         if not os.path.exists(p):
@@ -734,24 +792,71 @@ def run_sweep(spec: dict, *, deadline: float | None = None,
             # normal preflight-first path, which surfaces the real error AFTER
             # the fleet is validated (never masking a repulled model).
             done0 = None
-        if done0 is not None and len(set(done0) | set(tomb0)) >= total:
+        # a key that is BOTH a manifested success and a durable failure is
+        # contradictory evidence, not a resolved cell — refuse outright.
+        if done0 is not None:
+            both = set(done0) & set(tomb0)
+            if both:
+                raise SweepAborted(
+                    f"resume ledger is contradictory: {len(both)} unit(s) carry "
+                    "BOTH a manifested success and a durable failure tombstone "
+                    f"(e.g. {sorted(both)[0]!r}) — refusing to resolve a grid "
+                    "from evidence that disagrees with itself")
+
+        done_coords, tomb_coords, foreign = set(), set(), []
+        if done0 is not None:
+            done_coords = {_row_coord(r) for r in done0.values()}
+            # a tombstone counts ONLY if its regime matches the one validated
+            # manifest evidence recorded for that same scenario. A scenario with
+            # no successful row has no anchor, so its tombstones cannot be
+            # verified provider-free and the fast path is declined (never
+            # silently accepted) — the normal preflight path then resolves it.
+            anchors: dict = {}
+            for r in done0.values():
+                anchors.setdefault(r.get("scenario"), set()).add(r.get("regime_id"))
+            for row in tomb0.values():
+                coord = _row_coord(row)
+                if coord not in planned_coords:
+                    foreign.append(f"{coord!r} is not a planned coordinate")
+                elif row.get("regime_id") not in anchors.get(row.get("scenario"), ()):
+                    foreign.append(
+                        f"{coord!r} carries regime "
+                        f"{str(row.get('regime_id'))[:12]}… which no validated "
+                        "manifest row for that scenario anchors")
+                else:
+                    tomb_coords.add(coord)
+
+        if done0 is not None and foreign:
+            # contamination: do NOT let it count toward completion, and do NOT
+            # take a shortcut whose premise the evidence just failed.
+            say(f"sweep[{mode}|{interaction}]: declining the provider-free "
+                f"resume — {len(foreign)} tombstone(s) do not belong to this "
+                f"plan ({foreign[0]}); resolving through the normal "
+                "preflight-first path")
+            done0 = None
+
+        if done0 is not None and planned_coords <= (done_coords | tomb_coords):
             say(f"sweep[{mode}|{interaction}]: all {total} planned units "
-                f"already resolved ({len(done0)} recorded, {len(tomb0)} "
-                "tombstoned) — resuming WITHOUT provider contact")
+                f"already resolved ({len(done_coords)} recorded, "
+                f"{len(tomb_coords)} tombstoned) — resuming WITHOUT provider "
+                "contact")
             for row in done0.values():
+                if _row_coord(row) not in planned_coords:
+                    continue          # stale row from another grid: not ours
                 cond = result._condition((row["model"], row["scenario"]))
                 result.skipped_resumed += 1
                 result.resumed[cond] += 1
                 result.surviving[cond] += 1
             for row in tomb0.values():
-                # a durable typed failure re-registers as the same dropout; its
-                # tombstoned_resumed is counted even if the row predates the
-                # model/scenario schema (then it feeds only the balance gate).
+                # a durable typed failure re-registers as the same dropout. Only
+                # PLANNED, regime-anchored tombstones reach this point as part of
+                # the resolved set (c-008); anything else already declined the
+                # fast path above, so no foreign row can be counted here.
+                if _row_coord(row) not in planned_coords:
+                    continue
                 result.tombstoned_resumed += 1
                 model = row.get("model")
                 scenario_name = row.get("scenario")
-                if model is None or scenario_name is None:
-                    continue
                 kind = row.get("failure_kind", "other")
                 cond = result._condition((model, scenario_name))
                 result.dropouts[cond][kind] += 1

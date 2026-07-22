@@ -628,6 +628,15 @@ class VerifiedBundle:
         return self.planned_design.get("stopping_rule")
 
 
+class ProtectionUnresolvable(SchemaError):
+    """The protected-scenario map could not be ESTABLISHED from a registry.
+
+    Distinct from "this registry legitimately protects nothing" (a resolved
+    empty map). Callers that gate provider contact on protection MUST treat
+    this as fatal: an empty map returned for an unreadable registry is
+    indistinguishable from proof that nothing is protected (audit b-008)."""
+
+
 def protected_scenarios(registry_path: str) -> dict:
     """scenario_id -> owning experiment_id for every scenario that belongs to a
     POLICY_REQUIRED experiment (a-006 E-1 / B-0). Running ANY of these scenarios
@@ -635,23 +644,52 @@ def protected_scenarios(registry_path: str) -> dict:
     a generic/anonymous caller (e.g. the human sweep auto-discovering every YAML)
     cannot relabel a protected sweep as ordinary by omitting experiment_id. The
     map is derived from the frozen designs, never hardcoded, so it tracks the
-    registry rather than a stale literal list."""
+    registry rather than a stale literal list.
+
+    RESOLUTION IS FAIL-CLOSED (audit b-008). A missing, unreadable, malformed or
+    otherwise unresolvable registry raises `ProtectionUnresolvable` — it never
+    degrades to `{}`. The previous implementation swallowed the failure and
+    returned an empty map, so an anonymous sweep naming a protected scenario was
+    reclassified as an ordinary sweep and reached the provider boundary with no
+    ExecutionPolicy. The only empty map this function may return is one derived
+    from a registry it actually READ."""
     out: dict = {}
     for eid in POLICY_REQUIRED_EXPERIMENTS:
         try:
             pd = _frozen_design(registry_path, eid)
-        except (SchemaError, OSError):
+        except Exception as exc:
+            # deliberately broad: a caller-selected registry can fail to resolve
+            # as SchemaError, OSError, or a raw parser error from the YAML
+            # loader. EVERY such failure must surface as the typed
+            # ProtectionUnresolvable, never as an untyped escape and never as {}.
             # a design that will not load cannot silently drop its protection;
-            # its scenarios stay protected under the eid so the core refuses.
-            entry = None
+            # fall back to the raw entry so a design_hash mismatch still yields
+            # the protected set (the core then refuses the run for other
+            # reasons) — but an entry we cannot read at all is UNRESOLVABLE.
             try:
                 entry = _find_entry(registry_path, eid)
-            except Exception:
-                continue
+            except Exception as inner:
+                raise ProtectionUnresolvable(
+                    f"cannot establish the protected-scenario map for {eid!r} "
+                    f"from registry {registry_path!r}: {inner} (while "
+                    f"recovering from {exc}) — refusing to report an empty "
+                    "map, which is indistinguishable from a registry that "
+                    "legitimately protects nothing") from inner
             pd = entry.get("planned_design") if isinstance(entry, dict) else None
             if not isinstance(pd, dict):
-                continue
-        for s in pd.get("scenarios") or []:
+                raise ProtectionUnresolvable(
+                    f"registry {registry_path!r} carries no readable "
+                    f"planned_design for policy-required {eid!r} — its "
+                    "protected scenarios cannot be established, so no caller "
+                    "may treat them as unprotected") from exc
+        scenarios = pd.get("scenarios")
+        if not scenarios:
+            raise ProtectionUnresolvable(
+                f"policy-required {eid!r} names no scenarios in registry "
+                f"{registry_path!r} — an empty protection set for a "
+                "policy-required experiment is protection data that "
+                "disappeared, not proof that nothing is protected")
+        for s in scenarios:
             out[s] = eid
     return out
 

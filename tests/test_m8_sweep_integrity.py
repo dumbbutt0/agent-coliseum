@@ -601,3 +601,154 @@ def test_surviving_counts_never_pool_two_models():
             r.surviving[key] = 4
     with pytest.raises(SweepAborted, match="never be pooled"):
         surviving_counts_from_result(r)
+
+
+# ------------------------------------------- audit c-008: resume COMPLETENESS
+# The provider-free fully-resolved resume fast path (C-1) originally gated on
+# ledger CARDINALITY — `len(done | tombstones) >= total`. Nothing checked that
+# those keys were the PLANNED coordinates, so N unrelated tombstones satisfied
+# an N-cell plan: run_sweep returned "fully resolved" with zero provider calls,
+# zero rows and no manifest while the planned units were never executed. A false
+# completion is the most dangerous defect class here — the evidence looks clean
+# and is silently short.
+
+def _write_tombstones(spec, rows):
+    path = spec["manifest"] + ".tombstones.jsonl"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    return path
+
+
+def _tombstone(scenario, seed, sampler_seed, *, regime=None, model=MODEL):
+    return {"regime_id": regime or f"regime-{scenario}", "model": model,
+            "scenario": scenario, "scenario_seed": seed,
+            "sampler_seed": sampler_seed, "failure_kind": "timeout",
+            "error": "TimeoutError: planner budget exceeded",
+            "recorded_utc": "2026-07-21T00:00:00Z"}
+
+
+def test_unrelated_tombstones_cannot_satisfy_the_planned_grid(tmp_path,
+                                                              monkeypatch):
+    """THE c-008 REGRESSION (the auditor's probe, generalised to N cells): a
+    one-cell plan whose ledger holds ONE tombstone for a DIFFERENT regime and a
+    DIFFERENT scenario seed is NOT resolved. The planned cell must actually be
+    executed, and the foreign tombstone must never count toward completion."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    _install_stub_runner(monkeypatch, calls)
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,),
+                 sampler_seeds=[2001], temperature=0.7)
+    _write_tombstones(spec, [_tombstone(SCENARIO, 999, 8888,
+                                        regime="regime-somewhere-else")])
+
+    result = run_sweep(spec, retries_per_unit=0)
+
+    assert (SCENARIO, 42, 2001) in calls, \
+        "the planned cell was suppressed by an unrelated tombstone"
+    assert result.tombstoned_resumed == 0, \
+        "a foreign tombstone was counted toward completion"
+    assert result.rows_written == 1
+
+
+def test_cardinality_alone_never_resolves_a_grid(tmp_path, monkeypatch):
+    """Cardinality vs containment, stated directly: enough foreign tombstones to
+    MATCH the planned count still resolve nothing. Under the old
+    `len(done | tomb) >= total` gate this returned a fully-resolved sweep with
+    zero provider calls."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    _install_stub_runner(monkeypatch, calls)
+    spec = _spec(tmp_path, scenarios=CONDITIONS, seeds=(42, 1),
+                 sampler_seeds=[2001, 2002], temperature=0.7)
+    planned = len(CONDITIONS) * 2 * 2
+    # exactly `planned` tombstones, none of them a planned coordinate
+    _write_tombstones(spec, [_tombstone(SCENARIO, 900 + i, 9000 + i)
+                             for i in range(planned)])
+
+    result = run_sweep(spec, retries_per_unit=0)
+
+    assert len(calls) == planned, "planned cells were skipped on a false resolve"
+    assert result.tombstoned_resumed == 0
+    assert result.rows_written == planned
+
+
+def test_genuine_full_tombstone_coverage_still_resumes_provider_free(
+        tmp_path, monkeypatch):
+    """The fast path must survive the fix for the case it exists to serve: when
+    every planned cell IS genuinely resolved, resume touches no provider."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    # one cell fails for real, so its tombstone is written by the real writer
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    # two seeds, so the failing scenario ALSO has a successful row: that row is
+    # what anchors the regime its tombstone claims (companion test below covers
+    # the unanchored case).
+    spec = _spec(tmp_path, scenarios=CONDITIONS, seeds=(42, 1),
+                 sampler_seeds=[2001], temperature=0.7)
+    first = run_sweep(spec, retries_per_unit=0)
+    assert first.tombstones_written == 1
+
+    # now every planned cell is either a recorded success or a real tombstone
+    def _boom(*_a, **_k):
+        raise AssertionError("provider contacted on a fully-resolved resume")
+    monkeypatch.setattr(sweep_mod, "OllamaAgent", _boom)
+    monkeypatch.setattr(sweep_mod, "run_scenario", _boom)
+
+    second = run_sweep(spec, retries_per_unit=0)
+    assert second.tombstoned_resumed == 1
+    assert second.skipped_resumed == len(CONDITIONS) * 2 - 1
+
+
+def test_an_unanchored_tombstone_declines_the_fast_path_but_never_rerolls(
+        tmp_path, monkeypatch):
+    """Fail-closed by design: when EVERY cell of a scenario failed, no validated
+    manifest row anchors the regime its tombstones claim, so that regime cannot
+    be verified provider-free and the shortcut is DECLINED. Declining is always
+    safe — the normal preflight-first path still honours the tombstone and never
+    re-rolls the failed unit."""
+    _install_offline_ollama(monkeypatch)
+    calls = []
+    target = ("scramble_perm", 42, 2001)
+    _install_failing_real_runner(monkeypatch, calls, target)
+    # ONE seed: the failing scenario has no surviving row to anchor its regime
+    spec = _spec(tmp_path, scenarios=CONDITIONS, seeds=(42,),
+                 sampler_seeds=[2001], temperature=0.7)
+    first = run_sweep(spec, retries_per_unit=0)
+    assert first.tombstones_written == 1
+
+    n = len(calls)
+    second = run_sweep(spec, retries_per_unit=0)
+    assert target not in calls[n:], "a tombstoned failure was re-rolled"
+    assert second.tombstoned_resumed == 1
+
+
+def test_a_duplicate_tombstone_key_is_refused(tmp_path, monkeypatch):
+    """Contradictory durable failures must not collapse into one resolved cell —
+    the same no-last-row-wins contract manifest_load enforces for successes."""
+    _install_offline_ollama(monkeypatch)
+    _install_stub_runner(monkeypatch, [])
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,),
+                 sampler_seeds=[2001], temperature=0.7)
+    row = _tombstone(SCENARIO, 42, 2001)
+    _write_tombstones(spec, [row, dict(row, failure_kind="refusal")])
+    with pytest.raises(sweep_mod.SchemaError) as exc:
+        run_sweep(spec, retries_per_unit=0)
+    assert "duplicate tombstone resume key" in str(exc.value)
+
+
+def test_a_tombstone_without_provenance_is_refused(tmp_path, monkeypatch):
+    """A tombstone that cannot say WHICH planned unit it belongs to can never
+    stand in for one."""
+    _install_offline_ollama(monkeypatch)
+    _install_stub_runner(monkeypatch, [])
+    spec = _spec(tmp_path, scenarios=[SCENARIO], seeds=(42,),
+                 sampler_seeds=[2001], temperature=0.7)
+    stripped = _tombstone(SCENARIO, 42, 2001)
+    del stripped["model"], stripped["failure_kind"]
+    _write_tombstones(spec, [stripped])
+    with pytest.raises(sweep_mod.SchemaError) as exc:
+        run_sweep(spec, retries_per_unit=0)
+    assert "incomplete tombstone row" in str(exc.value)

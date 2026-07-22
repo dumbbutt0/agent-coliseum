@@ -458,3 +458,69 @@ def test_c1_partial_grid_still_enters_the_preflight(tmp_path, monkeypatch):
     # the six already-recorded units are skipped, the six new ones generated
     assert second.skipped_resumed == 6
     assert second.rows_written == 6
+
+
+# ---------------------------------------------------------- audit b-008 (real)
+# The cycle-6 round-2 b-006 repair wrapped `protected_scenarios()` in
+# `except Exception -> SweepAborted`, and its regression proved that with a
+# MONKEYPATCHED raise. Section B then showed the repair never fired on the real
+# caller-selected-registry path: `protected_scenarios()` internally swallowed a
+# missing/unreadable registry and returned a benign EMPTY map, so an anonymous
+# sweep naming a protected M8 scenario was reclassified non-policy and reached
+# the provider boundary with no ExecutionPolicy. These probes use REAL
+# registries — nothing is monkeypatched — so the fail-open cannot hide a layer
+# down again.
+
+def _unreadable_registries(tmp_path):
+    """(label, path) for every way a caller-selected registry can fail to
+    establish the protection map."""
+    missing = str(tmp_path / "nope" / "experiments.yaml")
+
+    malformed = tmp_path / "malformed.yaml"
+    malformed.write_text("experiments: [ this is not: valid: yaml\n")
+
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("experiments: []\n")
+
+    wrong_shape = tmp_path / "wrong_shape.yaml"
+    wrong_shape.write_text("experiments:\n  - experiment_id: something-else\n")
+
+    return [("missing", missing), ("malformed", str(malformed)),
+            ("no experiments", str(empty)),
+            ("policy-required experiment absent", str(wrong_shape))]
+
+
+def test_protected_scenarios_raises_instead_of_returning_an_empty_map(tmp_path):
+    """THE b-008 REGRESSION. A registry that cannot ESTABLISH the protection map
+    must raise, never return {} — an empty map is indistinguishable from proof
+    that nothing is protected."""
+    for label, path in _unreadable_registries(tmp_path):
+        with pytest.raises(R.ProtectionUnresolvable) as exc:
+            R.protected_scenarios(path)
+        assert "empty" in str(exc.value) or "cannot be established" in str(
+            exc.value), f"{label}: refusal must explain the empty-map hazard"
+
+
+def test_real_registry_still_resolves_its_protected_scenarios():
+    """The other side: a registry it can actually READ resolves normally, so the
+    fail-closed rule did not simply break protection resolution."""
+    protmap = R.protected_scenarios(REGISTRY)
+    assert protmap, "the real registry must resolve a non-empty protection map"
+    assert all(v == EID for v in protmap.values())
+
+
+def test_anonymous_protected_sweep_fails_closed_on_an_unreadable_registry(
+        tmp_path, monkeypatch):
+    """The auditor's end-to-end probe, with NO monkeypatched raise: an anonymous
+    sweep naming a protected M8 scenario, pointed at a registry that cannot
+    resolve protection, must abort BEFORE any provider is constructed."""
+    _poison_provider(monkeypatch,
+                     "a sweep that cannot prove non-protection must refuse first")
+    for _label, path in _unreadable_registries(tmp_path):
+        spec = _min_spec(tmp_path, registry_path=path,
+                         scenarios=["scramble_dev_m8"],
+                         models=["llama3.1:latest"])
+        del spec["experiment_id"]
+        with pytest.raises(SweepAborted) as exc:
+            run_sweep(spec)
+        assert "cannot resolve protected scenarios" in str(exc.value)
