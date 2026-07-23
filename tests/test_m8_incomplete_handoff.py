@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import multiprocessing
+import shutil
 import subprocess
 import time
 from contextlib import contextmanager
@@ -217,6 +218,10 @@ def _spec():
     }
 
 
+def _repository_root():
+    return os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 def _success_rows():
     return [
         {
@@ -308,6 +313,168 @@ def test_planned_coordinates_are_exact_interleaved_grid():
         "scenario_seed": 1,
         "sampler_seed": 2012,
     }
+
+
+def test_resolved_closure_plan_binds_config_order_without_mutating_registry(
+        monkeypatch):
+    from coliseum.textlab import registry
+
+    repo = _repository_root()
+    registry_path = os.path.join(repo, handoff.REGISTRY_REL)
+    bundle = registry.load_verified_bundle(registry_path, ir.EXPERIMENT_ID)
+    original = copy.deepcopy(bundle.planned_design)
+    monkeypatch.setattr(
+        registry, "load_verified_bundle", lambda *_args, **_kwargs: bundle)
+
+    plan = handoff._resolved_closure_plan(repo)
+
+    assert bundle.planned_design == original
+    assert plan is not bundle.planned_design
+    assert plan["execution_order"] == "interleaved"
+    assert len(ir.planned_coordinates(plan)) == 144
+    assert ir.planned_coordinates(plan)[105] == {
+        "execution_index": 105,
+        "model": "huihui_ai/qwen2.5-abliterate:7b-instruct",
+        "scenario": "scramble_dev_m8",
+        "scenario_seed": 1,
+        "sampler_seed": 2012,
+    }
+    plan["scenarios"].append("mutation-probe")
+    assert bundle.planned_design == original
+
+
+def _copied_frozen_config(tmp_path):
+    repo = _repository_root()
+    shutil.copytree(os.path.join(repo, "configs"), tmp_path / "configs")
+    return str(tmp_path), tmp_path / handoff.EXPERIMENT_CONFIG_REL
+
+
+def test_resolved_closure_plan_refuses_config_sha_drift_before_coordinates(
+        tmp_path, monkeypatch):
+    repo, config_path = _copied_frozen_config(tmp_path)
+    with open(config_path, "a", encoding="utf-8") as fh:
+        fh.write("\n")
+    monkeypatch.setattr(
+        ir, "planned_coordinates",
+        lambda *_args, **_kwargs: pytest.fail("coordinates reached"))
+    with pytest.raises(CouncilError, match="config hash differs"):
+        handoff._resolved_closure_plan(repo)
+
+
+@pytest.mark.parametrize("replacement", ["blocked", None])
+def test_resolved_closure_plan_refuses_wrong_or_missing_order_before_coordinates(
+        tmp_path, monkeypatch, replacement):
+    from coliseum.textlab import registry
+
+    repo, config_path = _copied_frozen_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if replacement is None:
+        config.pop("execution_order")
+    else:
+        config["execution_order"] = replacement
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    original_hash = ir.file_sha256
+    monkeypatch.setattr(
+        ir, "file_sha256",
+        lambda path: handoff.FROZEN_CONFIG_SHA256
+        if os.path.realpath(path) == os.path.realpath(config_path)
+        else original_hash(path))
+    monkeypatch.setattr(
+        registry, "lint_experiment_config", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        ir, "planned_coordinates",
+        lambda *_args, **_kwargs: pytest.fail("coordinates reached"))
+    with pytest.raises(CouncilError, match="execution order differs"):
+        handoff._resolved_closure_plan(repo)
+
+
+def test_resolved_closure_plan_refuses_config_design_mismatch(
+        tmp_path, monkeypatch):
+    repo, config_path = _copied_frozen_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["design_hash"] = "0" * 64
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(
+        ir, "file_sha256", lambda _path: handoff.FROZEN_CONFIG_SHA256)
+    monkeypatch.setattr(
+        ir, "planned_coordinates",
+        lambda *_args, **_kwargs: pytest.fail("coordinates reached"))
+    with pytest.raises(CouncilError, match="config design identity differs"):
+        handoff._resolved_closure_plan(repo)
+
+
+def test_resolved_closure_plan_refuses_registry_design_mismatch(monkeypatch):
+    from coliseum.textlab import registry
+
+    bundle = registry.load_verified_bundle(
+        os.path.join(_repository_root(), handoff.REGISTRY_REL),
+        ir.EXPERIMENT_ID)
+    monkeypatch.setattr(
+        registry, "load_verified_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            experiment_id=ir.EXPERIMENT_ID,
+            design_hash="0" * 64,
+            planned_design=copy.deepcopy(bundle.planned_design)))
+    monkeypatch.setattr(
+        ir, "planned_coordinates",
+        lambda *_args, **_kwargs: pytest.fail("coordinates reached"))
+    with pytest.raises(CouncilError, match="registry design identity differs"):
+        handoff._resolved_closure_plan(_repository_root())
+
+
+def test_resolved_closure_plan_refuses_lint_failure_before_coordinates(
+        monkeypatch):
+    from coliseum.textlab import registry
+
+    monkeypatch.setattr(
+        registry, "lint_experiment_config",
+        lambda *_args, **_kwargs: ["synthetic mismatch"])
+    monkeypatch.setattr(
+        ir, "planned_coordinates",
+        lambda *_args, **_kwargs: pytest.fail("coordinates reached"))
+    with pytest.raises(CouncilError, match="synthetic mismatch"):
+        handoff._resolved_closure_plan(_repository_root())
+
+
+def test_source_request_generations_preserve_history_and_select_only_002():
+    historical = {
+        f"first-gladiator-m8-incomplete-closure-{section}-001"
+        for section in "abcde"}
+    current = {
+        f"first-gladiator-m8-incomplete-closure-{section}-002"
+        for section in "abcde"}
+    assert historical | current <= state_machine.M8_CLOSURE_SOURCE_REQUESTS
+    assert set(handoff.SOURCE_SLICE_REQUEST_IDS) == current
+
+
+def test_proposal_primary_admission_passes_exact_resolved_plan_to_derivation(
+        tmp_path, monkeypatch):
+    repo = str(tmp_path)
+    resolved_plan = _spec()
+    original = copy.deepcopy(resolved_plan)
+    observed = []
+    sweep = handoff.importlib.import_module("coliseum.textlab.sweep")
+
+    monkeypatch.setattr(
+        handoff, "_resolved_closure_plan", lambda _repo: resolved_plan)
+
+    @contextmanager
+    def fake_manifest_lock(path):
+        yield path
+
+    monkeypatch.setattr(sweep, "_manifest_advisory_lock", fake_manifest_lock)
+
+    def tracked_derivation(_repo, _manifest, _evidence_root, planned_design):
+        observed.append(planned_design)
+        return {"primary": {"synthetic": True}}
+
+    monkeypatch.setattr(
+        handoff, "_derive_primary_locked", tracked_derivation)
+
+    assert handoff._derive_primary(repo) == {"synthetic": True}
+    assert observed == [resolved_plan]
+    assert observed[0] is resolved_plan
+    assert resolved_plan == original
 
 
 @pytest.mark.parametrize("field,value", [
@@ -1143,8 +1310,6 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
                         lambda *_args, **_kwargs: True)
 
     sweep = handoff.importlib.import_module("coliseum.textlab.sweep")
-    registry_module = handoff.importlib.import_module(
-        "coliseum.textlab.registry")
     from tools.council import locking
     operation_order = []
     original_acquire = locking.acquire
@@ -1170,21 +1335,27 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
 
     monkeypatch.setattr(sweep, "_manifest_advisory_lock", fake_manifest_lock)
 
+    resolved_plan = _spec()
+
     def tracked_replay(*_args, **_kwargs):
+        assert _args[3] is resolved_plan
         operation_order.append("replay")
         return _replay_core()
 
-    def tracked_registry(*_args, **_kwargs):
+    def tracked_resolver(*_args, **_kwargs):
         operation_order.append("registry")
-        return SimpleNamespace(planned_design={})
+        return resolved_plan
+
+    def tracked_primary(*_args, **_kwargs):
+        assert _args[3] is resolved_plan
+        return _snapshot()
 
     monkeypatch.setattr(
         sweep, "build_pack_replay_core_locked", tracked_replay)
     monkeypatch.setattr(
-        registry_module, "load_verified_bundle", tracked_registry)
+        handoff, "_resolved_closure_plan", tracked_resolver)
     monkeypatch.setattr(
-        handoff, "_derive_primary_locked",
-        lambda *_args, **_kwargs: _snapshot())
+        handoff, "_derive_primary_locked", tracked_primary)
     budget_instances = []
     original_budget = handoff._Budget
 

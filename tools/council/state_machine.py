@@ -47,6 +47,11 @@ M8_CLOSURE_SOURCE_REQUESTS = frozenset({
     "first-gladiator-m8-incomplete-closure-c-001",
     "first-gladiator-m8-incomplete-closure-d-001",
     "first-gladiator-m8-incomplete-closure-e-001",
+    "first-gladiator-m8-incomplete-closure-a-002",
+    "first-gladiator-m8-incomplete-closure-b-002",
+    "first-gladiator-m8-incomplete-closure-c-002",
+    "first-gladiator-m8-incomplete-closure-d-002",
+    "first-gladiator-m8-incomplete-closure-e-002",
 })
 
 # event_type -> (allowed source states, destination state)

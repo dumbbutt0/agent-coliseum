@@ -7,6 +7,7 @@ scientific analysis function.
 """
 from __future__ import annotations
 
+import copy
 import importlib
 import os
 import re
@@ -47,18 +48,26 @@ START_TIMESTAMP = "2026-07-23T06:49:59.882Z"
 PAUSE_TIMESTAMP = "2026-07-23T10:50:01.434Z"
 PAUSE_REASON = (
     "wall/compute deadline 14400s exceeded — child process group killed")
+REGISTRY_REL = "configs/registry/experiments.yaml"
+EXPERIMENT_CONFIG_REL = (
+    "configs/experiments/"
+    "m8-phase2-live-order-sensitivity.experiment.json")
+FROZEN_DESIGN_HASH = (
+    "431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533")
+FROZEN_CONFIG_SHA256 = (
+    "4847cadfdac059195986114fed6d61850f3c1d925ca4b97618a06cff59e5c960")
 SOURCE_SLICE_REQUEST_IDS = (
-    "first-gladiator-m8-incomplete-closure-a-001",
-    "first-gladiator-m8-incomplete-closure-b-001",
-    "first-gladiator-m8-incomplete-closure-c-001",
-    "first-gladiator-m8-incomplete-closure-d-001",
-    "first-gladiator-m8-incomplete-closure-e-001",
+    "first-gladiator-m8-incomplete-closure-a-002",
+    "first-gladiator-m8-incomplete-closure-b-002",
+    "first-gladiator-m8-incomplete-closure-c-002",
+    "first-gladiator-m8-incomplete-closure-d-002",
+    "first-gladiator-m8-incomplete-closure-e-002",
 )
 AUTHORIZATION_DOMAIN = (
     "council:m8-budget-exhaustion-closure-authorization:v1")
 TRANSACTION_DOMAIN = (
     "council:m8-budget-exhaustion-handoff-transaction:v1")
-M8_EXPECTED_TEST_COUNT = 2387
+M8_EXPECTED_TEST_COUNT = 2396
 VALIDATIONS = [
     "council_chain_verified",
     "closure_owner_approval_verified",
@@ -205,11 +214,9 @@ def validate_closure_authorization(auth: dict) -> None:
     execution = auth["execution_authorization"]
     exact_execution = {
         "experiment_id": ir.EXPERIMENT_ID,
-        "design_hash":
-            "431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533",
+        "design_hash": FROZEN_DESIGN_HASH,
         "implementation_commit": SOURCE_IMPLEMENTATION_COMMIT,
-        "experiment_config_hash":
-            "4847cadfdac059195986114fed6d61850f3c1d925ca4b97618a06cff59e5c960",
+        "experiment_config_hash": FROZEN_CONFIG_SHA256,
         "planned_runs": 144,
         "budget": {
             "max_units": 144, "max_compute_minutes": 240,
@@ -647,6 +654,49 @@ def _closure_integrations(chain: list[dict], commit: str) -> list[dict]:
     return result
 
 
+def _resolved_closure_plan(repo: str) -> dict:
+    """Return the exact frozen design with its separately pinned run order."""
+    registry = importlib.import_module("coliseum.textlab.registry")
+    registry_path = ir.safe_repo_path(repo, REGISTRY_REL)
+    config_path = ir.safe_repo_path(repo, EXPERIMENT_CONFIG_REL)
+    if not os.path.isfile(config_path) or os.path.islink(config_path):
+        raise CouncilError("frozen M8 experiment config is not a regular file")
+    if ir.file_sha256(config_path) != FROZEN_CONFIG_SHA256:
+        raise CouncilError("frozen M8 experiment config hash differs")
+    from tools.council.strictjson import loads_strict
+    try:
+        with open(config_path, "rb") as fh:
+            config = loads_strict(fh.read(), max_bytes=1_048_576)
+    except (OSError, CouncilError) as exc:
+        raise CouncilError(f"frozen M8 experiment config is unreadable: {exc}")
+    bundle = registry.load_verified_bundle(registry_path, ir.EXPERIMENT_ID)
+    if bundle.experiment_id != ir.EXPERIMENT_ID or \
+            bundle.design_hash != FROZEN_DESIGN_HASH:
+        raise CouncilError("frozen M8 registry design identity differs")
+    if config.get("experiment_id") != ir.EXPERIMENT_ID or \
+            config.get("design_hash") != FROZEN_DESIGN_HASH:
+        raise CouncilError("frozen M8 config design identity differs")
+    issues = registry.lint_experiment_config(config_path, registry_path, repo)
+    if issues:
+        raise CouncilError(
+            "frozen M8 registry/config consistency check failed: " +
+            "; ".join(issues))
+    if config.get("execution_order") != "interleaved":
+        raise CouncilError("frozen M8 config execution order differs")
+    plan = copy.deepcopy(bundle.planned_design)
+    plan["execution_order"] = config["execution_order"]
+    coordinates = ir.planned_coordinates(plan)
+    if len(coordinates) != 144 or coordinates[105] != {
+            "execution_index": 105,
+            "model": "huihui_ai/qwen2.5-abliterate:7b-instruct",
+            "scenario": "scramble_dev_m8",
+            "scenario_seed": 1,
+            "sampler_seed": 2012,
+            }:
+        raise CouncilError("resolved M8 closure coordinate identity differs")
+    return plan
+
+
 def _derive_primary_locked(repo: str, locked_manifest: str,
                            evidence_root: str, planned_design: dict) -> dict:
     sweep = importlib.import_module("coliseum.textlab.sweep")
@@ -735,16 +785,13 @@ def _derive_primary_locked(repo: str, locked_manifest: str,
 def _derive_primary(repo: str) -> dict:
     """Read and authenticate the primary tree while holding its pack lock."""
     sweep = importlib.import_module("coliseum.textlab.sweep")
-    registry = importlib.import_module("coliseum.textlab.registry")
     evidence_root = ir.safe_repo_path(repo, ir.EVIDENCE_ROOT)
     manifest_path = ir.safe_repo_path(repo, ir.MANIFEST)
-    bundle = registry.load_verified_bundle(
-        os.path.join(repo, "configs", "registry", "experiments.yaml"),
-        ir.EXPERIMENT_ID)
+    planned_design = _resolved_closure_plan(repo)
     with sweep._manifest_advisory_lock(manifest_path) as locked_manifest:
         return _derive_primary_locked(
             repo, locked_manifest, evidence_root,
-            bundle.planned_design)["primary"]
+            planned_design)["primary"]
 
 
 def build_closure_authorization(root: str, cfg, commit: str,
@@ -1818,12 +1865,9 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
     if not deep:
         return
     sweep = importlib.import_module("coliseum.textlab.sweep")
-    registry_module = importlib.import_module("coliseum.textlab.registry")
     evidence_root = ir.safe_repo_path(repo, ir.EVIDENCE_ROOT)
     manifest_path = ir.safe_repo_path(repo, ir.MANIFEST)
-    registry = registry_module.load_verified_bundle(
-        os.path.join(repo, "configs", "registry", "experiments.yaml"),
-        ir.EXPERIMENT_ID)
+    planned_design = _resolved_closure_plan(repo)
     if budget is not None and (
             not isinstance(budget, _Budget) or
             budget.limits != authorization["closure_budget"]):
@@ -1833,7 +1877,7 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
     active_budget.check(root)
     with sweep._manifest_advisory_lock(manifest_path) as locked_manifest:
         snapshot = _derive_primary_locked(
-            repo, locked_manifest, evidence_root, registry.planned_design)
+            repo, locked_manifest, evidence_root, planned_design)
         if snapshot["primary"] != authorization["primary_evidence"] or \
                 objects["primary_inventory.json"] != snapshot["inventory"] or \
                 objects["coordinate_census.json"] != snapshot["census"]:
@@ -1842,7 +1886,7 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
         replay_core = sweep.build_pack_replay_core_locked(
             locked_manifest, evidence_root,
             os.path.join(repo, "configs", "scenarios"),
-            registry.planned_design, progress_check=active_budget.check)
+            planned_design, progress_check=active_budget.check)
         if objects["replay_attestation.json"] != \
                 ir.replay_attestation(replay_core):
             raise CouncilError(
@@ -1853,7 +1897,6 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
 def publish_approved(root: str, cfg, request_id: str) -> dict:
     """Build, atomically publish, and journal one owner-approved M8 closure."""
     sweep = importlib.import_module("coliseum.textlab.sweep")
-    registry_module = importlib.import_module("coliseum.textlab.registry")
     from tools.council import events, git_state, locking, state_machine
     from tools.council import result_handoff
 
@@ -1911,20 +1954,18 @@ def publish_approved(root: str, cfg, request_id: str) -> dict:
         manifest_path = ir.safe_repo_path(repo, ir.MANIFEST)
         final_path = ir.safe_repo_path(
             repo, ir.DERIVED_OUTPUT_ROOT, may_be_absent=True)
-        registry = registry_module.load_verified_bundle(
-            os.path.join(repo, "configs", "registry", "experiments.yaml"),
-            ir.EXPERIMENT_ID)
+        planned_design = _resolved_closure_plan(repo)
         with sweep._manifest_advisory_lock(manifest_path) as locked_manifest:
             snapshot = _derive_primary_locked(
                 repo, locked_manifest, evidence_root,
-                registry.planned_design)
+                planned_design)
             if snapshot["primary"] != authorization["primary_evidence"]:
                 raise CouncilError("primary evidence differs from owner approval")
             budget.check(final_path)
             replay_core = sweep.build_pack_replay_core_locked(
                 locked_manifest, evidence_root,
                 os.path.join(repo, "configs", "scenarios"),
-                registry.planned_design, progress_check=budget.check)
+                planned_design, progress_check=budget.check)
             if len(replay_core["runs"]) > \
                     authorization["closure_budget"]["max_replay_runs"]:
                 raise CouncilError("replay count exceeds the owner closure budget")
@@ -1939,7 +1980,7 @@ def publish_approved(root: str, cfg, request_id: str) -> dict:
             # the second derivation detects direct byte changes by this process.
             final_snapshot = _derive_primary_locked(
                 repo, locked_manifest, evidence_root,
-                registry.planned_design)
+                planned_design)
             for field in ("primary", "inventory", "census"):
                 if final_snapshot[field] != snapshot[field]:
                     raise CouncilError("primary evidence changed during closure")

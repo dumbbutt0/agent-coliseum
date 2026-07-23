@@ -60,6 +60,38 @@ chain boundary through file publication, event append, and rollback. A refused
 cycle cannot mistake a historical event for current authority, cannot remove a
 concurrent publisher's file, and leaves no unpublished ready file.
 
+## Frozen-plan resolution
+
+The design-hashed registry entry intentionally does not carry the operational
+`execution_order`. Closure therefore resolves one fresh plan from two
+independently frozen inputs:
+
+- registry design SHA-256
+  `431871d3266a96999ef02d0d9eb77caba7e6b317135155d3161b1eecf396d533`;
+- experiment-config SHA-256
+  `4847cadfdac059195986114fed6d61850f3c1d925ca4b97618a06cff59e5c960`,
+  which requires `execution_order: interleaved`.
+
+The resolver loads the verified registry bundle, checks the exact config bytes,
+runs the existing registry/config consistency lint, and copies the registry
+plan before adding the config-owned order. Proposal admission, provider-free
+replay, bundle verification, and final primary rederivation all consume that
+same resolved plan. Missing or changed order, either changed identity, or a
+lint failure refuses before evidence derivation, replay, output, or event
+publication.
+
+The integrated `-001` A–E source requests remain historical and recognized by
+the state machine. This repair is reviewed only through the current source
+family:
+
+- `first-gladiator-m8-incomplete-closure-a-002`
+- `first-gladiator-m8-incomplete-closure-b-002`
+- `first-gladiator-m8-incomplete-closure-c-002`
+- `first-gladiator-m8-incomplete-closure-d-002`
+- `first-gladiator-m8-incomplete-closure-e-002`
+
+No `-001` verdict or integration transfers to this repair.
+
 The existing Society handoff command remains:
 
 ```text
