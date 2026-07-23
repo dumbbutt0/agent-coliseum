@@ -247,13 +247,12 @@ def test_publication_crosschecks_config_registry_chain_and_empty_namespace(
     request = _request(repo)
     request["experiment_config_hash"] = authorization["experiment_config_hash"]
     request["execution_authorization"] = authorization
-    bundle = SimpleNamespace(
-        design_hash=DESIGN_HASH,
-        planned_design={"model_digests": {MODEL: DIGEST},
-                        "expected_run_count": 144})
-    import coliseum.textlab.registry as registry
-    monkeypatch.setattr(registry, "load_verified_bundle",
-                        lambda *_a: bundle)
+    from tools.autonomy import execution_binding
+    monkeypatch.setattr(
+        execution_binding, "verified_experiment_identity",
+        lambda *_a: {"design_hash": DESIGN_HASH,
+                     "model_digests": {MODEL: DIGEST},
+                     "planned_runs": 144})
     publish._validate_execution_request_bindings(
         "unused", request, _prerequisite_chain())
 

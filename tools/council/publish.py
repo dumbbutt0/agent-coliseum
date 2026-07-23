@@ -77,17 +77,18 @@ def _validate_execution_request_bindings(root: str, request: dict,
     registry_path = os.path.join(repo, "configs", "registry",
                                  "experiments.yaml")
     try:
-        from coliseum.textlab.registry import load_verified_bundle
-        bundle = load_verified_bundle(registry_path,
-                                      authorization["experiment_id"])
+        from tools.autonomy.execution_binding import \
+            verified_experiment_identity
+        bundle_identity = verified_experiment_identity(
+            registry_path, authorization["experiment_id"])
     except Exception as exc:
         raise SchemaViolation(
             f"verified frozen bundle unavailable: {exc}") from exc
-    if bundle.design_hash != authorization["design_hash"] or \
-            bundle.planned_design.get("model_digests") != \
-            authorization["model_digests"] or \
-            bundle.planned_design.get("expected_run_count") != \
-            authorization["planned_runs"]:
+    if bundle_identity != {
+            "design_hash": authorization["design_hash"],
+            "model_digests": authorization["model_digests"],
+            "planned_runs": authorization["planned_runs"],
+    }:
         raise SchemaViolation(
             "verified registry bundle differs from execution_authorization")
 

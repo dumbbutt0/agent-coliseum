@@ -53,6 +53,7 @@
     "tests/test_textlab_stochastic.py",
     "tools/autonomy/child_runner.py",
     "tools/autonomy/drivers.py",
+    "tools/autonomy/execution_binding.py",
     "tools/autonomy/runner.py",
     "tools/council/cli.py",
     "tools/council/codex_watch.py",
@@ -60,6 +61,6 @@
     "tools/council/publish.py",
     "tools/council/schemas.py"
   ],
-  "path_count": 56,
-  "paths_sha256": "fdd60f5ddba3db6ed06d2ae28c56648074952da57d9dc71ed7758a91c4cd2b8d"
+  "path_count": 57,
+  "paths_sha256": "b1961c62b06a4fa703919ad40c4c47348c18081e82fde4567822b1753e42bd7c"
 }
