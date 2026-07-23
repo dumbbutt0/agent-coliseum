@@ -340,6 +340,17 @@ def test_result_artifact_binding_closes_terminal_census():
     with pytest.raises(SchemaViolation, match="census"):
         validate_result_artifacts(artifacts)
 
+    all_success = {
+        **artifacts,
+        "tombstone_ledger": {"state": "absent", "sha256": None},
+        "successful_runs": 144, "tombstoned_runs": 0,
+        "terminal_outcomes": 144, "analysis_status": "analyzed",
+    }
+    validate_result_artifacts(all_success)
+    all_success["tombstone_ledger"] = {"state": "absent"}
+    with pytest.raises(SchemaViolation, match="canonical null"):
+        validate_result_artifacts(all_success)
+
 
 def test_bound_completion_and_result_audit_require_same_artifact_record(
         tmp_path, monkeypatch):
@@ -370,6 +381,20 @@ def test_bound_completion_and_result_audit_require_same_artifact_record(
     complete = dict(base_event, event_type="EXPERIMENT_COMPLETE",
                     payload={"result_artifacts": artifacts})
     events._verify_result_artifact_binding(None, None, chain, complete)
+
+    # The normal all-success driver identity is the same canonical
+    # authenticated-absence shape used by replay and result packages.
+    all_success = json.loads(json.dumps(artifacts))
+    all_success.update({
+        "tombstone_ledger": {"state": "absent", "sha256": None},
+        "successful_runs": 144, "tombstoned_runs": 0,
+        "analysis_status": "analyzed",
+    })
+    all_success_complete = dict(
+        base_event, event_type="EXPERIMENT_COMPLETE",
+        payload={"result_artifacts": all_success})
+    events._verify_result_artifact_binding(
+        None, None, chain, all_success_complete)
 
     changed = json.loads(json.dumps(artifacts))
     changed["order_report_sha256"] = "7" * 64

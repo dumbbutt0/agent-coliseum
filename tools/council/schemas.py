@@ -618,9 +618,11 @@ def validate_result_artifacts(artifacts: dict) -> None:
             not _SHA256_RE.match(str(tombstone.get("sha256"))):
         raise SchemaViolation(
             "present result tombstone ledger must carry sha256")
-    if tombstone["state"] == "absent" and set(tombstone) != {"state"}:
+    if tombstone["state"] == "absent" and (
+            set(tombstone) != {"state", "sha256"} or
+            tombstone["sha256"] is not None):
         raise SchemaViolation(
-            "absent result tombstone ledger carries unexpected fields")
+            "absent result tombstone ledger must carry canonical null sha256")
     if tombstone["state"] == "present" and set(tombstone) != \
             {"state", "sha256"}:
         raise SchemaViolation(

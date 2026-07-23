@@ -191,6 +191,23 @@ reviews and integrations before an M8 execution request can be published. That
 request must receive a separate owner approval selecting the numeric budget;
 this source slice grants no live-execution authority.
 
+The first source-review round on successor
+`02c428832e8f34a6f0aef19f1078ff237c503b1c` returned plain GOs for A-018
+`002324-c082f35e`, B-015 `002323-755efe5e`, C-015 `002325-1a13ad7b`, and
+E-015 `002320-c782eb4d`, all of which are historical after the repair below.
+D-015 blocked at `002319-945d3083`: the normal all-success driver returned the
+existing canonical tombstone identity `{state: absent, sha256: null}`, while
+the newly added Council result-artifact schema mistakenly admitted only
+`{state: absent}`. A valid 144-success package would therefore be refused at
+`EXPERIMENT_COMPLETE` before result review.
+
+The bounded descendant aligns the Council schema with the already established
+replay/package identity: present ledgers require a SHA-256 digest; authenticated
+absence requires the exact two-field record with a null digest. Dedicated
+regressions pass the 144-success analyzed artifact through both schema and
+append-boundary checks and refuse the noncanonical omitted-hash form. No runner,
+ledger, analysis, model, budget, stopping, or claim behavior changes.
+
 ## What changed and why
 
 Phase 1 calibrated the instrument using scripted deterministic deciders. Ten

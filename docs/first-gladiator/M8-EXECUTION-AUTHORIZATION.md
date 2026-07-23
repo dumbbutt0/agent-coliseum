@@ -88,6 +88,12 @@ order report, result-package file and content hashes, terminal census, and
 analysis status. `EXPERIMENT_COMPLETE`, `RESULT_AUDIT_REQUESTED`, and the result
 verdict must agree on this record.
 
+The tombstone identity uses the same canonical shape as replay and package
+artifacts: `{state: "present", sha256: <digest>}` when the adjacent ledger
+exists, and `{state: "absent", sha256: null}` when its absence is authenticated.
+The null-valued hash is part of the closed record; neither omitting it nor
+supplying a non-null hash for an absent ledger is accepted.
+
 ## Frozen M8 identity
 
 | Field | Frozen value |
@@ -119,4 +125,3 @@ commit.
 - All-success analyzed package and complete tombstoned inconclusive package.
 - Existing M8 sweep, replay, locking, result-package, Council, roadmap, and
   bounded-runner regressions.
-
