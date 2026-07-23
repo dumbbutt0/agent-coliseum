@@ -20,6 +20,7 @@ from tools.council import (events, get_config, identity, locking, policy,
                            state_machine, storage,
                            strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
+                                   EXECUTION_APPROVAL_SCHEMA,
                                    validate_commit, validate_request_id)
 
 # H1: the generic escape hatch may record ONLY non-authority bookkeeping.
@@ -276,18 +277,44 @@ def cmd_record(args) -> int:
 
 def cmd_approve(args) -> int:
     """HUMAN_APPROVAL_REQUIRED -> EXPERIMENT_APPROVED. Owner only; the
-    approval binds to the exact commit and is refused on mismatch."""
+    approval binds to the exact commit and is refused on mismatch. Requests
+    carrying an execution_authorization block receive the stronger v2 payload:
+    the one-time owner token directly binds the event-pinned request hash and
+    the complete execution envelope."""
     cfg, root = _cfg(args)
     if args.role != "human":
         raise SchemaViolation("approve is an owner action: --role human")
     validate_request_id(args.request_id)
-    request = publish.read_request(root, args.request_id)
+    request, failures, _repo, _commit = publish.verified_request(
+        root, cfg, args.request_id)
+    if failures:
+        raise SchemaViolation(
+            "approval refused because the audited request is not verifiable: "
+            + "; ".join(failures))
     if validate_commit(args.commit) != request["target_commit"]:
         raise SchemaViolation(
             f"approval commit {args.commit[:12]} does not match the "
             f"request's target_commit {request['target_commit'][:12]} — "
             "an approval for one commit must not apply to another")
     payload_core = {"approved_by": "human", "approval_commit": args.commit}
+    authorization = request.get("execution_authorization")
+    if authorization is not None:
+        publication = next((e for e in reversed(events.read_chain(root))
+                            if e["request_id"] == args.request_id and
+                            e["event_type"] in
+                            ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")), None)
+        if publication is None:
+            raise SchemaViolation(
+                "bound experiment approval has no request publication event")
+        payload_core = {
+            "approval_schema_version": EXECUTION_APPROVAL_SCHEMA,
+            "approved_by": "human",
+            "approval_commit": args.commit,
+            "request_payload_hash": request["request_payload_hash"],
+            "request_publication_event_id": publication["event_id"],
+            "request_publication_event_hash": publication["event_hash"],
+            "execution_authorization": authorization,
+        }
     token = _maybe_human_token(root, args, "EXPERIMENT_APPROVED",
                                args.request_id, request["target_commit"],
                                payload_core)
@@ -295,9 +322,17 @@ def cmd_approve(args) -> int:
                                 args.request_id, request["repository"],
                                 request["target_commit"],
                                 _with_token(payload_core, token))
+    binding_note = ""
+    if authorization is not None:
+        binding_note = (
+            " Direct bindings: design "
+            f"`{authorization['design_hash']}`, "
+            f"{authorization['planned_runs']} planned runs, evidence root "
+            f"`{authorization['evidence_root']}`, and the request-pinned "
+            "implementation/model/budget envelope.")
     storage.append_log_md(root, "human", (
         f"**EXPERIMENT_APPROVED** for `{args.request_id}` at "
-        f"`{args.commit}` (event `{event['event_id']}`)."))
+        f"`{args.commit}` (event `{event['event_id']}`).{binding_note}"))
     print(f"approved {args.request_id} at {args.commit[:12]} "
           f"(event {event['event_id']})")
     return 0

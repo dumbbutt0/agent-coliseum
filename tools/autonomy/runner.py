@@ -201,19 +201,27 @@ def _execute_bounded(argv: list, deadline_seconds: float, storage_root: str,
 
 def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
                         limits: dict, measure_root: str,
-                        size_before_mb: float) -> dict:
+                        size_before_mb: float,
+                        execution_context: dict | None = None) -> dict:
     """Spawn the child runner under the full limit set; return its outcome."""
     deadline_seconds = 60 * min(limits["max_wall_minutes"],
                                 limits["max_compute_minutes"])
     fd, result_file = tempfile.mkstemp(suffix=".json",
                                        prefix="autonomy-outcome-")
     os.close(fd)
+    context_file = None
     try:
         argv = [sys.executable, "-m", "tools.autonomy.child_runner",
                 "--repo", repo, "--config", config_path,
                 "--driver", driver_name,
                 "--deadline-seconds", str(deadline_seconds),
                 "--result-file", result_file]
+        if execution_context is not None:
+            fd, context_file = tempfile.mkstemp(
+                suffix=".json", prefix="execution-context-")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(execution_context, fh, sort_keys=True)
+            argv += ["--execution-context-file", context_file]
         _execute_bounded(argv, deadline_seconds, measure_root,
                          limits["max_storage_mb"], size_before_mb,
                          cwd=_PACKAGE_ROOT)
@@ -225,6 +233,11 @@ def _run_driver_bounded(repo: str, config_path: str, driver_name: str,
             os.unlink(result_file)
         except OSError:
             pass
+        if context_file is not None:
+            try:
+                os.unlink(context_file)
+            except OSError:
+                pass
     if not result.get("ok"):
         raise RunnerRefusal(f"driver failed: {result.get('error')}")
     return result["outcome"]
@@ -252,6 +265,8 @@ def _limits(request: dict, task: dict, policy: dict) -> dict:
     caps = policy["auto_approval"]["limits"]
     loops = policy["bounded_loops"]
     block = (request.get("autonomy") or {}).get("limits", {})
+    owner_budget = (request.get("execution_authorization") or {}).get(
+        "budget", {})
 
     def eff(*values):
         return min(v for v in values if v is not None)
@@ -259,17 +274,136 @@ def _limits(request: dict, task: dict, policy: dict) -> dict:
     return {
         "max_wall_minutes": eff(task["maximum_runtime_minutes"],
                                 block.get("max_wall_minutes"),
+                                owner_budget.get("max_wall_minutes"),
                                 caps["max_wall_minutes"]),
         "max_storage_mb": eff(task["maximum_storage_growth_mb"],
                               block.get("max_storage_mb"),
+                              owner_budget.get("max_storage_mb"),
                               caps["max_storage_mb"]),
         "max_compute_minutes": eff(block.get("max_compute_minutes"),
+                                   owner_budget.get("max_compute_minutes"),
                                    caps["max_compute_minutes"]),
         "max_retries_per_unit": eff(block.get("max_retries_per_unit"),
+                                    owner_budget.get("max_retries_per_unit"),
                                     loops["max_retries_per_unit"]),
         "max_scenarios": eff(block.get("max_scenarios"),
+                             owner_budget.get("max_scenarios"),
                              caps["max_scenarios"]),
     }
+
+
+def _verify_execution_authorization(root: str, request_id: str,
+                                    request: dict, config: dict,
+                                    config_hash: str, limits: dict) -> tuple:
+    """Return (failures, approval_event_id) for an owner-bound run.
+
+    The approval event is independently checked at append time.  Rechecking
+    here binds the bytes about to execute and the effective limits to that
+    event, so direct runner calls cannot substitute a different design,
+    model regime, pack size, budget, or evidence root.
+    """
+    authorization = request.get("execution_authorization")
+    from coliseum.textlab.registry import POLICY_REQUIRED_EXPERIMENTS
+    policy_required = config.get("experiment_id") in \
+        POLICY_REQUIRED_EXPERIMENTS
+    if authorization is None:
+        if policy_required:
+            return ([
+                f"{config.get('experiment_id')}: policy-required experiment "
+                "has no owner-bound execution_authorization"
+            ], None)
+        return ([], None)
+
+    from tools.council.schemas import (compute_execution_authorization_hash,
+                                       validate_execution_authorization)
+    try:
+        validate_execution_authorization(authorization)
+    except Exception as exc:
+        return ([f"execution_authorization invalid: {exc}"], None)
+
+    failures = []
+    checks = (
+        ("experiment_id", config.get("experiment_id")),
+        ("implementation_commit", request.get("target_commit")),
+        ("experiment_config_hash", config_hash),
+        ("design_hash", config.get("design_hash")),
+        ("model_digests", config.get("model_digests")),
+        ("planned_runs", config.get("expected_run_count")),
+        ("evidence_root", config.get("out_root")),
+        ("manifest", config.get("manifest")),
+    )
+    for name, observed in checks:
+        if authorization.get(name) != observed:
+            failures.append(
+                f"execution_authorization {name} "
+                f"{authorization.get(name)!r} != executable value "
+                f"{observed!r}")
+    budget = authorization["budget"]
+    if budget["max_units"] != authorization["planned_runs"]:
+        failures.append(
+            "owner-bound max_units differs from planned_runs")
+    for name, effective in limits.items():
+        if effective > budget[name]:
+            failures.append(
+                f"effective limit {name}={effective} exceeds the "
+                f"owner-bound budget {budget[name]}")
+
+    approval = None
+    publication = None
+    for event in events.read_chain(root):
+        if event["request_id"] == request_id and \
+                event["event_type"] == "EXPERIMENT_APPROVED":
+            approval = event
+        if event["request_id"] == request_id and event["event_type"] in \
+                ("AUDIT_REQUESTED", "READY_FOR_REAUDIT"):
+            publication = event
+    if approval is None:
+        failures.append("no EXPERIMENT_APPROVED event exists")
+    else:
+        payload = approval["payload"]
+        if publication is None:
+            failures.append("request publication event is absent")
+        elif publication["payload"].get(
+                "execution_authorization_hash") != \
+                compute_execution_authorization_hash(authorization):
+            failures.append(
+                "request publication event does not bind the audited "
+                "execution_authorization")
+        expected_core = {
+            "approval_schema_version": "experiment-approval.v2",
+            "approved_by": "human",
+            "approval_commit": request["target_commit"],
+            "request_payload_hash": request["request_payload_hash"],
+            "request_publication_event_id": (
+                publication["event_id"] if publication else None),
+            "request_publication_event_hash": (
+                publication["event_hash"] if publication else None),
+            "execution_authorization": authorization,
+        }
+        observed_core = {
+            k: v for k, v in payload.items() if k != "human_token"
+        }
+        if observed_core != expected_core:
+            failures.append(
+                "latest EXPERIMENT_APPROVED event does not exactly bind "
+                "the audited execution_authorization")
+    evidence_abs = os.path.join(request["repository"],
+                                authorization["evidence_root"])
+    manifest_abs = os.path.join(request["repository"],
+                                authorization["manifest"])
+    if authorization["resume_from"] is None:
+        if os.path.lexists(evidence_abs) or os.path.lexists(manifest_abs):
+            failures.append(
+                "owner-bound evidence root or manifest already exists before "
+                "the initial EXPERIMENT_STARTED event")
+    else:
+        if not os.path.isdir(evidence_abs) or not (
+                os.path.isfile(manifest_abs) or
+                os.path.isfile(manifest_abs + ".tombstones.jsonl")):
+            failures.append(
+                "owner-bound resume requires the existing evidence root and "
+                "terminal ledger")
+    return failures, (approval["event_id"] if approval else None)
 
 
 def run_task(cfg: Config, request_id: str, config_path: str,
@@ -359,6 +493,12 @@ def run_task(cfg: Config, request_id: str, config_path: str,
                        "implementing one is a separately audited change"])
     limits = _limits(request, task, report.policy)
 
+    authorization_failures, approval_event_id = \
+        _verify_execution_authorization(
+            root, request_id, request, config, config_hash, limits)
+    if authorization_failures:
+        return refuse(authorization_failures)
+
     # ---- pre-launch cardinality (audit blocker 2): declared scenario and
     # retry counts are part of the frozen config and checked BEFORE launch
     cardinality_failures = []
@@ -401,15 +541,24 @@ def run_task(cfg: Config, request_id: str, config_path: str,
                            for i in design_issues])
 
     # ---- lifecycle: start
+    started_payload = {
+        "task_id": task["task_id"],
+        "experiment_class": driver_name,
+        "experiment_config_hash": config_hash,
+        "experiment_config_file": frozen_file,
+        "roadmap_hash": report.roadmap_hash,
+        "policy_hash": report.policy_hash,
+        "limits": limits,
+    }
+    if request.get("execution_authorization") is not None:
+        started_payload.update({
+            "owner_approval_event_id": approval_event_id,
+            "request_payload_hash": request["request_payload_hash"],
+            "execution_authorization": request["execution_authorization"],
+        })
     events.append_event(
         root, cfg, "EXPERIMENT_STARTED", SENDER, request_id, repo, commit,
-        {"task_id": task["task_id"],
-         "experiment_class": driver_name,
-         "experiment_config_hash": config_hash,
-         "experiment_config_file": frozen_file,
-         "roadmap_hash": report.roadmap_hash,
-         "policy_hash": report.policy_hash,
-         "limits": limits})
+        started_payload)
 
     measure_root = os.path.join(repo, config["out_root"])
     size_before = tree_size_mb(measure_root) if os.path.isdir(
@@ -417,8 +566,19 @@ def run_task(cfg: Config, request_id: str, config_path: str,
     started = time.monotonic()
 
     try:
-        outcome = _run_driver_bounded(repo, config_path, driver_name,
-                                      limits, measure_root, size_before)
+        execution_context = None
+        if request.get("execution_authorization") is not None:
+            execution_context = {
+                "owner_approval_event_id": approval_event_id,
+                "request_payload_hash": request["request_payload_hash"],
+                "execution_authorization": request["execution_authorization"],
+            }
+        driver_args = (repo, config_path, driver_name, limits, measure_root,
+                       size_before)
+        outcome = (_run_driver_bounded(
+            *driver_args, execution_context=execution_context)
+            if execution_context is not None else
+            _run_driver_bounded(*driver_args))
     except RunnerRefusal as exc:
         return refuse([str(exc)])
     except Exception as exc:
@@ -461,7 +621,9 @@ def run_task(cfg: Config, request_id: str, config_path: str,
          "validation_report_hash": val_report_hash,
          "manifest_file": manifest_file,
          "elapsed_minutes": round(elapsed_min, 3),
-         "storage_growth_mb": round(growth_mb, 3)})
+         "storage_growth_mb": round(growth_mb, 3),
+         **({"result_artifacts": outcome.get("result_artifacts")}
+            if outcome.get("result_artifacts") is not None else {})})
 
     events.append_event(
         root, cfg, "RESULT_VALIDATION_REQUIRED", SENDER, request_id, repo,
@@ -486,6 +648,8 @@ def run_task(cfg: Config, request_id: str, config_path: str,
          "evidence_inventory_hash": inventory_hash,
          "manifest_file": manifest_file,
          "validation_report_hash": val_report_hash,
+         **({"result_artifacts": outcome.get("result_artifacts")}
+            if outcome.get("result_artifacts") is not None else {}),
          "instructions": ("read-only result audit: verify the evidence dir "
                           "against the pinned manifest, replay determinism, "
                           "limits, and validations. The result verdict must "

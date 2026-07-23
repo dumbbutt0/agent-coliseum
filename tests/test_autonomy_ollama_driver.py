@@ -115,6 +115,95 @@ def test_full_pipeline_offline(tmp_path, monkeypatch):
     assert len(rows) == 1 and rows[0]["model"] == MODEL
 
 
+@pytest.mark.parametrize("unbalanced_terminal_failure", [False, True])
+def test_m8_driver_closes_replay_report_and_package_before_return(
+        tmp_path, monkeypatch, unbalanced_terminal_failure):
+    """The policy-required path inventories only after the driver returns, so
+    its outcome must already carry a verified replay/report/package closure."""
+    from types import SimpleNamespace
+    import coliseum.textlab.result_package as package_mod
+
+    config_path = os.path.join(
+        ROOT, "configs", "experiments",
+        "m8-phase2-live-order-sensitivity.experiment.json")
+    cfg = json.load(open(config_path, encoding="utf-8"))
+    cfg["out_root"] = str(tmp_path / "m8")
+    cfg["manifest"] = os.path.join(cfg["out_root"], "manifest.jsonl")
+    success_count = 143 if unbalanced_terminal_failure else 144
+    rows = {i: {"dir": f"run-{i}"} for i in range(success_count)}
+    tombstones = ({"failed-coordinate": {"failure_kind": "other"}}
+                  if unbalanced_terminal_failure else {})
+    order = []
+
+    def fake_sweep(_spec, **_kwargs):
+        order.append("sweep")
+        os.makedirs(cfg["out_root"])
+        open(cfg["manifest"], "w", encoding="utf-8").close()
+        result = SimpleNamespace(
+            digests=dict(cfg["model_digests"]), errors=[], rows_written=144,
+            skipped_resumed=0)
+        if unbalanced_terminal_failure:
+            raise sweep_mod.SweepUnbalanced(
+                "complete but unbalanced", completed_result=result)
+        return result
+
+    def fake_replay(*_args, **_kwargs):
+        order.append("replay")
+        att = {"manifest_sha256": "a" * 64, "runs": {"r": {}},
+               "tombstone_ledger": {"state": "absent", "sha256": None}}
+        with open(os.path.join(cfg["out_root"], "replay_attestation.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump(att, fh)
+        return att
+
+    def fake_report(*_args, **_kwargs):
+        order.append("report")
+        if unbalanced_terminal_failure:
+            return {"analysis_status": "terminal_failure_inconclusive",
+                    "order_report_version": "6"}
+        return {"order_report_version": "6",
+                "per_agent": {"agent": {"verdict": "inconclusive"}}}
+
+    def fake_package(*_args, **_kwargs):
+        order.append("package")
+        path = os.path.join(cfg["out_root"], "result_package.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"package_sha256": "b" * 64,
+                       "analysis_status": (
+                           "terminal_failure_inconclusive"
+                           if unbalanced_terminal_failure else "analyzed")}, fh)
+        return path
+
+    def fake_verify(path):
+        order.append("verify-package")
+        return json.load(open(path, encoding="utf-8"))
+
+    monkeypatch.setattr(sweep_mod, "run_sweep", fake_sweep)
+    monkeypatch.setattr(sweep_mod, "manifest_load", lambda *_a: rows)
+    monkeypatch.setattr(sweep_mod, "terminal_ledgers_load",
+                        lambda *_a, **_k: (rows, tombstones))
+    monkeypatch.setattr(sweep_mod, "verify_pack_replay", fake_replay)
+    monkeypatch.setattr(package_mod, "_recompute_order_report", fake_report)
+    monkeypatch.setattr(package_mod, "terminal_failure_report", fake_report)
+    monkeypatch.setattr(package_mod, "build_result_package", fake_package)
+    monkeypatch.setattr(package_mod, "verify_result_package", fake_verify)
+
+    context = {"owner_approval_event_id": "000001-deadbeef",
+               "request_payload_hash": "c" * 64,
+               "execution_authorization": {"experiment_id": cfg["experiment_id"]}}
+    outcome = _drive_ollama_local(
+        ROOT, cfg, _far_deadline(), execution_context=context)
+    assert order == ["sweep", "replay", "report", "package",
+                     "verify-package"]
+    assert outcome["result_artifacts"]["terminal_outcomes"] == 144
+    assert outcome["result_artifacts"]["analysis_status"] == (
+        "terminal_failure_inconclusive"
+        if unbalanced_terminal_failure else "analyzed")
+    val = {v["name"]: v for v in outcome["validations"]}
+    assert val["terminal_outcomes_complete"]["ok"]
+    assert val["m8_result_package_verified"]["ok"]
+
+
 def test_fleet_preflight_is_atomic(tmp_path, monkeypatch):
     """Audit blocker regression: a mismatch in a LATER model must refuse the
     whole sweep BEFORE the earlier (valid) model runs — no run dirs, no rows.

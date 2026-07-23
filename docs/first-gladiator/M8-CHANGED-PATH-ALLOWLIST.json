@@ -14,6 +14,7 @@
     "coliseum/textlab/schema.py",
     "coliseum/textlab/sweep.py",
     "coliseum/textlab/training/actions.py",
+    "configs/autonomy-roadmap.yaml",
     "configs/experiments/m8-phase2-live-order-sensitivity.experiment.json",
     "configs/registry/experiments.yaml",
     "configs/registry/scenarios.yaml",
@@ -25,6 +26,7 @@
     "docs/first-gladiator/M8-AUDIT-COVERAGE-MAP.md",
     "docs/first-gladiator/M8-C1-BUNDLE.md",
     "docs/first-gladiator/M8-CHANGED-PATH-ALLOWLIST.json",
+    "docs/first-gladiator/M8-EXECUTION-AUTHORIZATION.md",
     "docs/first-gladiator/M8-M6.6-CLAIM-TRACEABILITY.md",
     "docs/first-gladiator/preregistrations/m8-phase2-live-order-sensitivity.md",
     "scripts/m8_operating_characteristics.py",
@@ -35,6 +37,7 @@
     "tests/test_m8_cancellation_guardrail.py",
     "tests/test_m8_coverage_conformance.py",
     "tests/test_m8_driver_fidelity.py",
+    "tests/test_m8_execution_authorization.py",
     "tests/test_m8_execution_policy.py",
     "tests/test_m8_experiment_identity.py",
     "tests/test_m8_exposure_points.py",
@@ -48,8 +51,15 @@
     "tests/test_m8_sweep_locking.py",
     "tests/test_textlab_scenario_registry.py",
     "tests/test_textlab_stochastic.py",
-    "tools/autonomy/drivers.py"
+    "tools/autonomy/child_runner.py",
+    "tools/autonomy/drivers.py",
+    "tools/autonomy/runner.py",
+    "tools/council/cli.py",
+    "tools/council/codex_watch.py",
+    "tools/council/events.py",
+    "tools/council/publish.py",
+    "tools/council/schemas.py"
   ],
-  "path_count": 46,
-  "paths_sha256": "c291da07b71e74c0df91ae63ec1c97cbc57f4a86ba22920abe236fdb9dce80ec"
+  "path_count": 56,
+  "paths_sha256": "fdd60f5ddba3db6ed06d2ae28c56648074952da57d9dc71ed7758a91c4cd2b8d"
 }

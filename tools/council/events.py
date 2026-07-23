@@ -6,6 +6,7 @@ no API that edits or deletes an event, ever.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 
@@ -170,6 +171,12 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
                                            VERDICT_PAYLOAD_EVENT_TYPES)
         if event_type in VERDICT_PAYLOAD_EVENT_TYPES:
             crosscheck_verdict_bindings(event, chain, requests)
+        if event_type == "EXPERIMENT_APPROVED":
+            _verify_experiment_approval_binding(root, cfg, chain, event)
+        if event_type == "EXPERIMENT_STARTED":
+            _verify_experiment_start_binding(root, cfg, chain, event)
+        if event_type in ("EXPERIMENT_COMPLETE", "RESULT_AUDIT_REQUESTED"):
+            _verify_result_artifact_binding(root, cfg, chain, event)
         # delegated-authority: a CONDITIONS_AUTO_SATISFIED is a claude-sender,
         # TOKENLESS event whose authority is a re-validated policy evaluation,
         # never its mere presence. Refuse the append unless the delegation holds
@@ -249,6 +256,236 @@ def _verify_human_token(root: str, chain: list, event: dict,
         {k: v for k, v in payload.items() if k != "human_token"})
     identity.verify_and_advance(root, payload.get("human_token"), expected,
                                 expected_state=expected_state)
+
+
+def _verify_experiment_approval_binding(root: str, cfg: Config, chain: list,
+                                        event: dict) -> None:
+    """Require the direct v2 owner-event binding when the audited request
+    declares an execution envelope.
+
+    Legacy requests retain their historical commit-only approval shape.  The
+    stronger path is opt-in at request publication, after which neither a
+    legacy approval nor a post-audit request edit can open the run gate.
+    """
+    from tools.council import publish
+    from tools.council.schemas import (EXECUTION_APPROVAL_SCHEMA,
+                                       compute_execution_authorization_hash,
+                                       validate_execution_approval_payload)
+
+    publication = next((e for e in reversed(chain)
+                        if e["request_id"] == event["request_id"] and
+                        e["event_type"] in
+                        ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")), None)
+    publication_marks_bound = bool(
+        publication and publication["payload"].get(
+            "execution_authorization_hash") is not None)
+    payload_marks_bound = event["payload"].get(
+        "approval_schema_version") is not None
+    if not publication_marks_bound and not payload_marks_bound:
+        return
+    request, failures, repo, commit = publish.verified_request(
+        root, cfg, event["request_id"])
+    if failures:
+        raise CouncilError(
+            "experiment approval refused — audited request is not "
+            "verifiable: " + "; ".join(failures))
+    if repo != event["repository"] or commit != event["target_commit"]:
+        raise CouncilError(
+            "experiment approval coordinates differ from the published "
+            "request")
+    authorization = request.get("execution_authorization")
+    if authorization is None:
+        raise CouncilError(
+            "bound experiment publication has no execution_authorization")
+    payload = event["payload"]
+    validate_execution_approval_payload(payload)
+    if publication is None:
+        raise CouncilError(
+            "bound experiment approval has no request publication event")
+    if publication["payload"].get("execution_authorization_hash") != \
+            compute_execution_authorization_hash(authorization):
+        raise CouncilError(
+            "request publication does not bind the execution authorization")
+    by_id = {e["event_id"]: e for e in chain}
+    for event_id in authorization["m7_prerequisite_events"]:
+        prerequisite = by_id.get(event_id)
+        if prerequisite is None or prerequisite["event_type"] != "AUDIT_GO":
+            raise CouncilError(
+                f"bound M7 prerequisite {event_id} is not an AUDIT_GO")
+    for event_id in authorization["source_integration_events"]:
+        integration = by_id.get(event_id)
+        if integration is None or \
+                integration["event_type"] != "CHANGE_INTEGRATED" or \
+                integration["target_commit"] != request["target_commit"]:
+            raise CouncilError(
+                f"bound source integration {event_id} does not authorize "
+                "the requested implementation commit")
+    expected = {
+        "approval_schema_version": EXECUTION_APPROVAL_SCHEMA,
+        "approved_by": "human",
+        "approval_commit": request["target_commit"],
+        "request_payload_hash": request["request_payload_hash"],
+        "request_publication_event_id": publication["event_id"],
+        "request_publication_event_hash": publication["event_hash"],
+        "execution_authorization": authorization,
+    }
+    observed = {k: v for k, v in payload.items() if k != "human_token"}
+    if observed != expected:
+        raise CouncilError(
+            "experiment approval payload does not exactly copy the "
+            "event-pinned execution authorization")
+
+
+def _verify_experiment_start_binding(root: str, cfg: Config, chain: list,
+                                     event: dict) -> None:
+    """Prevent a direct EXPERIMENT_STARTED append from bypassing a bound
+    owner envelope or substituting a pre-existing evidence namespace."""
+    from tools.council import publish
+    publication = next((e for e in reversed(chain)
+                        if e["request_id"] == event["request_id"] and
+                        e["event_type"] in
+                        ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")), None)
+    approval = next((e for e in reversed(chain)
+                     if e["request_id"] == event["request_id"] and
+                     e["event_type"] == "EXPERIMENT_APPROVED"), None)
+    bound = bool(
+        (publication and publication["payload"].get(
+            "execution_authorization_hash") is not None) or
+        (approval and approval["payload"].get(
+            "approval_schema_version") is not None) or
+        event["payload"].get("execution_authorization") is not None)
+    if not bound:
+        return
+    request, failures, repo, commit = publish.verified_request(
+        root, cfg, event["request_id"])
+    if failures:
+        raise CouncilError(
+            "experiment start refused — audited request is not verifiable: "
+            + "; ".join(failures))
+    authorization = request.get("execution_authorization")
+    if authorization is None:
+        raise CouncilError(
+            "bound experiment start request has no execution_authorization")
+    if approval is None:
+        raise CouncilError("bound experiment start has no owner approval")
+    payload = event["payload"]
+    required_equal = {
+        "owner_approval_event_id": approval["event_id"],
+        "request_payload_hash": request["request_payload_hash"],
+        "execution_authorization": authorization,
+        "experiment_config_hash": authorization["experiment_config_hash"],
+    }
+    for field, expected in required_equal.items():
+        if payload.get(field) != expected:
+            raise CouncilError(
+                f"experiment start {field} does not match the owner-bound "
+                "execution envelope")
+    limits = payload.get("limits")
+    budget = authorization["budget"]
+    limit_fields = {"max_compute_minutes", "max_wall_minutes",
+                    "max_storage_mb", "max_retries_per_unit",
+                    "max_scenarios"}
+    if not isinstance(limits, dict) or set(limits) != limit_fields:
+        raise CouncilError(
+            "bound experiment start effective limits must be the exact "
+            "five-field runner limit set")
+    for field in sorted(limit_fields):
+        value = limits[field]
+        minimum = 0 if field == "max_retries_per_unit" else 1
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or \
+                value < minimum or value > budget[field]:
+            raise CouncilError(
+                f"experiment start limit {field} is invalid or exceeds the "
+                "owner-bound budget")
+    evidence = os.path.join(repo, authorization["evidence_root"])
+    manifest = os.path.join(repo, authorization["manifest"])
+    if authorization["resume_from"] is None:
+        if os.path.lexists(evidence) or os.path.lexists(manifest):
+            raise CouncilError(
+                "bound experiment start refuses a pre-existing evidence root "
+                "or manifest")
+    else:
+        if not os.path.isdir(evidence) or not (
+                os.path.isfile(manifest) or
+                os.path.isfile(manifest + ".tombstones.jsonl")):
+            raise CouncilError(
+                "bound resume start requires the existing evidence root and "
+                "terminal ledger")
+    if repo != event["repository"] or commit != event["target_commit"]:
+        raise CouncilError(
+            "bound experiment start coordinates differ from the published "
+            "request")
+
+
+def _verify_result_artifact_binding(root: str, cfg: Config, chain: list,
+                                    event: dict) -> None:
+    """Require one immutable artifact census across bound M8 completion and
+    result-audit publication. Legacy experiment lifecycles remain unchanged."""
+    publication = next((e for e in reversed(chain)
+                        if e["request_id"] == event["request_id"] and
+                        e["event_type"] in
+                        ("AUDIT_REQUESTED", "READY_FOR_REAUDIT")), None)
+    approval = next((e for e in reversed(chain)
+                     if e["request_id"] == event["request_id"] and
+                     e["event_type"] == "EXPERIMENT_APPROVED"), None)
+    bound = bool(
+        (publication and publication["payload"].get(
+            "execution_authorization_hash") is not None) or
+        (approval and approval["payload"].get(
+            "approval_schema_version") is not None))
+    if not bound:
+        return
+
+    from tools.council import publish
+    from tools.council.schemas import validate_result_artifacts
+    request, failures, repo, commit = publish.verified_request(
+        root, cfg, event["request_id"])
+    if failures:
+        raise CouncilError(
+            "bound result event refused — audited request is not verifiable: "
+            + "; ".join(failures))
+    authorization = request.get("execution_authorization")
+    if authorization is None or approval is None:
+        raise CouncilError(
+            "bound result event lacks its execution authorization or owner "
+            "approval")
+    if repo != event["repository"] or commit != event["target_commit"]:
+        raise CouncilError(
+            "bound result event coordinates differ from the published request")
+    artifacts = event["payload"].get("result_artifacts")
+    if artifacts is None:
+        raise CouncilError(
+            "bound result event must carry the closed result_artifacts record")
+    validate_result_artifacts(artifacts)
+    if artifacts["owner_approval_event_id"] != approval["event_id"] or \
+            artifacts["request_payload_hash"] != \
+            request["request_payload_hash"]:
+        raise CouncilError(
+            "result_artifacts do not bind the owner approval and audited "
+            "request")
+    if artifacts["terminal_outcomes"] != authorization["planned_runs"]:
+        raise CouncilError(
+            "result_artifacts terminal census differs from the owner-bound "
+            "planned run count")
+    if artifacts["tombstoned_runs"] > 0 and \
+            artifacts["analysis_status"] != \
+            "terminal_failure_inconclusive":
+        raise CouncilError(
+            "a tombstoned terminal pack must be classified inconclusive")
+    if artifacts["tombstoned_runs"] == 0 and \
+            artifacts["analysis_status"] != "analyzed":
+        raise CouncilError(
+            "an all-success terminal pack must be classified analyzed")
+
+    if event["event_type"] == "RESULT_AUDIT_REQUESTED":
+        complete = next((e for e in reversed(chain)
+                         if e["request_id"] == event["request_id"] and
+                         e["event_type"] == "EXPERIMENT_COMPLETE"), None)
+        if complete is None or complete["payload"].get(
+                "result_artifacts") != artifacts:
+            raise CouncilError(
+                "RESULT_AUDIT_REQUESTED result_artifacts must exactly equal "
+                "the EXPERIMENT_COMPLETE record")
 
 
 def _verify_delegated_satisfaction(root: str, cfg: Config, chain: list,

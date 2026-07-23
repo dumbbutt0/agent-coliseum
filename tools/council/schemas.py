@@ -260,6 +260,165 @@ def _validate_safe_relpath(value, field: str) -> None:
             f"{field} {value!r} must be a safe relative path "
             "(no leading slash, no '..', no backslash)")
 
+
+# An owner approval may opt into this stronger, request-pinned execution
+# envelope.  Legacy experiment requests/events remain replayable, while a
+# request carrying this block cannot be approved or started through the legacy
+# commit-only payload.
+EXECUTION_AUTHORIZATION_SCHEMA = "execution-authorization.v1"
+EXECUTION_APPROVAL_SCHEMA = "experiment-approval.v2"
+EXECUTION_BUDGET_FIELDS = (
+    "max_units", "max_compute_minutes", "max_wall_minutes",
+    "max_storage_mb", "max_retries_per_unit", "max_scenarios",
+)
+EXECUTION_AUTHORIZATION_FIELDS = (
+    "schema_version", "experiment_id", "design_hash",
+    "implementation_commit", "experiment_config_hash", "model_digests",
+    "planned_runs", "budget", "evidence_root", "manifest",
+    "m7_prerequisite_events", "source_integration_events",
+    "resume_from",
+)
+M8_PREREQUISITE_GO_EVENTS = (
+    "001714-6f7a48e0", "001719-21604e97", "001724-8cebf880",
+)
+
+
+def compute_execution_authorization_hash(authorization: dict) -> str:
+    """Domain-separated identity used to mark a bound publication event."""
+    validate_execution_authorization(authorization)
+    return domain_hash("council.execution-authorization.v1", authorization)
+
+
+def validate_execution_authorization(authorization: dict) -> None:
+    """Validate the exact owner-bound execution envelope.
+
+    The retry cap is the sole non-negative budget field: zero is meaningful
+    for frozen no-reroll designs.  Every other numeric bound must be positive.
+    """
+    if not isinstance(authorization, dict):
+        raise SchemaViolation("execution_authorization must be an object")
+    if set(authorization) != set(EXECUTION_AUTHORIZATION_FIELDS):
+        raise SchemaViolation(
+            "execution_authorization keys must be exactly "
+            f"{sorted(EXECUTION_AUTHORIZATION_FIELDS)}")
+    if authorization["schema_version"] != EXECUTION_AUTHORIZATION_SCHEMA:
+        raise SchemaViolation(
+            "execution_authorization schema_version must be "
+            f"{EXECUTION_AUTHORIZATION_SCHEMA!r}")
+    experiment_id = authorization["experiment_id"]
+    if not isinstance(experiment_id, str) or not experiment_id:
+        raise SchemaViolation(
+            "execution_authorization experiment_id must be a non-empty string")
+    if not _SHA256_RE.match(str(authorization["design_hash"])):
+        raise SchemaViolation("execution_authorization design_hash must be sha256")
+    validate_commit(authorization["implementation_commit"])
+    if not _SHA256_RE.match(str(authorization["experiment_config_hash"])):
+        raise SchemaViolation(
+            "execution_authorization experiment_config_hash must be sha256")
+    digests = authorization["model_digests"]
+    if not isinstance(digests, dict) or not digests:
+        raise SchemaViolation(
+            "execution_authorization model_digests must be a non-empty object")
+    for model, digest in digests.items():
+        if not isinstance(model, str) or not model:
+            raise SchemaViolation(
+                "execution_authorization model names must be non-empty strings")
+        if not _SHA256_RE.match(str(digest)):
+            raise SchemaViolation(
+                "execution_authorization model digests must be sha256")
+    planned = authorization["planned_runs"]
+    if not isinstance(planned, int) or isinstance(planned, bool) or planned <= 0:
+        raise SchemaViolation(
+            "execution_authorization planned_runs must be an int > 0")
+    budget = authorization["budget"]
+    if not isinstance(budget, dict) or set(budget) != set(EXECUTION_BUDGET_FIELDS):
+        raise SchemaViolation(
+            "execution_authorization budget keys must be exactly "
+            f"{sorted(EXECUTION_BUDGET_FIELDS)}")
+    count_fields = {"max_units", "max_retries_per_unit", "max_scenarios"}
+    for name in EXECUTION_BUDGET_FIELDS:
+        value = budget[name]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise SchemaViolation(
+                f"execution_authorization budget {name} must be numeric")
+        if name in count_fields and not isinstance(value, int):
+            raise SchemaViolation(
+                f"execution_authorization budget {name} must be an int")
+        minimum = 0 if name == "max_retries_per_unit" else 1
+        if value < minimum:
+            op = ">= 0" if minimum == 0 else "> 0"
+            raise SchemaViolation(
+                f"execution_authorization budget {name} must be {op}")
+    _validate_safe_relpath(
+        authorization["evidence_root"],
+        "execution_authorization.evidence_root")
+    _validate_safe_relpath(
+        authorization["manifest"], "execution_authorization.manifest")
+    if authorization["budget"]["max_units"] != planned:
+        raise SchemaViolation(
+            "execution_authorization budget.max_units must equal planned_runs")
+    for field in ("m7_prerequisite_events", "source_integration_events"):
+        values = authorization[field]
+        if not isinstance(values, list) or not values:
+            raise SchemaViolation(
+                f"execution_authorization {field} must be a non-empty list")
+        if len(values) != len(set(values)):
+            raise SchemaViolation(
+                f"execution_authorization {field} contains duplicates")
+        if any(not isinstance(v, str) or not _EVENT_ID_RE.match(v)
+               for v in values):
+            raise SchemaViolation(
+                f"execution_authorization {field} must contain event ids")
+    if experiment_id == "m8-phase2-live-order-sensitivity" and tuple(
+            authorization["m7_prerequisite_events"]) != \
+            M8_PREREQUISITE_GO_EVENTS:
+        raise SchemaViolation(
+            "M8 execution_authorization must bind the three frozen M7 GO "
+            "events in canonical order")
+    resume_from = authorization["resume_from"]
+    if resume_from is not None:
+        if not isinstance(resume_from, dict) or set(resume_from) != \
+                {"request_id", "owner_approval_event_id"}:
+            raise SchemaViolation(
+                "execution_authorization resume_from must be null or exactly "
+                "{request_id, owner_approval_event_id}")
+        validate_request_id(resume_from["request_id"])
+        if not _EVENT_ID_RE.match(str(resume_from["owner_approval_event_id"])):
+            raise SchemaViolation(
+                "execution_authorization resume owner approval id malformed")
+
+
+def validate_execution_approval_payload(payload: dict) -> None:
+    """Validate the direct owner-event copy of an execution envelope."""
+    if not isinstance(payload, dict):
+        raise SchemaViolation("EXPERIMENT_APPROVED payload must be an object")
+    required = {
+        "approval_schema_version", "approved_by", "approval_commit",
+        "request_payload_hash", "request_publication_event_id",
+        "request_publication_event_hash", "execution_authorization",
+    }
+    allowed = required | {"human_token"}
+    if set(payload) not in (required, allowed):
+        raise SchemaViolation(
+            "bound EXPERIMENT_APPROVED payload keys must be exactly "
+            f"{sorted(required)} plus optional human_token")
+    if payload["approval_schema_version"] != EXECUTION_APPROVAL_SCHEMA:
+        raise SchemaViolation(
+            "approval_schema_version must be "
+            f"{EXECUTION_APPROVAL_SCHEMA!r}")
+    if payload["approved_by"] != "human":
+        raise SchemaViolation("bound experiment approval approved_by must be human")
+    validate_commit(payload["approval_commit"])
+    if not _SHA256_RE.match(str(payload["request_payload_hash"])):
+        raise SchemaViolation("bound approval request_payload_hash must be sha256")
+    if not _EVENT_ID_RE.match(str(payload["request_publication_event_id"])):
+        raise SchemaViolation(
+            "bound approval request_publication_event_id malformed")
+    if not _SHA256_RE.match(str(payload["request_publication_event_hash"])):
+        raise SchemaViolation(
+            "bound approval request_publication_event_hash must be sha256")
+    validate_execution_authorization(payload["execution_authorization"])
+
 # Continuation kind after AUDIT_GO. "experiment": policy validation ->
 # AUTO_APPROVED/human gate -> bounded runner -> result audit. "source":
 # state REMAINS `go` — the only legal continuation is a commit-bound
@@ -374,6 +533,13 @@ RESULT_VERDICT_BINDING_FIELDS = SOURCE_VERDICT_BINDING_FIELDS + (
 REPLAY_RESULTS = ("replayed_ok", "replay_failed", "replay_not_supported")
 RESULT_COUNT_FIELDS = ("scenarios_run", "validations_passed",
                        "validations_failed")
+RESULT_ARTIFACT_FIELDS = (
+    "owner_approval_event_id", "request_payload_hash", "manifest_sha256",
+    "tombstone_ledger", "replay_attestation_sha256", "order_report_sha256",
+    "result_package_file_sha256", "result_package_content_sha256",
+    "successful_runs", "tombstoned_runs", "terminal_outcomes",
+    "analysis_status",
+)
 _EVENT_ID_RE = re.compile(r"^\d{6}-[0-9a-f]{8}$")
 
 
@@ -425,6 +591,51 @@ def _validate_verdict_bindings(verdict: dict, result_kind: bool) -> None:
         raise SchemaViolation(
             f"conclusion_scope must be a non-empty string "
             f"<= {_MAX_FIELD_STRING} chars")
+    artifacts = verdict.get("result_artifacts")
+    if artifacts is not None:
+        validate_result_artifacts(artifacts)
+
+
+def validate_result_artifacts(artifacts: dict) -> None:
+    if not isinstance(artifacts, dict) or \
+            set(artifacts) != set(RESULT_ARTIFACT_FIELDS):
+        raise SchemaViolation(
+            "result_artifacts keys must be exactly "
+            f"{sorted(RESULT_ARTIFACT_FIELDS)}")
+    if not _EVENT_ID_RE.match(str(artifacts["owner_approval_event_id"])):
+        raise SchemaViolation("result_artifacts owner approval id malformed")
+    for field in (
+            "request_payload_hash", "manifest_sha256",
+            "replay_attestation_sha256", "order_report_sha256",
+            "result_package_file_sha256", "result_package_content_sha256"):
+        if not _SHA256_RE.match(str(artifacts[field])):
+            raise SchemaViolation(f"result_artifacts {field} must be sha256")
+    tombstone = artifacts["tombstone_ledger"]
+    if not isinstance(tombstone, dict) or tombstone.get("state") not in \
+            ("absent", "present"):
+        raise SchemaViolation("result_artifacts tombstone_ledger malformed")
+    if tombstone["state"] == "present" and \
+            not _SHA256_RE.match(str(tombstone.get("sha256"))):
+        raise SchemaViolation(
+            "present result tombstone ledger must carry sha256")
+    if tombstone["state"] == "absent" and set(tombstone) != {"state"}:
+        raise SchemaViolation(
+            "absent result tombstone ledger carries unexpected fields")
+    if tombstone["state"] == "present" and set(tombstone) != \
+            {"state", "sha256"}:
+        raise SchemaViolation(
+            "present result tombstone ledger carries unexpected fields")
+    for field in ("successful_runs", "tombstoned_runs", "terminal_outcomes"):
+        value = artifacts[field]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise SchemaViolation(
+                f"result_artifacts {field} must be a non-negative int")
+    if artifacts["successful_runs"] + artifacts["tombstoned_runs"] != \
+            artifacts["terminal_outcomes"]:
+        raise SchemaViolation("result_artifacts terminal census disagrees")
+    if artifacts["analysis_status"] not in \
+            ("analyzed", "terminal_failure_inconclusive"):
+        raise SchemaViolation("result_artifacts analysis_status unknown")
 
 
 def compute_verdict_payload_hash(verdict: dict) -> str:
@@ -549,6 +760,13 @@ def validate_event(event: dict, for_append: bool = False) -> None:
         raise SchemaViolation("event payload must be an object")
     if event["event_type"] in VERDICT_PAYLOAD_EVENT_TYPES:
         validate_verdict_event_payload(event)
+    if event["event_type"] == "EXPERIMENT_APPROVED" and \
+            event["payload"].get("approval_schema_version") is not None:
+        validate_execution_approval_payload(event["payload"])
+    if event["event_type"] in ("EXPERIMENT_COMPLETE",
+                                "RESULT_AUDIT_REQUESTED") and \
+            event["payload"].get("result_artifacts") is not None:
+        validate_result_artifacts(event["payload"]["result_artifacts"])
     if event["event_type"] in CLASS_C_PAYLOAD_EVENT_TYPES:
         validate_class_c_event_payload(event)
     if event["event_type"] in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
@@ -652,6 +870,29 @@ def validate_request(request: dict, repo_roots) -> None:
                 "['RESULT_APPROVED', 'RESULT_BLOCKED']")
         from tools.council.result_handoff import validate_handoff_request
         validate_handoff_request(request)
+    execution_authorization = request.get("execution_authorization")
+    if execution_authorization is not None:
+        if task_kind != "experiment":
+            raise SchemaViolation(
+                "execution_authorization is valid only for task_kind "
+                "'experiment'")
+        if request["human_approval_required"] is not True:
+            raise SchemaViolation(
+                "execution_authorization requires the explicit human gate")
+        validate_execution_authorization(execution_authorization)
+        if execution_authorization["implementation_commit"] != \
+                request["target_commit"]:
+            raise SchemaViolation(
+                "execution_authorization implementation_commit must equal "
+                "request target_commit")
+        if request.get("experiment_config_hash") != \
+                execution_authorization["experiment_config_hash"]:
+            raise SchemaViolation(
+                "request experiment_config_hash must equal the "
+                "execution_authorization binding")
+        if not request.get("experiment_config_file"):
+            raise SchemaViolation(
+                "execution_authorization requires experiment_config_file")
     # H2 item 11: v2 requests must carry safe relative path fields (1.0
     # requests keep the legacy permissive behavior on replay)
     if request["protocol_version"] == "2.0":
@@ -1136,6 +1377,13 @@ def crosscheck_verdict_bindings(event: dict, chain: list,
             if pinned is not None and verdict[field] != pinned:
                 raise SchemaViolation(
                     f"verdict {field} does not match the runner-pinned "
+                    "RESULT_AUDIT_REQUESTED value")
+        pinned_artifacts = evidence_pub["payload"].get("result_artifacts")
+        if pinned_artifacts is not None:
+            validate_result_artifacts(pinned_artifacts)
+            if verdict.get("result_artifacts") != pinned_artifacts:
+                raise SchemaViolation(
+                    "verdict result_artifacts do not match the runner-pinned "
                     "RESULT_AUDIT_REQUESTED value")
 
 

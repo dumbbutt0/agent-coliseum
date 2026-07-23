@@ -214,6 +214,47 @@ tasks:
     requires_human: false
     next_tasks:
       - m7-loop-amendment
+  - task_id: m8-phase2-live-order-sensitivity
+    title: Frozen M8 Phase-2 live order-sensitivity pack
+    phase: mv0-m8-closure
+    # Ready for an explicitly named owner-approved run only. Its dependency is
+    # intentionally not YAML-complete, so the automatic eligible-task selector
+    # cannot choose it; run_task may execute it only after the experiment
+    # request reaches the human-approved state and carries the closed execution
+    # authorization envelope.
+    status: ready
+    dependencies:
+      - m6-sequential-baseline
+    allowed_files:
+      - logs/runs/m8-phase2-live-order-sensitivity/
+    forbidden_files:
+      - tools/council/
+      - autonomy_policy.json
+      - PROTOCOL.md
+      - configs/scenarios/
+      - coliseum/
+    audit_scope: exact 144-coordinate M8 pack at the frozen design, config, model digest, no-reroll policy, interleaved order, evidence root, provider-free replay, order report, and result package bound by a direct owner event
+    experiment_class: ollama_local
+    maximum_fix_cycles: 5
+    maximum_runtime_minutes: 240
+    maximum_storage_growth_mb: 1024
+    expected_tests: experiment binding, driver, replay, report, package, and owner-event regressions green at the audited commit
+    success_criteria:
+      - exactly 144 validated terminal outcomes
+      - provider-free replay attestation covers every successful run and the terminal-ledger identity
+      - order report or canonical terminal-failure inconclusive report is packaged before evidence inventory
+      - independent RESULT_APPROVED binds the final evidence artifacts
+    failure_criteria:
+      - any coordinate is retried or omitted
+      - owner authorization, frozen identity, budget, or evidence-root binding differs at start
+      - replay, terminal census, report derivation, package verification, or result audit fails
+    evidence_required:
+      - success and tombstone terminal ledgers
+      - replay attestation
+      - order or terminal-failure report
+      - self-verifying result package and Council evidence inventory
+    requires_human: false
+    next_tasks: []
   - task_id: m7-loop-amendment
     title: Experiment-loop hardening and ollama_local automation amendment
     phase: m7-loop

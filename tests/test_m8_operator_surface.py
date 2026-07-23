@@ -39,6 +39,39 @@ def _sha256(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
+def _execution_extra(manifest, out_root):
+    """Contract-shaped owner binding for provider-free package fixtures."""
+    from coliseum.textlab.registry import _find_entry
+    entry = _find_entry(REGISTRY, EID)
+    pd = entry["planned_design"]
+    return {
+        "owner_approval_event_id": "000001-deadbeef",
+        "request_payload_hash": "f" * 64,
+        "execution_authorization": {
+            "schema_version": "execution-authorization.v1",
+            "experiment_id": EID,
+            "design_hash": entry["design_hash"],
+            "implementation_commit": result_package_mod._git_commit(),
+            "experiment_config_hash": _sha256(os.path.join(
+                REPO, "configs", "experiments",
+                "m8-phase2-live-order-sensitivity.experiment.json")),
+            "model_digests": dict(pd["model_digests"]),
+            "planned_runs": pd["expected_run_count"],
+            "budget": {"max_units": pd["expected_run_count"],
+                       "max_compute_minutes": 240,
+                       "max_wall_minutes": 240,
+                       "max_storage_mb": 1024,
+                       "max_retries_per_unit": 0,
+                       "max_scenarios": 3},
+            "evidence_root": out_root,
+            "manifest": manifest,
+            "m7_prerequisite_events": ["000001-aaaaaaaa"],
+            "source_integration_events": ["000002-bbbbbbbb"],
+            "resume_from": None,
+        },
+    }
+
+
 def _mk_pack(tmp_path, sampler_seeds=(2001, 2002)):
     """A tiny offline mock pack that passes the REAL sweep.manifest_load
     validation: run dirs with run.json/decisions.jsonl/captures.jsonl plus a
@@ -786,8 +819,7 @@ def test_authenticated_tombstone_absence_rejects_post_replay_creation(
 
 def test_result_package_builds_and_verifies(tmp_path):
     manifest, out_root, report_path = _recomputable_pack(tmp_path)
-    extra = {"suite_receipt": {"passed": 1766, "skipped": 13,
-                               "command": "python3 -m pytest -q"}}
+    extra = _execution_extra(manifest, out_root)
     # config_dir points at the m8 scenarios so the recompute can derive the
     # terminal probe d_partner
     path = build_result_package(EID, manifest, out_root, REGISTRY,
@@ -795,7 +827,7 @@ def test_result_package_builds_and_verifies(tmp_path):
                                 config_dir="configs/scenarios")
     assert path == os.path.join(out_root, "result_package.json")
     pkg = verify_result_package(path)   # raises on any mismatch
-    assert pkg["package_version"] == "2"
+    assert pkg["package_version"] == "3"
     assert pkg["experiment_id"] == EID
     # design identity from the registry (not hard-coded: the design may be
     # re-frozen pre-execution by the audit repair loop; the invariant is that
@@ -830,12 +862,57 @@ def test_result_package_builds_and_verifies(tmp_path):
     assert "git_commit" in pkg   # recorded (may be None), never hashed
 
 
+def test_terminal_tombstone_pack_closes_as_inconclusive_without_statistics(
+        tmp_path):
+    """A fully terminal 143-success/1-failure pack is completed evidence,
+    while the missing matched-success unit prevents confirmatory statistics."""
+    from coliseum.textlab.registry import load_verified_bundle
+    from coliseum.textlab.result_package import terminal_failure_report
+
+    manifest, out_root, report_path = _recomputable_pack(tmp_path)
+    with open(manifest, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh]
+    failed_row = rows.pop(0)
+    with open(manifest, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    tombstone = {
+        "regime_id": failed_row["regime_id"], "model": failed_row["model"],
+        "scenario": failed_row["scenario"],
+        "scenario_seed": failed_row["scenario_seed"],
+        "sampler_seed": failed_row["sampler_seed"],
+        "failure_kind": "timeout", "error": "frozen terminal fixture",
+        "recorded_utc": "2026-07-22T00:00:00Z",
+    }
+    with open(manifest + ".tombstones.jsonl", "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(tombstone) + "\n")
+    _write_attestation(manifest, out_root, [row["run_id"] for row in rows])
+
+    bundle = load_verified_bundle(REGISTRY, EID)
+    terminal = sweep_mod.terminal_ledgers_load(
+        manifest, out_root, planned_design=bundle.planned_design,
+        require_tombstone_regime_anchors=True)
+    report = terminal_failure_report(
+        EID, bundle.planned_design, terminal[0], terminal[1])
+    with open(report_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, sort_keys=True)
+    assert report["statistics_computed"] is False
+    assert "tv_distances" not in report
+
+    path = build_result_package(
+        EID, manifest, out_root, REGISTRY, report_path,
+        _execution_extra(manifest, out_root), config_dir="configs/scenarios")
+    pkg = verify_result_package(path)
+    assert pkg["analysis_status"] == "terminal_failure_inconclusive"
+    assert pkg["verdicts"] == {"pack": "inconclusive"}
+
+
 def test_result_package_verification_rejects_later_tombstone_creation(
         tmp_path):
-    """Package v2 authenticates that the adjacent ledger stayed absent."""
+    """Package v3 authenticates that the adjacent ledger stayed absent."""
     manifest, out_root, report_path = _recomputable_pack(tmp_path)
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, {},
+                                report_path, _execution_extra(manifest, out_root),
                                 config_dir="configs/scenarios")
     verify_result_package(path)
     open(manifest + ".tombstones.jsonl", "w", encoding="utf-8").close()
@@ -859,7 +936,8 @@ def test_result_package_locked_verifier_rejects_manifest_reference_switch(
 def test_result_package_refuses_on_tamper(tmp_path):
     manifest, out_root, report_path = _recomputable_pack(tmp_path)
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, {}, config_dir="configs/scenarios")
+                                report_path, _execution_extra(manifest, out_root),
+                                config_dir="configs/scenarios")
     # 1) tamper the package body itself
     pkg = json.load(open(path, encoding="utf-8"))
     pkg["verdicts"] = {f"llm:ollama:{MODEL}": "distributional_order_effect_observed"}
@@ -869,7 +947,8 @@ def test_result_package_refuses_on_tamper(tmp_path):
         verify_result_package(path)
     # 2) rebuild clean, then tamper a referenced artifact
     path = build_result_package(EID, manifest, out_root, REGISTRY,
-                                report_path, {}, config_dir="configs/scenarios")
+                                report_path, _execution_extra(manifest, out_root),
+                                config_dir="configs/scenarios")
     verify_result_package(path)
     with open(report_path, "a", encoding="utf-8") as fh:
         fh.write("\n")
@@ -893,7 +972,8 @@ def test_result_package_refuses_a_forged_verdict(tmp_path):
     # sanity: the untouched real pack packages cleanly (so any refusal below is
     # attributable to the tamper, not a latent pack defect)
     ok = build_result_package(EID, manifest, out_root, REGISTRY, report_path,
-                              {}, config_dir="configs/scenarios")
+                              _execution_extra(manifest, out_root),
+                              config_dir="configs/scenarios")
     verify_result_package(ok)
     os.remove(ok)
 

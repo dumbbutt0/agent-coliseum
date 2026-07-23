@@ -30,9 +30,10 @@ import subprocess
 
 from .schema import SchemaError, canonical_json
 
-PACKAGE_VERSION = "2"
+PACKAGE_VERSION = "3"
 PACKAGE_NAME = "result_package.json"
 ATTESTATION_NAME = "replay_attestation.json"
+TERMINAL_FAILURE_STATUS = "terminal_failure_inconclusive"
 # every key a per-run attestation record must carry into the package
 _RUN_HASH_KEYS = ("run_dir", "replay_ok", "run_json_sha256",
                   "decisions_sha256", "captures_sha256")
@@ -61,6 +62,43 @@ def _git_commit() -> str | None:
 
 
 _CONDITION_LABELS = ("A", "B", "C")
+
+
+def terminal_failure_report(experiment_id: str, planned_design: dict,
+                            rows: dict, tombstones: dict) -> dict:
+    """Canonical no-statistics outcome for a fully terminal pack containing
+    one or more durable failures.
+
+    A tombstone is a completed experimental outcome, but the frozen matched
+    grid is not available for confirmatory analysis.  This artifact records
+    that fact without computing or emitting any distance, interval, p-value,
+    or scientific verdict.
+    """
+    expected = planned_design.get("expected_run_count")
+    successes = len(rows)
+    failed = len(tombstones)
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected <= 0:
+        raise SchemaError(
+            f"{experiment_id}: frozen expected_run_count is unavailable")
+    if successes + failed != expected or failed <= 0:
+        raise SchemaError(
+            f"{experiment_id}: terminal-failure report requires exactly "
+            f"{expected} terminal outcomes with at least one tombstone; got "
+            f"{successes} successes and {failed} tombstones")
+    return {
+        "analysis_status": TERMINAL_FAILURE_STATUS,
+        "experiment_id": experiment_id,
+        "order_report_version": "6",
+        "expected_runs": expected,
+        "successful_runs": successes,
+        "tombstoned_runs": failed,
+        "terminal_outcomes": successes + failed,
+        "scientific_verdict": "inconclusive",
+        "statistics_computed": False,
+        "reason": ("one or more frozen coordinates ended in a durable "
+                   "failure; the complete matched-success grid is absent, "
+                   "so confirmatory analysis was not run"),
+    }
 
 
 def _recompute_order_report(experiment_id: str, registry_path: str,
@@ -164,12 +202,16 @@ def _build_result_package_locked(
     report_sha = _sha256_file(report_path)
     with open(report_path, encoding="utf-8") as fh:
         report = json.load(fh)
+    terminal_failure = report.get("analysis_status") == \
+        TERMINAL_FAILURE_STATUS
     per_agent = report.get("per_agent") or {}
     verdicts = {aid: (a or {}).get("verdict") for aid, a in per_agent.items()}
-    if not verdicts or any(v is None for v in verdicts.values()):
+    if terminal_failure:
+        verdicts = {"pack": "inconclusive"}
+    elif not verdicts or any(v is None for v in verdicts.values()):
         raise SchemaError(
-            "report carries no verdict (refusal-shaped or empty per_agent) — "
-            "a refusal is an inconclusive result and is never packaged as one")
+            "report carries no verdict: neither derived per-agent verdicts nor the "
+            "canonical terminal-failure inconclusive outcome")
     order_report_version = report.get("order_report_version")
     if not order_report_version:
         raise SchemaError("report lacks order_report_version — an unversioned "
@@ -194,7 +236,7 @@ def _build_result_package_locked(
             f"{manifest_path} hashes to {manifest_sha[:16]}… — the "
             "attestation does not attest THIS manifest")
     runs = attestation.get("runs")
-    if not isinstance(runs, dict) or not runs:
+    if not isinstance(runs, dict) or (not runs and not terminal_failure):
         raise SchemaError("replay attestation carries no per-run records")
     run_evidence = {}
     for run_id, rec in sorted(runs.items()):
@@ -228,13 +270,21 @@ def _build_result_package_locked(
     tombstone_identity = sweep.validate_terminal_ledger_attestation(
         attestation, manifest_path)
 
+    if terminal_failure:
+        expected_failure = terminal_failure_report(
+            experiment_id, pd, terminal_snapshot[0], terminal_snapshot[1])
+        if canonical_json(expected_failure) != canonical_json(report):
+            raise SchemaError(
+                f"{experiment_id}: supplied terminal-failure report does not "
+                "match the validated terminal ledgers")
+
     # d-003 finding 2: for a policy-required experiment the packaged verdict is
     # RE-DERIVED from the bound evidence, never trusted from the caller's report.
     # Recompute the order report from the current run evidence + the frozen
     # VERIFIED design and require canonical equality with the supplied report.
     # This defeats a forged verdict, a stale report, an all-fallback pack whose
     # real recomputation refuses, and a report bound to different runs.
-    if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+    if experiment_id in POLICY_REQUIRED_EXPERIMENTS and not terminal_failure:
         try:
             recomputed = _recompute_order_report(
                 experiment_id, registry_path, manifest_path, out_root,
@@ -253,8 +303,58 @@ def _build_result_package_locked(
                 "frozen verified design — the package binds a DERIVED verdict, "
                 "never a caller-authored, stale, or mis-bound one")
 
+    # Authorization is checked after all evidence/report refusal gates, so a
+    # contradictory or stale pack is still diagnosed at its first violated
+    # invariant. A valid pack cannot be written without this final owner link.
+    if experiment_id in POLICY_REQUIRED_EXPERIMENTS:
+        if set(extra) != {"owner_approval_event_id", "request_payload_hash",
+                          "execution_authorization"}:
+            raise SchemaError(
+                f"{experiment_id}: result package must bind exactly the "
+                "owner approval event, request hash, and execution authorization")
+        authorization = extra.get("execution_authorization")
+        if not isinstance(authorization, dict):
+            raise SchemaError(
+                f"{experiment_id}: execution authorization is absent")
+        expected_auth = {
+            "experiment_id": experiment_id,
+            "design_hash": entry["design_hash"],
+            "model_digests": dict(pd.get("model_digests") or {}),
+            "planned_runs": pd.get("expected_run_count"),
+        }
+        for field, expected in expected_auth.items():
+            if authorization.get(field) != expected:
+                raise SchemaError(
+                    f"{experiment_id}: packaged authorization {field} "
+                    "differs from the verified design")
+        if os.path.realpath(authorization.get("evidence_root", "")) != \
+                os.path.realpath(out_root):
+            raise SchemaError(
+                f"{experiment_id}: packaged authorization evidence_root "
+                "differs from the actual pack")
+        if os.path.realpath(authorization.get("manifest", "")) != \
+                os.path.realpath(manifest_path):
+            raise SchemaError(
+                f"{experiment_id}: packaged authorization manifest differs "
+                "from the terminal success ledger")
+        if authorization.get("implementation_commit") != _git_commit():
+            raise SchemaError(
+                f"{experiment_id}: packaged implementation commit differs "
+                "from the executing repository")
+        if not isinstance(extra.get("owner_approval_event_id"), str) or \
+                not extra["owner_approval_event_id"]:
+            raise SchemaError(
+                f"{experiment_id}: owner approval event id is absent")
+        request_hash = extra.get("request_payload_hash")
+        if not isinstance(request_hash, str) or len(request_hash) != 64 or \
+                any(c not in "0123456789abcdef" for c in request_hash):
+            raise SchemaError(
+                f"{experiment_id}: request payload hash is malformed")
+
     body = {
         "package_version": PACKAGE_VERSION,
+        "analysis_status": (TERMINAL_FAILURE_STATUS if terminal_failure
+                            else "analyzed"),
         "experiment_id": experiment_id,
         "design_hash": entry["design_hash"],
         "order_report_version": order_report_version,

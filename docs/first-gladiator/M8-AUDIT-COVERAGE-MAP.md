@@ -161,6 +161,36 @@ historical for the runtime descendant. Fresh next-ID A–E requests must bind on
 exact clean repair commit, use 7,200-second deadlines, and return five plain GOs
 before integration.
 
+### Round 9 closure and execution-enablement successor
+
+The final Round 9 repair commit
+`4a46c60e41669a160fd9a13055e791a055e112c0` received five plain same-commit
+GOs: C `002289-51064040`, A `002290-60d5ac97`, B `002291-5e1830ef`, E
+`002294-9a7aa0b5`, and D `002295-01f843d5`. Their exact integrations are A
+`002296-c5d20a5b`, B `002297-31bef759`, C `002298-c266ad9f`, D
+`002299-af00756d`, and E `002300-1c19ff2b`. The uninterrupted source suite at
+that commit observed **2,229 passed, 13 skipped**; focused M8 observed 434
+passed; M7 regenerated 18/18 byte-identically; and the changed-path allowlist
+matched exactly. No live model work occurred.
+
+The successor described in
+`docs/first-gladiator/M8-EXECUTION-AUTHORIZATION.md` is a separate source slice.
+It closes the remaining transition between an integrated M8 implementation and
+a bounded, owner-authorized execution:
+
+| Slice invariant | Owned paths |
+|---|---|
+| The owner approval directly copies the published request identity and a closed execution envelope binding design, implementation, config, model digests, 144 planned outcomes, budget, evidence namespace, M7 prerequisites, same-commit source integrations, and initial/resume mode. Publication, append, and runner boundaries cross-check the copy. | `tools/council/schemas.py`, `tools/council/cli.py`, `tools/council/events.py`, `tools/council/publish.py`, `tools/council/codex_watch.py`, `tools/autonomy/runner.py` |
+| The dedicated M8 roadmap task is bounded-runner addressable but remains ineligible for automatic selection; the separate request and owner approval are mandatory. | `configs/autonomy-roadmap.yaml`, `tools/autonomy/child_runner.py` |
+| Provider-free replay, exact terminal census, report creation, and result-package v3 verification finish before parent evidence inventory. A post-write balance refusal retains its completed sweep result only long enough to validate and package the terminal evidence. A complete tombstoned pack becomes a canonical no-statistics inconclusive outcome; an incomplete or contradictory pack refuses. | `coliseum/textlab/sweep.py`, `tools/autonomy/drivers.py`, `coliseum/textlab/result_package.py` |
+| Completion and result review bind one closed artifact record covering owner approval, request, both terminal ledgers, replay, report, package, census, and analysis status. | `tools/council/schemas.py`, `tools/autonomy/runner.py`, `coliseum/textlab/result_package.py` |
+
+Because this successor changes source behavior, every Round 9 GO and integration
+is historical for its new commit. It requires fresh applicable same-commit
+reviews and integrations before an M8 execution request can be published. That
+request must receive a separate owner approval selecting the numeric budget;
+this source slice grants no live-execution authority.
+
 ## What changed and why
 
 Phase 1 calibrated the instrument using scripted deterministic deciders. Ten

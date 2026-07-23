@@ -116,6 +116,14 @@ class SweepUnbalanced(SweepAborted):
     survivors of the lossy condition are a biased subsample), so an unbalanced
     pack is refused as unanalyzable rather than reported with a caveat."""
 
+    def __init__(self, message: str, *, completed_result=None):
+        super().__init__(message)
+        # A policy-required no-reroll sweep may already have durably recorded
+        # every success/tombstone before the balance verdict is known.  The
+        # bounded M8 driver may use this result only to close that complete
+        # terminal pack as a no-statistics inconclusive outcome.
+        self.completed_result = completed_result
+
 
 class TerminalLedgerError(SchemaError, SweepAborted):
     """A terminal-ledger snapshot is invalid for execution or derivation."""
@@ -837,7 +845,8 @@ class SweepResult:
                     f"{lo_key[1]} ({counts[lo_key]}) vs {hi_key[1]} "
                     f"({counts[hi_key]}); differential dropout is "
                     f"indistinguishable from an order effect, so this pack is "
-                    f"NOT analyzable. Per condition: {detail}")
+                    f"NOT analyzable. Per condition: {detail}",
+                    completed_result=self)
         return None
 
 

@@ -212,6 +212,9 @@ def _inject_bindings(root, verdict, request, rid, result_audit) -> None:
         for field in ("experiment_config_hash", "run_id", "run_dir",
                       "evidence_inventory_hash", "validation_report_hash"):
             verdict[field] = result_pub["payload"].get(field)
+        if result_pub["payload"].get("result_artifacts") is not None:
+            verdict["result_artifacts"] = \
+                result_pub["payload"]["result_artifacts"]
 
 
 def submit_verdict(root: str, cfg, verdict: dict,

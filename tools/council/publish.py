@@ -2,15 +2,167 @@
 requests through the atomic draft->ready lifecycle."""
 from __future__ import annotations
 
+import hashlib
 import os
 
 from tools.council import Config, events, git_state, state_machine, storage
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    TransitionError,
+                                   compute_execution_authorization_hash,
                                    compute_request_payload_hash,
                                    validate_request)
 
 SENDER = "claude"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_execution_request_bindings(root: str, request: dict,
+                                         chain: list) -> None:
+    """Cross-check an owner-bound experiment request before publication.
+
+    This is deliberately stronger than the structural request schema: it
+    resolves the target commit's actual frozen config and verified registry
+    bundle, confirms the prerequisite and source-integration events already
+    exist, and requires a fresh evidence namespace.  No directory is created.
+    """
+    authorization = request.get("execution_authorization")
+    if authorization is None:
+        return
+    repo = request["repository"]
+    config_rel = request["experiment_config_file"]
+    config_path = os.path.join(repo, config_rel)
+    try:
+        config_hash = _sha256_file(config_path)
+        from tools.council.strictjson import loads_strict
+        with open(config_path, "rb") as fh:
+            config = loads_strict(fh.read(), max_bytes=1_048_576)
+    except (OSError, CouncilError) as exc:
+        raise SchemaViolation(
+            f"execution config cannot be verified: {exc}") from exc
+    if config_hash != authorization["experiment_config_hash"]:
+        raise SchemaViolation(
+            "execution config bytes do not match execution_authorization")
+    exact = {
+        "experiment_id": config.get("experiment_id"),
+        "design_hash": config.get("design_hash"),
+        "model_digests": config.get("model_digests"),
+        "planned_runs": config.get("expected_run_count"),
+        "evidence_root": config.get("out_root"),
+        "manifest": config.get("manifest"),
+    }
+    for field, observed in exact.items():
+        if authorization[field] != observed:
+            raise SchemaViolation(
+                f"execution_authorization {field} differs from the frozen "
+                "experiment config")
+    if config.get("task_id") != authorization["experiment_id"]:
+        raise SchemaViolation(
+            "frozen config task_id must equal the authorized experiment_id")
+    if config.get("scenario_count") != \
+            authorization["budget"]["max_scenarios"]:
+        raise SchemaViolation(
+            "authorized max_scenarios must equal the frozen scenario_count")
+    if config.get("retries_per_unit") != \
+            authorization["budget"]["max_retries_per_unit"]:
+        raise SchemaViolation(
+            "authorized retry cap must equal frozen retries_per_unit")
+
+    registry_path = os.path.join(repo, "configs", "registry",
+                                 "experiments.yaml")
+    try:
+        from coliseum.textlab.registry import load_verified_bundle
+        bundle = load_verified_bundle(registry_path,
+                                      authorization["experiment_id"])
+    except Exception as exc:
+        raise SchemaViolation(
+            f"verified frozen bundle unavailable: {exc}") from exc
+    if bundle.design_hash != authorization["design_hash"] or \
+            bundle.planned_design.get("model_digests") != \
+            authorization["model_digests"] or \
+            bundle.planned_design.get("expected_run_count") != \
+            authorization["planned_runs"]:
+        raise SchemaViolation(
+            "verified registry bundle differs from execution_authorization")
+
+    by_id = {e["event_id"]: e for e in chain}
+    m7_events = authorization["m7_prerequisite_events"]
+    if len(m7_events) != 3:
+        raise SchemaViolation(
+            "M8 execution requires exactly three M7 prerequisite GO events")
+    for event_id in m7_events:
+        event = by_id.get(event_id)
+        if event is None or event["event_type"] != "AUDIT_GO":
+            raise SchemaViolation(
+                f"M7 prerequisite {event_id} is not an AUDIT_GO event")
+    integration_events = authorization["source_integration_events"]
+    if len(integration_events) != 5:
+        raise SchemaViolation(
+            "M8 execution requires exactly five final source integrations")
+    integration_requests = set()
+    for event_id in integration_events:
+        event = by_id.get(event_id)
+        if event is None or event["event_type"] != "CHANGE_INTEGRATED" or \
+                event["target_commit"] != request["target_commit"]:
+            raise SchemaViolation(
+                f"source integration {event_id} does not bind the target commit")
+        integration_requests.add(event["request_id"])
+    if len(integration_requests) != 5:
+        raise SchemaViolation(
+            "source integration events must cover five distinct requests")
+
+    evidence_abs = os.path.join(repo, authorization["evidence_root"])
+    manifest_abs = os.path.join(repo, authorization["manifest"])
+    resume_from = authorization["resume_from"]
+    if resume_from is None:
+        if os.path.lexists(evidence_abs) or os.path.lexists(manifest_abs):
+            raise SchemaViolation(
+                "owner-bound evidence root and manifest must be absent at "
+                "initial request publication")
+    else:
+        approval = by_id.get(resume_from["owner_approval_event_id"])
+        if approval is None or approval["event_type"] != \
+                "EXPERIMENT_APPROVED" or approval["request_id"] != \
+                resume_from["request_id"]:
+            raise SchemaViolation(
+                "resume_from does not identify a prior owner approval event")
+        prior_auth = approval.get("payload", {}).get(
+            "execution_authorization")
+        if not isinstance(prior_auth, dict):
+            raise SchemaViolation(
+                "resume_from approval carries no bound execution authorization")
+        comparable = {k: v for k, v in authorization.items()
+                      if k != "resume_from"}
+        prior_comparable = {k: v for k, v in prior_auth.items()
+                            if k != "resume_from"}
+        if comparable != prior_comparable:
+            raise SchemaViolation(
+                "resume authorization differs from the prior approved pack")
+        # Project only the referenced request.  Prerequisite GO and source
+        # integration ids are independently checked above and need not form a
+        # self-contained synthetic history when this helper is unit-tested.
+        prior_lineage = [
+            event for event in chain
+            if event.get("request_id") == resume_from["request_id"]
+        ]
+        projected = state_machine.project(prior_lineage)
+        if projected.get(resume_from["request_id"], {}).get("state") != \
+                state_machine.AUTONOMY_PAUSED:
+            raise SchemaViolation(
+                "resume_from request is not in autonomy_paused state")
+        terminal_exists = (os.path.isfile(manifest_abs) or
+                           os.path.isfile(manifest_abs +
+                                          ".tombstones.jsonl"))
+        if not os.path.isdir(evidence_abs) or not terminal_exists:
+            raise SchemaViolation(
+                "resume requires the existing evidence root and at least one "
+                "terminal ledger; it never starts a replacement namespace")
 
 
 def record_build_started(root: str, cfg: Config, request_id: str,
@@ -78,6 +230,7 @@ def publish_request(root: str, cfg: Config, request: dict,
                               "before publishing an audit request")
 
     chain = events.read_chain(root)
+    _validate_execution_request_bindings(root, request, chain)
     if autonomous:
         _check_scope_not_expanded(chain, request)
     projection = state_machine.project(chain)
@@ -123,14 +276,21 @@ def publish_request(root: str, cfg: Config, request: dict,
     os.rename(draft_tmp, ready_path)
 
     try:
+        publication_payload = {
+            "request_payload_hash": request["request_payload_hash"],
+            "request_file": f"requests/ready/{rid}.json",
+            "scope": request["scope"],
+            "expected_test_command": request["expected_test_command"],
+            "expected_test_count": request["expected_test_count"],
+            "blockers_addressed": request["blockers_addressed"],
+        }
+        if request.get("execution_authorization") is not None:
+            publication_payload["execution_authorization_hash"] = \
+                compute_execution_authorization_hash(
+                    request["execution_authorization"])
         event = events.append_event(
             root, cfg, event_type, SENDER, rid, repo, target,
-            {"request_payload_hash": request["request_payload_hash"],
-             "request_file": f"requests/ready/{rid}.json",
-             "scope": request["scope"],
-             "expected_test_command": request["expected_test_command"],
-             "expected_test_count": request["expected_test_count"],
-             "blockers_addressed": request["blockers_addressed"]})
+            publication_payload)
     except (CouncilError, OSError):
         # the append is the authority; roll the file back so no unpinned
         # request ever sits in ready/. A crash/OSError mid-append (not only a

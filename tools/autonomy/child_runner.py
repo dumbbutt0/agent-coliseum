@@ -22,6 +22,7 @@ def main(argv=None) -> int:
     parser.add_argument("--driver", required=True)
     parser.add_argument("--deadline-seconds", type=float, required=True)
     parser.add_argument("--result-file", required=True)
+    parser.add_argument("--execution-context-file", default=None)
     args = parser.parse_args(argv)
 
     from tools.autonomy.drivers import DRIVERS
@@ -33,8 +34,14 @@ def main(argv=None) -> int:
             from tools.council.strictjson import loads_strict
             with open(args.config, "rb") as fh:
                 config = loads_strict(fh.read(), max_bytes=1_048_576)
+            execution_context = None
+            if args.execution_context_file:
+                with open(args.execution_context_file, "rb") as fh:
+                    execution_context = loads_strict(
+                        fh.read(), max_bytes=1_048_576)
             deadline = time.monotonic() + args.deadline_seconds
-            outcome = driver(args.repo, config, deadline)
+            outcome = driver(args.repo, config, deadline,
+                             execution_context=execution_context)
             result = {"ok": True, "outcome": outcome}
         except Exception as exc:  # the parent decides what a failure means
             result = {"ok": False,
