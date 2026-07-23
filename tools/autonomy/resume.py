@@ -42,6 +42,13 @@ NEXT_ACTION = {
     "awaiting_human": ("human", "owner approval required: python3 -m "
                                 "tools.council.cli --role human approve "
                                 "<id> --commit <bound commit>"),
+    "awaiting_result_handoff_owner": (
+        "human", "owner result-handoff approval required: python3 -m "
+        "tools.council.cli --role human approve-result-handoff <id> "
+        "--commit <bound commit>"),
+    "result_handoff_approved": (
+        "claude", "build the provider-free closure bundle: python3 -m "
+        "tools.council.cli --role claude result-handoff --request-id <id>"),
     "approved": ("claude", "run the human-approved task: python3 -m "
                            "tools.autonomy.cli run-task --request-id <id> "
                            "--config <frozen experiment config>"),
@@ -93,9 +100,36 @@ def compute_resume(cfg: Config, roadmap_path: str | None = None) -> dict:
     out["flags"] = state_machine.global_flags(requests)
 
     out["requests"] = {}
+    approved_m8_results = {}
+    for event in chain:
+        if event["event_type"] != "RESULT_HANDOFF_READY":
+            continue
+        request = event.get("payload", {}).get("request", {})
+        artifacts = request.get("result_artifacts", {})
+        source_id = artifacts.get("source_request_id")
+        if artifacts.get("profile_id") == \
+                "m8_budget_exhausted_incomplete_handoff.v1" and \
+                requests.get(event["request_id"], {}).get("state") == \
+                state_machine.RESULT_APPROVED:
+            approved_event = next((
+                item for item in reversed(chain)
+                if item["request_id"] == event["request_id"] and
+                item["event_type"] == "RESULT_APPROVED"), None)
+            if source_id and approved_event:
+                approved_m8_results[source_id] = (
+                    event["request_id"], approved_event["event_id"])
     for rid, req in sorted(requests.items()):
         state = req["state"]
         actor, action = NEXT_ACTION.get(state, ("?", "unknown state"))
+        if state == state_machine.AUTONOMY_PAUSED and \
+                rid in approved_m8_results:
+            result_id, result_event = approved_m8_results[rid]
+            actor = "human"
+            action = (
+                "close the paused M8 lifecycle: python3 -m "
+                "tools.council.cli --role human close-paused-result "
+                f"{rid} --result-request {result_id} "
+                f"--result-event {result_event}")
         out["requests"][rid] = {
             "state": state,
             "target_commit": req["target_commit"],

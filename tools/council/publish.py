@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 
-from tools.council import Config, events, git_state, state_machine, storage
+from tools.council import (
+    Config, events, git_state, locking, state_machine, storage)
 from tools.council.schemas import (CouncilError, SchemaViolation,
                                    TransitionError,
                                    compute_execution_authorization_hash,
@@ -230,53 +231,43 @@ def publish_request(root: str, cfg: Config, request: dict,
         raise SchemaViolation("working tree is dirty — commit or stash "
                               "before publishing an audit request")
 
-    chain = events.read_chain(root)
-    _validate_execution_request_bindings(root, request, chain)
-    if autonomous:
-        _check_scope_not_expanded(chain, request)
-    projection = state_machine.project(chain)
-    # bounded loops: at most five build-audit cycles per request
-    cycles = projection.get(
-        request["request_id"], {"audit_cycles": 0})["audit_cycles"]
-    if cycles >= 5:
-        raise TransitionError(
-            f"request {request['request_id']!r} already ran {cycles} "
-            "build-audit cycles — the bounded-loop limit is five; "
-            "escalate to the owner")
     storage.ensure_layout(root)
     rid = request["request_id"]
-    ready_path = storage.safe_request_path(root, "ready", rid)
-    claimed_path = storage.safe_request_path(root, "claimed", rid)
-    complete_path = storage.safe_request_path(root, "complete", rid)
-    for existing in (ready_path, claimed_path, complete_path):
-        if os.path.exists(existing):
-            raise SchemaViolation(
-                f"request {rid!r} already exists at {existing} — request ids "
-                "are single-use")
-
-    # a refused transition must never leave an unpinned orphan in ready/
-    # (2026-07-11 wart: the rename used to precede this check): verify the
-    # projected state allows the publish event BEFORE any file lands
-    event_type = "READY_FOR_REAUDIT" if reaudit else "AUDIT_REQUESTED"
-    allowed_from, _to = state_machine.TRANSITIONS[event_type]
-    projected_state = projection.get(rid, {"state": "none"})["state"]
-    if projected_state not in allowed_from:
-        raise TransitionError(
-            f"{event_type} not allowed from state {projected_state!r} for "
-            f"request {rid!r} (allowed from: {sorted(allowed_from)})")
-
-    draft_tmp = storage.safe_request_path(root, "draft", rid) + ".tmp"
-    with open(draft_tmp, "w", encoding="utf-8") as fh:
-        from tools.council.schemas import canonical_json
-        fh.write(canonical_json(request) + "\n")
-        try:
-            fh.flush()
-            os.fsync(fh.fileno())
-        except OSError:
-            pass
-    os.rename(draft_tmp, ready_path)
-
+    publication_lock = locking.acquire(
+        root, rid, SENDER, rid, kind="request_publication")
     try:
+        chain = events.read_chain(root)
+        _validate_execution_request_bindings(root, request, chain)
+        if autonomous:
+            _check_scope_not_expanded(chain, request)
+        projection = state_machine.project(chain)
+        # bounded loops: at most five build-audit cycles per request
+        cycles = projection.get(rid, {"audit_cycles": 0})["audit_cycles"]
+        if cycles >= 5:
+            raise TransitionError(
+                f"request {rid!r} already ran {cycles} build-audit cycles — "
+                "the bounded-loop limit is five; escalate to the owner")
+        ready_path = storage.safe_request_path(root, "ready", rid)
+        claimed_path = storage.safe_request_path(root, "claimed", rid)
+        complete_path = storage.safe_request_path(root, "complete", rid)
+        for existing in (ready_path, claimed_path, complete_path):
+            if os.path.exists(existing):
+                raise SchemaViolation(
+                    f"request {rid!r} already exists at {existing} — "
+                    "request ids are single-use")
+
+        # A refused transition must never leave an unpinned orphan in ready/.
+        # This cheap state check runs before any file lands; the authoritative
+        # state-machine check still runs inside append_event.
+        event_type = "READY_FOR_REAUDIT" if reaudit else "AUDIT_REQUESTED"
+        allowed_from, _to = state_machine.TRANSITIONS[event_type]
+        projected_state = projection.get(rid, {"state": "none"})["state"]
+        if projected_state not in allowed_from:
+            raise TransitionError(
+                f"{event_type} not allowed from state "
+                f"{projected_state!r} for request {rid!r} "
+                f"(allowed from: {sorted(allowed_from)})")
+
         publication_payload = {
             "request_payload_hash": request["request_payload_hash"],
             "request_file": f"requests/ready/{rid}.json",
@@ -289,45 +280,88 @@ def publish_request(root: str, cfg: Config, request: dict,
             publication_payload["execution_authorization_hash"] = \
                 compute_execution_authorization_hash(
                     request["execution_authorization"])
-        event = events.append_event(
-            root, cfg, event_type, SENDER, rid, repo, target,
-            publication_payload)
-    except (CouncilError, OSError):
-        # the append is the authority; roll the file back so no unpinned
-        # request ever sits in ready/. A crash/OSError mid-append (not only a
-        # CouncilError refusal) must trigger the same rollback — but ONLY if
-        # the authority event did NOT land: if the event is durably in the
-        # chain and a LATER step failed, the request IS published and the
-        # ready file must stay (all-or-nothing, both directions).
-        landed = any(e["event_type"] == event_type and e["request_id"] == rid
-                     for e in events.read_chain(root))
-        if not landed:
+
+        from tools.council.schemas import canonical_json
+        request_blob = (canonical_json(request) + "\n").encode("utf-8")
+        draft_tmp = storage.safe_request_path(root, "draft", rid) + ".tmp"
+        try:
+            with open(draft_tmp, "wb") as fh:
+                fh.write(request_blob)
+                try:
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            os.rename(draft_tmp, ready_path)
             try:
-                os.unlink(ready_path)
+                event = events.append_event(
+                    root, cfg, event_type, SENDER, rid, repo, target,
+                    publication_payload)
+            except (CouncilError, OSError):
+                # The request lock proves this call owns the path. The
+                # pre-attempt chain is the publication boundary: a historical
+                # event can never make this attempt appear to have landed.
+                # If chain verification or prefix identity is uncertain,
+                # preserve the file and fail closed.
+                after = None
+                try:
+                    candidate = events.read_chain(root)
+                    if len(candidate) >= len(chain) and all(
+                            candidate[index]["event_hash"] ==
+                            prior["event_hash"]
+                            for index, prior in enumerate(chain)):
+                        after = candidate
+                except (CouncilError, OSError):
+                    pass
+                landed = after is not None and any(
+                    item["event_type"] == event_type and
+                    item["request_id"] == rid and
+                    item["sender"] == SENDER and
+                    item["repository"] == repo and
+                    item["target_commit"] == target and
+                    item["payload"] == publication_payload
+                    for item in after[len(chain):])
+                if after is not None and not landed:
+                    owned = False
+                    try:
+                        with open(ready_path, "rb") as fh:
+                            owned = fh.read() == request_blob
+                    except OSError:
+                        pass
+                    if owned:
+                        try:
+                            os.unlink(ready_path)
+                        except OSError:
+                            pass
+                raise
+        finally:
+            try:
+                os.unlink(draft_tmp)
             except OSError:
                 pass
-        raise
 
-    scope_lines = "\n".join(f"  {i}. {s}" for i, s in
-                            enumerate(request["scope"], 1))
-    storage.append_log_md(root, "claude", (
-        f"**{'Re-audit' if reaudit else 'Audit'} request published "
-        f"(structured): `{rid}`** — mirror of "
-        f"`requests/ready/{rid}.json` + event `{event['event_id']}` in "
-        "`events.jsonl` (authoritative).\n\n"
-        f"- target_commit: `{target}` (clean tree required)\n"
-        f"- expected: `{request['expected_test_command']}` -> "
-        f"**{request['expected_test_count']} passed**\n"
-        f"- originating blocked commit: "
-        f"`{request['originating_blocked_commit']}`\n"
-        f"- scope:\n{scope_lines}\n"
-        f"- live_experiment_allowed: false; human_approval_required: "
-        f"{str(request['human_approval_required']).lower()}\n\n"
-        "Codex: claim via `python3 -m tools.council.codex_watch --claim "
-        f"{rid}` (or atomically create `locks/{rid}.lock` and move the "
-        "request to `requests/claimed/`), audit the exact commit, then "
-        "submit a structured verdict."))
-    return event
+        scope_lines = "\n".join(f"  {i}. {s}" for i, s in
+                                enumerate(request["scope"], 1))
+        storage.append_log_md(root, "claude", (
+            f"**{'Re-audit' if reaudit else 'Audit'} request published "
+            f"(structured): `{rid}`** — mirror of "
+            f"`requests/ready/{rid}.json` + event `{event['event_id']}` in "
+            "`events.jsonl` (authoritative).\n\n"
+            f"- target_commit: `{target}` (clean tree required)\n"
+            f"- expected: `{request['expected_test_command']}` -> "
+            f"**{request['expected_test_count']} passed**\n"
+            f"- originating blocked commit: "
+            f"`{request['originating_blocked_commit']}`\n"
+            f"- scope:\n{scope_lines}\n"
+            f"- live_experiment_allowed: false; human_approval_required: "
+            f"{str(request['human_approval_required']).lower()}\n\n"
+            "Codex: claim via `python3 -m tools.council.codex_watch --claim "
+            f"{rid}` (or atomically create `locks/{rid}.lock` and move the "
+            "request to `requests/claimed/`), audit the exact commit, then "
+            "submit a structured verdict."))
+        return event
+    finally:
+        locking.release(publication_lock)
 
 
 def read_request(root: str, request_id: str) -> dict:

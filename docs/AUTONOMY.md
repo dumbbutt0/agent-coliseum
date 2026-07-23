@@ -93,6 +93,32 @@ in the dedicated council-protocol-delta-001 audit; the generic `cli record`
 workaround is no longer needed.) After RESULT_APPROVED lands, the Claude
 watcher wakes and records NEXT_MILESTONE_READY, completing the task.
 
+### Owner-gated incomplete result handoffs
+
+The M8 budget-exhaustion profile is a result disposition, not a continuation
+of the stopped execution. Its new request follows:
+
+```
+RESULT_HANDOFF_APPROVAL_REQUIRED
+  -> RESULT_HANDOFF_APPROVED (owner token)
+  -> RESULT_HANDOFF_READY
+  -> RESULT_AUDIT_REQUESTED
+  -> RESULT_APPROVED or RESULT_BLOCKED
+```
+
+The first event records a closed authorization and writes no derived file.
+Only the distinct owner result-handoff approval allows the provider-free
+builder to create its deterministic six-file bundle. It cannot satisfy an
+experiment approval, cannot start a model, and cannot authorize a retry. The
+historical Society result handoff retains its original
+`RESULT_HANDOFF_READY`-from-`none` lifecycle.
+
+After an M8 incomplete result is independently approved, deterministic resume
+directs the owner to `close-paused-result`. That human-token event cancels the
+original paused lifecycle while preserving every captured byte. Result
+approval certifies only the evidence handling and inconclusive outcome; it
+does not approve either M8 hypothesis branch.
+
 ## Roadmap
 
 Strict YAML subset (stdlib parser, `tools/autonomy/roadmap.py`): 2-space
@@ -167,7 +193,8 @@ owner's passphrase derives an S/KEY hash chain (`tools/council/
 identity.py`); the council stores only the tip verifier
 (`council/identity/human-tip.json`), and the tip is pinned into the event
 chain by `HUMAN_IDENTITY_INITIALIZED`/`ROTATED`. Every human-authority
-event (`EXPERIMENT_APPROVED`, `CONDITIONS_SATISFIED`, human
+event (`EXPERIMENT_APPROVED`, `RESULT_HANDOFF_APPROVED`,
+`CONDITIONS_SATISFIED`, human
 `REQUEST_CANCELED`, `STATUS_CHANGED`, `POLICY_INITIALIZED`,
 `HUMAN_IDENTITY_ROTATED`) carries the next preimage, bound to the exact
 action, verified and BURNED inside the events lock before the line lands

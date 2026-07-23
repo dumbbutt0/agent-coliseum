@@ -20,6 +20,7 @@ from tools.council import (events, get_config, identity, locking, policy,
                            state_machine, storage,
                            strictjson)
 from tools.council.schemas import (CouncilError, SchemaViolation,
+                                   TransitionError,
                                    EXECUTION_APPROVAL_SCHEMA,
                                    validate_commit, validate_request_id)
 
@@ -92,11 +93,54 @@ def cmd_init(args) -> int:
 
 def cmd_result_handoff(args) -> int:
     cfg, root = _cfg(args)
+    if getattr(args, "request_id", None):
+        from tools.council import m8_incomplete_handoff
+        event = m8_incomplete_handoff.publish_approved(
+            root, cfg, args.request_id)
+        print(f"result audit published for {args.request_id} "
+              f"(event {event['event_id']})")
+        return 0
     with open(args.file, "rb") as fh:
         request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
     event = result_handoff.publish_handoff(
         root, cfg, request, correction=args.command == "result-fix-ready")
     print(f"result audit published for {request['request_id']} "
+          f"(event {event['event_id']})")
+    return 0
+
+
+def cmd_propose_m8_incomplete_handoff(args) -> int:
+    if args.role != "claude":
+        raise SchemaViolation(
+            "propose-m8-incomplete-handoff requires --role claude")
+    cfg, root = _cfg(args)
+    from tools.council import m8_incomplete_handoff
+    event = m8_incomplete_handoff.propose(
+        root, cfg, args.request_id, validate_commit(args.commit),
+        args.max_compute_minutes, args.max_wall_minutes,
+        args.max_storage_mb)
+    print(f"M8 incomplete handoff awaits owner approval "
+          f"(event {event['event_id']})")
+    return 0
+
+
+def cmd_approve_result_handoff(args) -> int:
+    if args.role != "human":
+        raise SchemaViolation(
+            "approve-result-handoff is an owner action: --role human")
+    cfg, root = _cfg(args)
+    validate_request_id(args.request_id)
+    commit = validate_commit(args.commit)
+    from tools.council import m8_incomplete_handoff
+    payload_core = m8_incomplete_handoff.approval_payload(
+        events.read_chain(root), args.request_id, commit)
+    token = _maybe_human_token(
+        root, args, "RESULT_HANDOFF_APPROVED", args.request_id,
+        commit, payload_core)
+    event = events.append_event(
+        root, cfg, "RESULT_HANDOFF_APPROVED", "human", args.request_id,
+        cfg.repo_roots[0], commit, _with_token(payload_core, token))
+    print(f"approved result handoff {args.request_id} at {commit[:12]} "
           f"(event {event['event_id']})")
     return 0
 
@@ -244,12 +288,35 @@ def cmd_publish_request(args) -> int:
     cfg, root = _cfg(args)
     with open(args.file, "rb") as fh:
         request = strictjson.loads_strict(fh.read(), max_bytes=262_144)
+    cycles = state_machine.project(events.read_chain(root)).get(
+        request.get("request_id"), {"audit_cycles": 0})["audit_cycles"]
+    slice_reaudit = request.get("request_id") in \
+        state_machine.M8_CLOSURE_SOURCE_REQUESTS
+    if slice_reaudit and cycles and not args.reaudit:
+        raise TransitionError(
+            "a previously published request requires --reaudit")
+    if slice_reaudit and not cycles and args.reaudit:
+        raise TransitionError(
+            "--reaudit requires a prior audit publication")
     event = publish.publish_request(root, cfg, request,
                                     reaudit=args.reaudit,
                                     autonomous=args.autonomous)
     print(f"published {request['request_id']} -> "
           f"requests/ready/{request['request_id']}.json "
           f"(event {event['event_id']}, {event['event_type']})")
+    return 0
+
+
+def cmd_supersede_audit(args) -> int:
+    if args.role != "claude":
+        raise SchemaViolation("supersede-audit requires --role claude")
+    cfg, root = _cfg(args)
+    from tools.council import m8_incomplete_handoff
+    event = m8_incomplete_handoff.supersede_source_audit(
+        root, cfg, validate_request_id(args.request_id), args.repository,
+        validate_commit(args.commit), args.reason, args.controlling_event)
+    print(f"superseded source audit {args.request_id} "
+          f"(event {event['event_id']})")
     return 0
 
 
@@ -387,6 +454,35 @@ def cmd_cancel(args) -> int:
                                 request["target_commit"],
                                 _with_token(payload_core, token))
     print(f"canceled {args.request_id} (event {event['event_id']})")
+    return 0
+
+
+def cmd_close_paused_result(args) -> int:
+    if args.role != "human":
+        raise SchemaViolation(
+            "close-paused-result is an owner action: --role human")
+    if args.request_id != \
+            "first-gladiator-m8-phase2-live-001":
+        raise SchemaViolation("close-paused-result names the frozen M8 request")
+    cfg, root = _cfg(args)
+    from tools.council import m8_incomplete_handoff
+    chain = events.read_chain(root)
+    payload_core = m8_incomplete_handoff.source_close_payload(
+        chain, args.result_request, args.result_event)
+    source = next((event for event in chain
+                   if event["request_id"] == args.request_id and
+                   event["event_type"] == "EXPERIMENT_STARTED"), None)
+    if source is None:
+        raise SchemaViolation("paused source has no start event")
+    token = _maybe_human_token(
+        root, args, "REQUEST_CANCELED", args.request_id,
+        source["target_commit"], payload_core)
+    event = events.append_event(
+        root, cfg, "REQUEST_CANCELED", "human", args.request_id,
+        source["repository"], source["target_commit"],
+        _with_token(payload_core, token))
+    print(f"closed paused M8 request with approved incomplete result "
+          f"(event {event['event_id']})")
     return 0
 
 
@@ -793,11 +889,29 @@ def main(argv=None) -> int:
     p.add_argument("--file", required=True)
     p.add_argument("--reaudit", action="store_true")
     p.add_argument("--autonomous", action="store_true")
+    p = sub.add_parser("supersede-audit")
+    p.add_argument("request_id")
+    p.add_argument("--repository", required=True)
+    p.add_argument("--commit", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--controlling-event", required=True)
 
     p = sub.add_parser("result-handoff")
-    p.add_argument("--file", required=True)
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--file")
+    group.add_argument("--request-id")
     p = sub.add_parser("result-fix-ready")
     p.add_argument("--file", required=True)
+    p = sub.add_parser("propose-m8-incomplete-handoff")
+    p.add_argument("request_id")
+    p.add_argument("--commit", required=True)
+    p.add_argument("--max-compute-minutes", type=int, required=True)
+    p.add_argument("--max-wall-minutes", type=int, required=True)
+    p.add_argument("--max-storage-mb", type=int, required=True)
+    p = sub.add_parser("approve-result-handoff")
+    p.add_argument("request_id")
+    p.add_argument("--commit", required=True)
+    p.add_argument("--token-file", dest="token_file", default=None)
 
     p = sub.add_parser("record")
     p.add_argument("--type", required=True)
@@ -845,6 +959,11 @@ def main(argv=None) -> int:
     p.add_argument("request_id")
     p.add_argument("--reason", required=True)
     p.add_argument("--token-file", dest="token_file", default=None)
+    p = sub.add_parser("close-paused-result")
+    p.add_argument("request_id")
+    p.add_argument("--result-request", required=True)
+    p.add_argument("--result-event", required=True)
+    p.add_argument("--token-file", dest="token_file", default=None)
 
     p = sub.add_parser("clear-lock")
     p.add_argument("name")
@@ -858,8 +977,12 @@ def main(argv=None) -> int:
                 "locate-resume-checkpoint": cmd_locate_resume_checkpoint,
                 "rebuild-state": cmd_rebuild_state,
                 "publish-request": cmd_publish_request,
+                "supersede-audit": cmd_supersede_audit,
                 "result-handoff": cmd_result_handoff,
                 "result-fix-ready": cmd_result_handoff,
+                "propose-m8-incomplete-handoff":
+                    cmd_propose_m8_incomplete_handoff,
+                "approve-result-handoff": cmd_approve_result_handoff,
                 "record": cmd_record, "approve": cmd_approve,
                 "approve-conditions": cmd_approve_conditions,
                 "identity-init": cmd_identity_init,
@@ -868,6 +991,7 @@ def main(argv=None) -> int:
                 "identity-rotate": cmd_identity_rotate,
                 "status-set": cmd_status_set,
                 "cancel": cmd_cancel, "clear-lock": cmd_clear_lock,
+                "close-paused-result": cmd_close_paused_result,
                 "milestone-status": cmd_milestone_status,
                 "verify-evidence": cmd_verify_evidence,
                 "chain-report": cmd_chain_report,

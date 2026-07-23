@@ -229,6 +229,33 @@ def test_replay_pack_invalid_registry_removes_stale_receipt(tmp_path):
     assert not os.path.exists(attestation_path)
 
 
+def test_replay_core_is_deterministic_and_performs_no_write(
+        tmp_path, monkeypatch):
+    manifest, out_root, run_ids = _mk_pack(tmp_path)
+    monkeypatch.setattr(
+        sweep_mod, "verify_run_replay",
+        lambda _run_dir, _config_dir: (True, "byte-identical"))
+    planned = {
+        "models": [MODEL],
+        "scenarios": list(SCENARIOS),
+        "scenario_seeds": [42],
+        "sampler_seeds": [2001, 2002],
+    }
+    boundaries = []
+    with sweep_mod._manifest_advisory_lock(manifest) as locked:
+        first = sweep_mod.build_pack_replay_core_locked(
+            locked, out_root, "configs/scenarios", planned,
+            progress_check=lambda: boundaries.append("checked"))
+        second = sweep_mod.build_pack_replay_core_locked(
+            locked, out_root, "configs/scenarios", planned)
+    assert first == second
+    assert set(first) == {"manifest_sha256", "tombstone_ledger", "runs"}
+    assert set(first["runs"]) == set(run_ids)
+    assert len(boundaries) == 2 * len(run_ids)
+    assert not os.path.exists(os.path.join(
+        out_root, "replay_attestation.json"))
+
+
 # --------------------------------------------------------------- order-report
 
 def _order_report_argv(manifest, out_root):

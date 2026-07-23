@@ -32,6 +32,8 @@ RESULT_VALIDATION = "result_validation"
 RESULT_AUDIT = "result_audit"
 RESULT_APPROVED = "result_approved"
 RESULT_BLOCKED = "result_blocked"
+AWAITING_RESULT_HANDOFF_OWNER = "awaiting_result_handoff_owner"
+RESULT_HANDOFF_OWNER_APPROVED = "result_handoff_approved"
 INTEGRATED = "integrated"
 NEXT_MILESTONE_READY = "next_milestone_ready"
 CANCELED = "canceled"
@@ -39,11 +41,24 @@ AUTONOMY_PAUSED = "autonomy_paused"
 MILESTONE_REACHED = "milestone_reached"
 
 TERMINAL_STATES = frozenset({CANCELED, MILESTONE_REACHED})
+M8_CLOSURE_SOURCE_REQUESTS = frozenset({
+    "first-gladiator-m8-incomplete-closure-a-001",
+    "first-gladiator-m8-incomplete-closure-b-001",
+    "first-gladiator-m8-incomplete-closure-c-001",
+    "first-gladiator-m8-incomplete-closure-d-001",
+    "first-gladiator-m8-incomplete-closure-e-001",
+})
 
 # event_type -> (allowed source states, destination state)
 TRANSITIONS = {
     "BUILD_STARTED": (frozenset({NONE}), BUILDING),
-    "FIX_STARTED": (frozenset({BUILDING, BLOCKED, RESULT_BLOCKED}), FIXING),
+    # A semantic descendant may supersede an unclaimed publication or an
+    # unintegrated GO. This is a conservative rewind: it discards authority
+    # and requires BUILD_READY plus a fresh same-commit audit before anything
+    # can integrate. CLAIMED remains excluded so an active auditor must first
+    # submit exactly one terminal verdict.
+    "FIX_STARTED": (
+        frozenset({BUILDING, REQUESTED, BLOCKED, GO, RESULT_BLOCKED}), FIXING),
     "BUILD_READY": (frozenset({BUILDING, FIXING}), READY),
     "AUDIT_REQUESTED": (frozenset({READY}), REQUESTED),
     "READY_FOR_REAUDIT": (frozenset({READY}), REQUESTED),
@@ -62,7 +77,16 @@ TRANSITIONS = {
                             EXPERIMENT_COMPLETE),
     "RESULT_VALIDATION_REQUIRED": (frozenset({EXPERIMENT_COMPLETE}),
                                    RESULT_VALIDATION),
-    "RESULT_HANDOFF_READY": (frozenset({NONE}), RESULT_VALIDATION),
+    "RESULT_HANDOFF_APPROVAL_REQUIRED": (
+        frozenset({NONE}), AWAITING_RESULT_HANDOFF_OWNER),
+    "RESULT_HANDOFF_APPROVED": (
+        frozenset({AWAITING_RESULT_HANDOFF_OWNER}),
+        RESULT_HANDOFF_OWNER_APPROVED),
+    # Historical result handoffs begin from NONE. The M8 incomplete profile
+    # is narrowed below in check(): its owner-gated ready event begins only
+    # from RESULT_HANDOFF_OWNER_APPROVED.
+    "RESULT_HANDOFF_READY": (
+        frozenset({NONE, RESULT_HANDOFF_OWNER_APPROVED}), RESULT_VALIDATION),
     "RESULT_FIX_READY": (frozenset({NONE}), RESULT_VALIDATION),
     "RESULT_AUDIT_REQUESTED": (frozenset({RESULT_VALIDATION}), RESULT_AUDIT),
     "RESULT_APPROVED": (frozenset({RESULT_AUDIT}), RESULT_APPROVED),
@@ -113,13 +137,44 @@ _BOUND_FROM = frozenset({REQUESTED, CLAIMED, BLOCKED, GO, POLICY_VALIDATION,
                          AUTO_APPROVED, AWAITING_HUMAN, APPROVED,
                          EXPERIMENT_RUNNING, EXPERIMENT_COMPLETE,
                          RESULT_VALIDATION, RESULT_AUDIT, RESULT_APPROVED,
-                         RESULT_BLOCKED, INTEGRATED, NEXT_MILESTONE_READY})
+                         RESULT_BLOCKED, INTEGRATED, NEXT_MILESTONE_READY,
+                         AWAITING_RESULT_HANDOFF_OWNER,
+                         RESULT_HANDOFF_OWNER_APPROVED})
 
 
 def _blank_request() -> dict:
     return {"state": NONE, "target_commit": None, "claimed_by": None,
             "audit_cycles": 0, "history": [], "last_event_id": None,
             "last_verdict": None, "conditions_satisfied": False}
+
+
+def _check_m8_source_rewind_payload(event: dict, req: dict) -> None:
+    payload = event.get("payload")
+    top = {
+        "originating_blocked_commit", "blockers_addressed",
+        "controlling_event_id", "superseded_audit"}
+    nested_fields = {
+        "transaction_id", "prior_state", "audit_cycle",
+        "publication_event_id", "publication_event_hash",
+        "request_payload_hash", "request_file_sha256", "request_archive",
+        "verdict_event_id", "verdict_event_hash", "verdict_file_sha256",
+        "verdict_archive"}
+    nested = payload.get("superseded_audit") \
+        if isinstance(payload, dict) else None
+    if set(payload or {}) != top or not isinstance(nested, dict) or \
+            set(nested) != nested_fields or \
+            nested["prior_state"] != req["state"] or \
+            nested["audit_cycle"] != req["audit_cycles"] or \
+            not isinstance(nested["transaction_id"], str) or \
+            len(nested["transaction_id"]) != 64 or \
+            not isinstance(nested["request_archive"], str) or \
+            not nested["request_archive"] or \
+            not isinstance(payload["blockers_addressed"], list) or \
+            len(payload["blockers_addressed"]) != 1 or \
+            not isinstance(payload["blockers_addressed"][0], str) or \
+            not payload["blockers_addressed"][0]:
+        raise TransitionError(
+            "M8 closure source rewind payload is incomplete or stale")
 
 
 def check(event: dict, requests: dict) -> None:
@@ -149,6 +204,26 @@ def check(event: dict, requests: dict) -> None:
             f"request {event['request_id']!r} is AUTONOMY_PAUSED — only a "
             "human cancel/fresh request may follow")
 
+    if etype == "FIX_STARTED" and state in (REQUESTED, GO) and \
+            event["request_id"] not in M8_CLOSURE_SOURCE_REQUESTS:
+        raise TransitionError(
+            "pending or GO source rewind is restricted to the M8 closure "
+            "supersession protocol")
+    if etype == "FIX_STARTED" and \
+            event["request_id"] in M8_CLOSURE_SOURCE_REQUESTS and \
+            state in (REQUESTED, BLOCKED, GO):
+        _check_m8_source_rewind_payload(event, req)
+
+    slice_reaudit = event["request_id"] in M8_CLOSURE_SOURCE_REQUESTS
+    if slice_reaudit and etype == "AUDIT_REQUESTED" and \
+            req["audit_cycles"] > 0:
+        raise TransitionError(
+            "a previously published request must use READY_FOR_REAUDIT")
+    if slice_reaudit and etype == "READY_FOR_REAUDIT" and \
+            req["audit_cycles"] == 0:
+        raise TransitionError(
+            "READY_FOR_REAUDIT requires a prior audit publication")
+
     if etype == "RESULT_FIX_READY":
         prior_id = event["payload"]["request"].get("prior_result_request_id")
         prior = requests.get(prior_id, _blank_request())
@@ -159,6 +234,18 @@ def check(event: dict, requests: dict) -> None:
         if prior.get("audit_cycles", 0) >= 5:
             raise TransitionError(
                 "result-handoff lineage already ran five audit cycles")
+
+    if etype == "RESULT_HANDOFF_READY":
+        profile = (event.get("payload", {}).get("request", {})
+                   .get("authorization_profile", {}).get("profile_id"))
+        m8_profile = "m8_budget_exhausted_incomplete_handoff.v1"
+        if profile == m8_profile and state != RESULT_HANDOFF_OWNER_APPROVED:
+            raise TransitionError(
+                "M8 incomplete RESULT_HANDOFF_READY requires the distinct "
+                "owner result-handoff approval state")
+        if profile != m8_profile and state != NONE:
+            raise TransitionError(
+                "historical result handoffs retain their none-to-ready path")
 
     if etype not in TRANSITIONS:
         raise TransitionError(f"no transition defined for {etype}")
@@ -252,6 +339,13 @@ def apply(event: dict, requests: dict) -> dict:
         else:
             req["audit_cycles"] = 1
         req["publication_event_id"] = event["event_id"]
+    if etype == "RESULT_HANDOFF_APPROVAL_REQUIRED":
+        req["target_commit"] = event["target_commit"]
+        req["closure_authorization_hash"] = event["payload"].get(
+            "closure_authorization_hash")
+        req["proposal_event_id"] = event["event_id"]
+    if etype == "RESULT_HANDOFF_APPROVED":
+        req["closure_owner_approval_event_id"] = event["event_id"]
     if etype == "AUDIT_CLAIMED":
         req["claimed_by"] = event["sender"]
     if etype in ("AUDIT_BLOCKED", "AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",

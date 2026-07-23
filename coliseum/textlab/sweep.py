@@ -331,6 +331,55 @@ def _file_sha256(path: str, *, absent_as_empty: bool = False) -> str:
     return h.hexdigest()
 
 
+def build_pack_replay_core_locked(manifest_path: str, out_root: str,
+                                  config_dir: str,
+                                  planned_design: dict,
+                                  progress_check=None) -> dict:
+    """Build the deterministic, provider-free replay core for a whole pack.
+
+    The caller must hold the manifest-scoped advisory lock.  This validates
+    both terminal ledgers and replays every manifested run, but deliberately
+    performs no write and records no clock-derived field.  Closure tooling can
+    therefore include the authenticated replay result in a larger atomic
+    transaction without first publishing an intermediate artifact.
+    """
+    if not os.path.exists(manifest_path):
+        raise SweepAborted(f"verify_pack_replay: no manifest at {manifest_path}")
+    rows, _tombstones = terminal_ledgers_load(
+        manifest_path, out_root, planned_design=planned_design,
+        require_tombstone_regime_anchors=True)
+    if not rows:
+        raise SweepAborted(f"verify_pack_replay: {manifest_path} has no rows — "
+                           "refusing to attest an empty pack")
+    runs = {}
+    for rec in rows.values():             # manifest file order (insertion order)
+        if progress_check is not None:
+            progress_check()
+        run_dir = os.path.join(out_root, rec["dir"])
+        ok, detail = verify_run_replay(run_dir, config_dir)
+        if not ok:
+            raise SweepAborted(
+                f"verify_pack_replay: {rec['run_id']} ({rec['dir']}) failed "
+                f"provider-free replay: {detail} — no attestation written")
+        runs[rec["run_id"]] = {
+            "run_dir": rec["dir"],
+            "replay_ok": True,
+            "run_json_sha256": _file_sha256(os.path.join(run_dir, "run.json")),
+            "decisions_sha256": _file_sha256(
+                os.path.join(run_dir, "decisions.jsonl")),
+            "captures_sha256": _file_sha256(
+                os.path.join(run_dir, "captures.jsonl"),
+                absent_as_empty=True),
+        }
+        if progress_check is not None:
+            progress_check()
+    return {
+        "manifest_sha256": _file_sha256(manifest_path),
+        "tombstone_ledger": tombstone_ledger_identity(manifest_path),
+        "runs": runs,
+    }
+
+
 def _verify_pack_replay_locked(manifest_path: str, out_root: str,
                                config_dir: str,
                                planned_design: dict) -> dict:
@@ -352,31 +401,9 @@ def _verify_pack_replay_locked(manifest_path: str, out_root: str,
     last row verifies.
 
     Returns the attestation dict exactly as written."""
-    if not os.path.exists(manifest_path):
-        raise SweepAborted(f"verify_pack_replay: no manifest at {manifest_path}")
     attestation_path = os.path.join(out_root, "replay_attestation.json")
-    rows, _tombstones = terminal_ledgers_load(
-        manifest_path, out_root, planned_design=planned_design,
-        require_tombstone_regime_anchors=True)
-    if not rows:
-        raise SweepAborted(f"verify_pack_replay: {manifest_path} has no rows — "
-                           "refusing to attest an empty pack")
-    runs = {}
-    for rec in rows.values():             # manifest file order (insertion order)
-        run_dir = os.path.join(out_root, rec["dir"])
-        ok, detail = verify_run_replay(run_dir, config_dir)
-        if not ok:
-            raise SweepAborted(
-                f"verify_pack_replay: {rec['run_id']} ({rec['dir']}) failed "
-                f"provider-free replay: {detail} — no attestation written")
-        runs[rec["run_id"]] = {
-            "run_dir": rec["dir"],
-            "replay_ok": True,
-            "run_json_sha256": _file_sha256(os.path.join(run_dir, "run.json")),
-            "decisions_sha256": _file_sha256(os.path.join(run_dir, "decisions.jsonl")),
-            "captures_sha256": _file_sha256(os.path.join(run_dir, "captures.jsonl"),
-                                            absent_as_empty=True),
-        }
+    core = build_pack_replay_core_locked(
+        manifest_path, out_root, config_dir, planned_design)
     attestation = {
         # Version 1 names the frozen per-run replay record contract consumed by
         # metrics.  The terminal-ledger identity is an additive top-level
@@ -384,9 +411,7 @@ def _verify_pack_replay_locked(manifest_path: str, out_root: str,
         # analysis identity despite leaving every per-run record unchanged.
         "attestation_version": "1",
         "verified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "manifest_sha256": _file_sha256(manifest_path),
-        "tombstone_ledger": tombstone_ledger_identity(manifest_path),
-        "runs": runs,
+        **core,
     }
     tmp_path = attestation_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:

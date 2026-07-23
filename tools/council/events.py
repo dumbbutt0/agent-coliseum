@@ -166,6 +166,14 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
         validate_event(event, for_append=True)
         requests = state_machine.project(chain)
         state_machine.check(event, requests)
+        if event_type == "FIX_STARTED" and \
+                request_id in state_machine.M8_CLOSURE_SOURCE_REQUESTS and \
+                requests.get(request_id, {}).get("state") in (
+                    state_machine.REQUESTED, state_machine.BLOCKED,
+                    state_machine.GO):
+            from tools.council.m8_incomplete_handoff import \
+                validate_source_rewind_append
+            validate_source_rewind_append(root, cfg, chain, event)
         # H3: verdict authority-context bindings verified against the chain
         from tools.council.schemas import (crosscheck_verdict_bindings,
                                            VERDICT_PAYLOAD_EVENT_TYPES)
@@ -175,6 +183,24 @@ def append_event(root: str, cfg: Config, event_type: str, sender: str,
             _verify_experiment_approval_binding(root, cfg, chain, event)
         if event_type == "EXPERIMENT_STARTED":
             _verify_experiment_start_binding(root, cfg, chain, event)
+        if event_type == "RESULT_HANDOFF_APPROVAL_REQUIRED":
+            from tools.council.m8_incomplete_handoff import \
+                validate_proposal_append
+            validate_proposal_append(root, cfg, chain, event)
+        if event_type == "RESULT_HANDOFF_APPROVED":
+            from tools.council.m8_incomplete_handoff import \
+                validate_approval_binding
+            validate_approval_binding(chain, event)
+        if event_type in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
+            from tools.council.m8_incomplete_handoff import \
+                validate_ready_binding
+            validate_ready_binding(chain, event)
+        if event_type == "REQUEST_CANCELED" and \
+                event["payload"].get("schema_version") == \
+                "m8-budget-exhaustion-source-close.v1":
+            from tools.council.m8_incomplete_handoff import \
+                validate_source_close_binding
+            validate_source_close_binding(chain, event)
         if event_type in ("EXPERIMENT_COMPLETE", "RESULT_AUDIT_REQUESTED"):
             _verify_result_artifact_binding(root, cfg, chain, event)
         # delegated-authority: a CONDITIONS_AUTO_SATISFIED is a claude-sender,
@@ -421,6 +447,22 @@ def _verify_result_artifact_binding(root: str, cfg: Config, chain: list,
                                     event: dict) -> None:
     """Require one immutable artifact census across bound M8 completion and
     result-audit publication. Legacy experiment lifecycles remain unchanged."""
+    if event["event_type"] == "RESULT_AUDIT_REQUESTED":
+        ready = next((e for e in reversed(chain)
+                      if e["request_id"] == event["request_id"] and
+                      e["event_type"] in
+                      ("RESULT_HANDOFF_READY", "RESULT_FIX_READY")), None)
+        if ready is not None:
+            request = ready["payload"].get("request", {})
+            artifacts = request.get("result_artifacts")
+            if artifacts is not None:
+                from tools.council.schemas import validate_result_artifacts
+                validate_result_artifacts(artifacts)
+                if event["payload"].get("result_artifacts") != artifacts:
+                    raise CouncilError(
+                        "result-handoff audit must copy the ready request's "
+                        "exact result_artifacts record")
+            return
     publication = next((e for e in reversed(chain)
                         if e["request_id"] == event["request_id"] and
                         e["event_type"] in

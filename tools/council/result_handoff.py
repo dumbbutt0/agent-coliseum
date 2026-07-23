@@ -152,6 +152,15 @@ def _safe_relpath(value: object, field: str) -> None:
 
 def validate_handoff_request(request: dict) -> None:
     """Closed semantic validation used by the ordinary request schema."""
+    profile = request.get("authorization_profile", {}).get("profile_id")
+    if profile == "m8_budget_exhausted_incomplete_handoff.v1":
+        from tools.council.m8_incomplete_handoff import \
+            validate_m8_handoff_request
+        validate_m8_handoff_request(request)
+        return
+    if profile != PROFILE_ID:
+        raise SchemaViolation(
+            f"unknown result-handoff profile {profile!r}")
     from tools.council.schemas import REQUEST_REQUIRED_FIELDS
     correction = "prior_result_request_id" in request
     expected = set(REQUEST_REQUIRED_FIELDS) | _HANDOFF_FIELDS
@@ -380,7 +389,8 @@ def _validate_authority(root: str, cfg, chain: list, request: dict) -> None:
 
 
 def _publish_handoff_locked(root: str, cfg, request: dict,
-                            correction: bool = False) -> dict:
+                            correction: bool = False,
+                            _m8_budget=None) -> dict:
     """Preflight, then roll forward the three-step event-first journal."""
     request = dict(request)
     request["request_payload_hash"] = compute_request_payload_hash(request)
@@ -394,13 +404,24 @@ def _publish_handoff_locked(root: str, cfg, request: dict,
         raise SchemaViolation("handoff target must be the clean repository HEAD")
     if not git_state.commit_exists(repo, commit, cfg.repo_roots):
         raise SchemaViolation("handoff target commit does not exist")
-    if not git_state.is_ancestor(AUTHORIZATION_PROFILE["implementation"]
-                                 ["integrated_commit"], commit, repo,
-                                 cfg.repo_roots):
-        raise SchemaViolation("handoff target is not an implementation descendant")
-    _validate_pack(repo, request)
     chain = events.read_chain(root)
-    _validate_authority(root, cfg, chain, request)
+    m8_profile = request.get("authorization_profile", {}).get(
+        "profile_id") == "m8_budget_exhausted_incomplete_handoff.v1"
+    if m8_profile:
+        from tools.council.m8_incomplete_handoff import verify_bundle_request
+        verify_bundle_request(
+            repo, request, chain=chain, deep=True, budget=_m8_budget)
+    else:
+        if _m8_budget is not None:
+            raise SchemaViolation(
+                "closure budget is valid only for the M8 result profile")
+        if not git_state.is_ancestor(AUTHORIZATION_PROFILE["implementation"]
+                                     ["integrated_commit"], commit, repo,
+                                     cfg.repo_roots):
+            raise SchemaViolation(
+                "handoff target is not an implementation descendant")
+        _validate_pack(repo, request)
+        _validate_authority(root, cfg, chain, request)
     projection = state_machine.project(chain)
     if correction:
         prior = projection.get(request["prior_result_request_id"], {})
@@ -464,6 +485,8 @@ def _publish_handoff_locked(root: str, cfg, request: dict,
         "validation_report_hash": request["validation_report_hash"],
         "validations": request["validations"],
     }
+    if request.get("result_artifacts") is not None:
+        audit_payload["result_artifacts"] = request["result_artifacts"]
     if audits:
         if audits[-1]["payload"] != audit_payload:
             raise SchemaViolation("conflicting RESULT_AUDIT_REQUESTED journal")

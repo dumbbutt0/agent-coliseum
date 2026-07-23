@@ -71,6 +71,24 @@ def test_closed_request_accepts_exact_profile(tmp_path):
     validate_request(handoff_request(repo, head), (repo,))
 
 
+def test_historical_profile_remains_unversioned_and_exact(tmp_path):
+    repo, head = make_repo(tmp_path)
+    request = handoff_request(repo, head)
+    assert request["authorization_profile"]["profile_id"] == \
+        "society_live_persona_result_handoff.v1"
+    assert "result_artifacts" not in request
+    validate_request(request, (repo,))
+
+
+def test_unknown_result_profile_refuses_without_falling_back(tmp_path):
+    repo, head = make_repo(tmp_path)
+    request = handoff_request(repo, head)
+    request["authorization_profile"]["profile_id"] = "unknown.v1"
+    request["request_payload_hash"] = compute_request_payload_hash(request)
+    with pytest.raises(SchemaViolation, match="unknown result-handoff profile"):
+        validate_request(request, (repo,))
+
+
 @pytest.mark.parametrize("mutation", ["config", "role", "verdicts",
                                         "unknown", "validation"])
 def test_closed_request_rejects_drift(tmp_path, mutation):

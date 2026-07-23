@@ -62,6 +62,8 @@ EVENT_TYPES = (
     "RESULT_AUDIT_REQUESTED",
     "RESULT_APPROVED",
     "RESULT_BLOCKED",
+    "RESULT_HANDOFF_APPROVAL_REQUIRED",
+    "RESULT_HANDOFF_APPROVED",
     "RESULT_HANDOFF_READY",
     "RESULT_FIX_READY",
     # launcher extension (owner-ratified 2026-07-11): a GO-audited source
@@ -140,6 +142,8 @@ SENDER_ALLOWED = {
     "RESULT_AUDIT_REQUESTED": frozenset({"claude"}),
     "RESULT_APPROVED": frozenset({"codex"}),
     "RESULT_BLOCKED": frozenset({"codex"}),
+    "RESULT_HANDOFF_APPROVAL_REQUIRED": frozenset({"claude"}),
+    "RESULT_HANDOFF_APPROVED": frozenset({"human"}),
     "RESULT_HANDOFF_READY": frozenset({"claude"}),
     "RESULT_FIX_READY": frozenset({"claude"}),
     "CHANGE_INTEGRATED": frozenset({"claude"}),
@@ -177,6 +181,7 @@ SENDER_ALLOWED = {
 # is self-pinning (it CREATES the chain) and needs no token.
 HUMAN_TOKEN_REQUIRED_EVENT_TYPES = frozenset({
     "EXPERIMENT_APPROVED", "CONDITIONS_SATISFIED", "REQUEST_CANCELED",
+    "RESULT_HANDOFF_APPROVED",
     "STATUS_CHANGED", "POLICY_INITIALIZED", "POLICY_AMENDED",
     "HUMAN_IDENTITY_ROTATED", "MIGRATION_APPROVED",
 })
@@ -540,6 +545,24 @@ RESULT_ARTIFACT_FIELDS = (
     "successful_runs", "tombstoned_runs", "terminal_outcomes",
     "analysis_status",
 )
+RESULT_ARTIFACT_V2_FIELDS = (
+    "schema_version", "profile_id", "source_request_id",
+    "source_request_payload_hash", "source_owner_approval_event_id",
+    "source_owner_approval_event_hash", "start_event_id", "start_event_hash",
+    "pause_event_id", "pause_event_hash",
+    "closure_owner_approval_event_id", "closure_owner_approval_event_hash",
+    "closure_authorization_hash", "closure_tool_commit",
+    "derived_output_root", "analysis_status", "statistics_computed",
+    "planned_runs", "successful_runs", "partial_runs", "unattempted_runs",
+    "tombstoned_runs", "terminal_outcomes", "manifest_sha256",
+    "tombstone_ledger", "primary_inventory_file_sha256",
+    "primary_inventory_content_hash", "replay_attestation_sha256",
+    "coordinate_census_file_sha256", "coordinate_census_content_hash",
+    "incomplete_report_sha256",
+    "incomplete_result_package_file_sha256",
+    "incomplete_result_package_content_sha256",
+    "validation_report_sha256", "derived_bundle_content_hash",
+)
 _EVENT_ID_RE = re.compile(r"^\d{6}-[0-9a-f]{8}$")
 
 
@@ -597,6 +620,8 @@ def _validate_verdict_bindings(verdict: dict, result_kind: bool) -> None:
 
 
 def validate_result_artifacts(artifacts: dict) -> None:
+    if isinstance(artifacts, dict) and artifacts.get("schema_version") is not None:
+        return _validate_result_artifacts_v2(artifacts)
     if not isinstance(artifacts, dict) or \
             set(artifacts) != set(RESULT_ARTIFACT_FIELDS):
         raise SchemaViolation(
@@ -638,6 +663,63 @@ def validate_result_artifacts(artifacts: dict) -> None:
     if artifacts["analysis_status"] not in \
             ("analyzed", "terminal_failure_inconclusive"):
         raise SchemaViolation("result_artifacts analysis_status unknown")
+
+
+def _validate_result_artifacts_v2(artifacts: dict) -> None:
+    if set(artifacts) != set(RESULT_ARTIFACT_V2_FIELDS):
+        raise SchemaViolation(
+            "result-artifacts.v2 keys must be exactly "
+            f"{sorted(RESULT_ARTIFACT_V2_FIELDS)}")
+    if artifacts["schema_version"] != "result-artifacts.v2" or \
+            artifacts["profile_id"] != \
+            "m8_budget_exhausted_incomplete_handoff.v1":
+        raise SchemaViolation("result-artifacts.v2 profile/version unknown")
+    event_fields = (
+        "source_owner_approval_event_id", "start_event_id", "pause_event_id",
+        "closure_owner_approval_event_id")
+    for field in event_fields:
+        if not _EVENT_ID_RE.match(str(artifacts[field])):
+            raise SchemaViolation(f"result-artifacts.v2 {field} malformed")
+    hash_fields = (
+        "source_request_payload_hash", "source_owner_approval_event_hash",
+        "start_event_hash", "pause_event_hash",
+        "closure_owner_approval_event_hash", "closure_authorization_hash",
+        "manifest_sha256", "primary_inventory_file_sha256",
+        "primary_inventory_content_hash", "replay_attestation_sha256",
+        "coordinate_census_file_sha256", "coordinate_census_content_hash",
+        "incomplete_report_sha256",
+        "incomplete_result_package_file_sha256",
+        "incomplete_result_package_content_sha256",
+        "validation_report_sha256", "derived_bundle_content_hash")
+    for field in hash_fields:
+        if not _SHA256_RE.match(str(artifacts[field])):
+            raise SchemaViolation(f"result-artifacts.v2 {field} must be sha256")
+    validate_commit(artifacts["closure_tool_commit"])
+    validate_request_id(artifacts["source_request_id"])
+    _validate_safe_relpath(artifacts["derived_output_root"],
+                           "derived_output_root")
+    if artifacts["analysis_status"] != "budget_exhausted_incomplete" or \
+            artifacts["statistics_computed"] is not False:
+        raise SchemaViolation(
+            "result-artifacts.v2 exceeds the incomplete claim ceiling")
+    for field in ("planned_runs", "successful_runs", "partial_runs",
+                  "unattempted_runs", "tombstoned_runs",
+                  "terminal_outcomes"):
+        value = artifacts[field]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise SchemaViolation(
+                f"result-artifacts.v2 {field} must be a non-negative int")
+    if artifacts["successful_runs"] + artifacts["partial_runs"] + \
+            artifacts["unattempted_runs"] + artifacts["tombstoned_runs"] != \
+            artifacts["planned_runs"]:
+        raise SchemaViolation("result-artifacts.v2 planned census disagrees")
+    if artifacts["successful_runs"] + artifacts["tombstoned_runs"] != \
+            artifacts["terminal_outcomes"]:
+        raise SchemaViolation("result-artifacts.v2 terminal census disagrees")
+    tombstone = artifacts["tombstone_ledger"]
+    if tombstone != {"state": "absent", "sha256": None}:
+        raise SchemaViolation(
+            "budget-exhausted result requires canonical absent tombstones")
 
 
 def compute_verdict_payload_hash(verdict: dict) -> str:
@@ -741,6 +823,16 @@ def _validate_result_ready_payload(event: dict) -> None:
     validate_request(request, (event["repository"],))
 
 
+def _validate_result_handoff_owner_payload(event: dict) -> None:
+    """Closed schemas for the M8 result-handoff owner gate."""
+    from tools.council.m8_incomplete_handoff import (
+        validate_approval_payload, validate_proposal_payload)
+    if event["event_type"] == "RESULT_HANDOFF_APPROVAL_REQUIRED":
+        validate_proposal_payload(event["payload"])
+    else:
+        validate_approval_payload(event["payload"])
+
+
 def validate_event(event: dict, for_append: bool = False) -> None:
     """Version-dispatched (H2): 1.0 events are valid on READ/replay only;
     only the CURRENT protocol_version may be appended (for_append=True)."""
@@ -769,6 +861,9 @@ def validate_event(event: dict, for_append: bool = False) -> None:
                                 "RESULT_AUDIT_REQUESTED") and \
             event["payload"].get("result_artifacts") is not None:
         validate_result_artifacts(event["payload"]["result_artifacts"])
+    if event["event_type"] in (
+            "RESULT_HANDOFF_APPROVAL_REQUIRED", "RESULT_HANDOFF_APPROVED"):
+        _validate_result_handoff_owner_payload(event)
     if event["event_type"] in CLASS_C_PAYLOAD_EVENT_TYPES:
         validate_class_c_event_payload(event)
     if event["event_type"] in ("RESULT_HANDOFF_READY", "RESULT_FIX_READY"):
