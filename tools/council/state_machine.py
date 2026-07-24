@@ -52,6 +52,11 @@ M8_CLOSURE_SOURCE_REQUESTS = frozenset({
     "first-gladiator-m8-incomplete-closure-c-002",
     "first-gladiator-m8-incomplete-closure-d-002",
     "first-gladiator-m8-incomplete-closure-e-002",
+    "first-gladiator-m8-incomplete-recovery-a-001",
+    "first-gladiator-m8-incomplete-recovery-b-001",
+    "first-gladiator-m8-incomplete-recovery-c-001",
+    "first-gladiator-m8-incomplete-recovery-d-001",
+    "first-gladiator-m8-incomplete-recovery-e-001",
 })
 
 # event_type -> (allowed source states, destination state)
@@ -187,6 +192,17 @@ def check(event: dict, requests: dict) -> None:
     etype = event["event_type"]
     req = requests.get(event["request_id"], _blank_request())
     state = req["state"]
+    m8_recovery_proposal = (
+        etype == "RESULT_HANDOFF_APPROVAL_REQUIRED" and
+        state == RESULT_HANDOFF_OWNER_APPROVED and
+        event["request_id"] ==
+        "first-gladiator-m8-incomplete-result-001" and
+        event.get("payload", {}).get("schema_version") ==
+        "m8-incomplete-publication-recovery-approval-required.v1" and
+        req.get("proposal_event_id") == "002473-8a2175f0" and
+        req.get("closure_owner_approval_event_id") ==
+        "002474-080fd948" and
+        req.get("recovery_proposal_event_id") is None)
 
     if etype in STATELESS_EVENTS:
         return
@@ -255,7 +271,7 @@ def check(event: dict, requests: dict) -> None:
     if etype not in TRANSITIONS:
         raise TransitionError(f"no transition defined for {etype}")
     allowed_from, _to = TRANSITIONS[etype]
-    if state not in allowed_from:
+    if state not in allowed_from and not m8_recovery_proposal:
         raise TransitionError(
             f"{etype} not allowed from state {state!r} for request "
             f"{event['request_id']!r} (allowed from: {sorted(allowed_from)})")
@@ -346,11 +362,21 @@ def apply(event: dict, requests: dict) -> dict:
         req["publication_event_id"] = event["event_id"]
     if etype == "RESULT_HANDOFF_APPROVAL_REQUIRED":
         req["target_commit"] = event["target_commit"]
-        req["closure_authorization_hash"] = event["payload"].get(
-            "closure_authorization_hash")
+        if event["payload"].get("schema_version") == \
+                "m8-incomplete-publication-recovery-approval-required.v1":
+            req["recovery_authorization_hash"] = event["payload"].get(
+                "recovery_authorization_hash")
+            req["recovery_proposal_event_id"] = event["event_id"]
+        else:
+            req["closure_authorization_hash"] = event["payload"].get(
+                "closure_authorization_hash")
         req["proposal_event_id"] = event["event_id"]
     if etype == "RESULT_HANDOFF_APPROVED":
-        req["closure_owner_approval_event_id"] = event["event_id"]
+        if event["payload"].get("schema_version") == \
+                "m8-incomplete-publication-recovery-approval.v1":
+            req["recovery_owner_approval_event_id"] = event["event_id"]
+        else:
+            req["closure_owner_approval_event_id"] = event["event_id"]
     if etype == "AUDIT_CLAIMED":
         req["claimed_by"] = event["sender"]
     if etype in ("AUDIT_BLOCKED", "AUDIT_GO", "AUDIT_GO_WITH_CONDITIONS",

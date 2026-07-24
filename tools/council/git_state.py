@@ -29,6 +29,40 @@ def is_clean(repo: str, repo_roots) -> bool:
     return proc.stdout.strip() == ""
 
 
+def has_only_untracked_paths(repo: str, expected_paths, repo_roots) -> bool:
+    """True only when porcelain contains exactly the named untracked files.
+
+    ``--untracked-files=all`` prevents Git from collapsing an untracked
+    directory to one entry.  ``-z`` makes paths unquoted and NUL-delimited, so
+    the comparison is exact even when a repository permits unusual names.
+    Every tracked/index status, rename/copy record, or extra path refuses.
+    """
+    if not isinstance(expected_paths, (set, frozenset, tuple, list)) or \
+            any(not isinstance(path, str) or not path or "\x00" in path or
+                path.startswith("/") or ".." in path.split("/")
+                for path in expected_paths):
+        raise CouncilError("expected untracked path set is invalid")
+    expected = set(expected_paths)
+    if len(expected) != len(tuple(expected_paths)):
+        raise CouncilError("expected untracked paths contain duplicates")
+    proc = _git(repo, ["status", "--porcelain=v1", "-z",
+                       "--untracked-files=all"], repo_roots)
+    if proc.returncode != 0:
+        raise CouncilError(f"git status failed in {repo}: {proc.stderr.strip()}")
+    records = proc.stdout.split("\x00")
+    if records and records[-1] == "":
+        records.pop()
+    observed = set()
+    for record in records:
+        if not record.startswith("?? ") or len(record) <= 3:
+            return False
+        path = record[3:]
+        if path in observed:
+            return False
+        observed.add(path)
+    return observed == expected
+
+
 def commit_exists(repo: str, commit: str, repo_roots) -> bool:
     validate_commit(commit)
     proc = _git(repo, ["cat-file", "-e", commit + "^{commit}"], repo_roots)

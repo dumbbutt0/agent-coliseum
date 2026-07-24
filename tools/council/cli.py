@@ -124,6 +124,34 @@ def cmd_propose_m8_incomplete_handoff(args) -> int:
     return 0
 
 
+def cmd_propose_m8_incomplete_recovery(args) -> int:
+    if args.role != "claude":
+        raise SchemaViolation(
+            "propose-m8-incomplete-recovery requires --role claude")
+    cfg, root = _cfg(args)
+    from tools.council import m8_incomplete_handoff
+    event = m8_incomplete_handoff.propose_recovery(
+        root, cfg, args.request_id, args.tool_repository,
+        validate_commit(args.tool_commit), args.max_compute_minutes,
+        args.max_wall_minutes, args.max_storage_mb)
+    print(f"M8 incomplete publication recovery awaits owner approval "
+          f"(event {event['event_id']})")
+    return 0
+
+
+def cmd_recover_m8_incomplete_handoff(args) -> int:
+    if args.role != "claude":
+        raise SchemaViolation(
+            "recover-m8-incomplete-handoff requires --role claude")
+    cfg, root = _cfg(args)
+    from tools.council import m8_incomplete_handoff
+    event = m8_incomplete_handoff.recover_approved(
+        root, cfg, args.request_id)
+    print(f"M8 incomplete recovery audit published "
+          f"(event {event['event_id']})")
+    return 0
+
+
 def cmd_approve_result_handoff(args) -> int:
     if args.role != "human":
         raise SchemaViolation(
@@ -908,6 +936,15 @@ def main(argv=None) -> int:
     p.add_argument("--max-compute-minutes", type=int, required=True)
     p.add_argument("--max-wall-minutes", type=int, required=True)
     p.add_argument("--max-storage-mb", type=int, required=True)
+    p = sub.add_parser("propose-m8-incomplete-recovery")
+    p.add_argument("request_id")
+    p.add_argument("--tool-repository", required=True)
+    p.add_argument("--tool-commit", required=True)
+    p.add_argument("--max-compute-minutes", type=int, required=True)
+    p.add_argument("--max-wall-minutes", type=int, required=True)
+    p.add_argument("--max-storage-mb", type=int, required=True)
+    p = sub.add_parser("recover-m8-incomplete-handoff")
+    p.add_argument("request_id")
     p = sub.add_parser("approve-result-handoff")
     p.add_argument("request_id")
     p.add_argument("--commit", required=True)
@@ -982,6 +1019,10 @@ def main(argv=None) -> int:
                 "result-fix-ready": cmd_result_handoff,
                 "propose-m8-incomplete-handoff":
                     cmd_propose_m8_incomplete_handoff,
+                "propose-m8-incomplete-recovery":
+                    cmd_propose_m8_incomplete_recovery,
+                "recover-m8-incomplete-handoff":
+                    cmd_recover_m8_incomplete_handoff,
                 "approve-result-handoff": cmd_approve_result_handoff,
                 "record": cmd_record, "approve": cmd_approve,
                 "approve-conditions": cmd_approve_conditions,

@@ -445,6 +445,11 @@ def test_source_request_generations_preserve_history_and_select_only_002():
         for section in "abcde"}
     assert historical | current <= state_machine.M8_CLOSURE_SOURCE_REQUESTS
     assert set(handoff.SOURCE_SLICE_REQUEST_IDS) == current
+    recovery = {
+        f"first-gladiator-m8-incomplete-recovery-{section}-001"
+        for section in "abcde"}
+    assert set(handoff.RECOVERY_SOURCE_REQUEST_IDS) == recovery
+    assert recovery <= state_machine.M8_CLOSURE_SOURCE_REQUESTS
 
 
 def test_proposal_primary_admission_passes_exact_resolved_plan_to_derivation(
@@ -637,6 +642,103 @@ def _state_event(event_type, payload=None):
     }
 
 
+def _recovery_authorization():
+    return {
+        "schema_version":
+            "m8-incomplete-publication-recovery-authorization.v1",
+        "result_request_id": ir.RESULT_REQUEST_ID,
+        "original_repository": "/tmp/repo",
+        "original_target_commit":
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae",
+        "original_proposal": {
+            "event_id": handoff.ORIGINAL_PROPOSAL_EVENT_ID,
+            "event_hash": handoff.ORIGINAL_PROPOSAL_EVENT_HASH,
+        },
+        "original_approval": {
+            "event_id": handoff.ORIGINAL_APPROVAL_EVENT_ID,
+            "event_hash": handoff.ORIGINAL_APPROVAL_EVENT_HASH,
+        },
+        "closure_authorization_hash":
+            handoff.ORIGINAL_CLOSURE_AUTHORIZATION_HASH,
+        "bundle_transaction_id": handoff.ORIGINAL_BUNDLE_TRANSACTION_ID,
+        "derived_artifact_hashes":
+            dict(handoff.ORIGINAL_DERIVED_HASHES),
+        "recovery_tool": {
+            "repository": "/tmp/tool",
+            "target_commit": COMMIT,
+            "integration_events": [
+                {
+                    "request_id": request_id,
+                    "event_id": f"{index:06d}-{index:08x}",
+                    "event_hash": f"{index:064x}",
+                    "target_commit": COMMIT,
+                }
+                for index, request_id in enumerate(
+                    handoff.RECOVERY_SOURCE_REQUEST_IDS, 1)
+            ],
+        },
+        "recovery_budget": {
+            "max_compute_minutes": 240,
+            "max_wall_minutes": 240,
+            "max_storage_mb": 1024,
+            "max_replay_runs": 105,
+            "max_retries_per_run": 0,
+        },
+    }
+
+
+def _recovery_proposal_payload():
+    authorization = _recovery_authorization()
+    return {
+        "schema_version":
+            "m8-incomplete-publication-recovery-approval-required.v1",
+        "recovery_authorization": authorization,
+        "recovery_authorization_hash":
+            handoff.recovery_authorization_hash(authorization),
+    }
+
+
+def _production_owner_chain():
+    authorization = _authorization()
+    proposal = {
+        "event_id": handoff.ORIGINAL_PROPOSAL_EVENT_ID,
+        "event_hash": handoff.ORIGINAL_PROPOSAL_EVENT_HASH,
+        "event_type": "RESULT_HANDOFF_APPROVAL_REQUIRED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": "/tmp/original",
+        "target_commit":
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae",
+        "payload": {
+            "schema_version": "result-handoff-approval-required.v1",
+            "closure_authorization": authorization,
+            "closure_authorization_hash":
+                handoff.ORIGINAL_CLOSURE_AUTHORIZATION_HASH,
+        },
+    }
+    approval = {
+        "event_id": handoff.ORIGINAL_APPROVAL_EVENT_ID,
+        "event_hash": handoff.ORIGINAL_APPROVAL_EVENT_HASH,
+        "event_type": "RESULT_HANDOFF_APPROVED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": "/tmp/original",
+        "target_commit": proposal["target_commit"],
+        "payload": {
+            "schema_version": "result-handoff-approval.v1",
+            "approved_by": "human",
+            "approval_commit": proposal["target_commit"],
+            "proposal_event_id": proposal["event_id"],
+            "proposal_event_hash": proposal["event_hash"],
+            "closure_authorization": authorization,
+            "closure_authorization_hash":
+                handoff.ORIGINAL_CLOSURE_AUTHORIZATION_HASH,
+            "human_token": {
+                "counter": 1, "preimage_hex": "f" * 64,
+                "binds": "e" * 64},
+        },
+    }
+    return [proposal, approval]
+
+
 def test_state_machine_requires_distinct_owner_result_gate():
     requests = {}
     proposal = _state_event("RESULT_HANDOFF_APPROVAL_REQUIRED")
@@ -649,6 +751,205 @@ def test_state_machine_requires_distinct_owner_result_gate():
     state_machine.apply(approval, requests)
     assert requests[ir.RESULT_REQUEST_ID]["state"] == \
         state_machine.RESULT_HANDOFF_OWNER_APPROVED
+
+
+def test_state_machine_allows_only_exact_m8_recovery_reproposal():
+    requests = {}
+    for event_type, event_id in (
+            ("RESULT_HANDOFF_APPROVAL_REQUIRED",
+             handoff.ORIGINAL_PROPOSAL_EVENT_ID),
+            ("RESULT_HANDOFF_APPROVED",
+             handoff.ORIGINAL_APPROVAL_EVENT_ID)):
+        event = _state_event(event_type)
+        event["event_id"] = event_id
+        event["target_commit"] = \
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae"
+        state_machine.check(event, requests)
+        state_machine.apply(event, requests)
+    generic = _state_event("RESULT_HANDOFF_APPROVAL_REQUIRED", {
+        "schema_version": "result-handoff-approval-required.v1"})
+    with pytest.raises(TransitionError):
+        state_machine.check(generic, requests)
+    recovery = _state_event(
+        "RESULT_HANDOFF_APPROVAL_REQUIRED",
+        _recovery_proposal_payload())
+    recovery["target_commit"] = \
+        "e4cf7f7a8f0dbad208865e1abf76082c9098faae"
+    state_machine.check(recovery, requests)
+    state_machine.apply(recovery, requests)
+    assert requests[ir.RESULT_REQUEST_ID]["state"] == \
+        state_machine.AWAITING_RESULT_HANDOFF_OWNER
+    approval = _state_event(
+        "RESULT_HANDOFF_APPROVED", {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval.v1"})
+    approval["target_commit"] = recovery["target_commit"]
+    state_machine.check(approval, requests)
+    state_machine.apply(approval, requests)
+    with pytest.raises(TransitionError):
+        state_machine.check(recovery, requests)
+
+
+def test_recovery_owner_payloads_are_closed_and_exact():
+    proposal = _recovery_proposal_payload()
+    handoff.validate_proposal_payload(proposal)
+    approval = {
+        "schema_version":
+            "m8-incomplete-publication-recovery-approval.v1",
+        "approved_by": "human",
+        "approval_commit":
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae",
+        "proposal_event_id": "000900-1234abcd",
+        "proposal_event_hash": "a" * 64,
+        "recovery_authorization": proposal["recovery_authorization"],
+        "recovery_authorization_hash":
+            proposal["recovery_authorization_hash"],
+        "human_token": {
+            "counter": 1, "preimage_hex": "f" * 64,
+            "binds": "e" * 64},
+    }
+    handoff.validate_approval_payload(approval)
+    for changed in ("bundle_transaction_id", "closure_authorization_hash"):
+        bad = copy.deepcopy(proposal)
+        bad["recovery_authorization"][changed] = "0" * 64
+        with pytest.raises(SchemaViolation):
+            handoff.validate_proposal_payload(bad)
+
+
+def test_recovery_approval_and_ready_bind_latest_owner_cycle():
+    recovery_payload = _recovery_proposal_payload()
+    proposal = {
+        "event_id": "000900-1234abcd",
+        "event_hash": "a" * 64,
+        "event_type": "RESULT_HANDOFF_APPROVAL_REQUIRED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": "/tmp/repo",
+        "target_commit":
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae",
+        "payload": recovery_payload,
+    }
+    approval = {
+        "event_id": "000901-1234abce",
+        "event_hash": "b" * 64,
+        "event_type": "RESULT_HANDOFF_APPROVED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": "/tmp/repo",
+        "target_commit": proposal["target_commit"],
+        "payload": {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval.v1",
+            "approved_by": "human",
+            "approval_commit": proposal["target_commit"],
+            "proposal_event_id": proposal["event_id"],
+            "proposal_event_hash": proposal["event_hash"],
+            "recovery_authorization":
+                recovery_payload["recovery_authorization"],
+            "recovery_authorization_hash":
+                recovery_payload["recovery_authorization_hash"],
+            "human_token": {
+                "counter": 1, "preimage_hex": "f" * 64,
+                "binds": "e" * 64},
+        },
+    }
+    handoff.validate_approval_binding([proposal], approval)
+    old = _approval()
+    request = {
+        "authorization_profile": {
+            "profile_id": ir.PROFILE_ID,
+            "closure_owner_approval_event_id": old["event_id"],
+            "closure_owner_approval_event_hash": old["event_hash"],
+        },
+        "closure_authorization":
+            old["payload"]["closure_authorization"],
+        "closure_authorization_hash":
+            old["payload"]["closure_authorization_hash"],
+        "publication_recovery": {
+            "recovery_owner_approval_event_id": approval["event_id"],
+            "recovery_owner_approval_event_hash": approval["event_hash"],
+            "recovery_authorization":
+                recovery_payload["recovery_authorization"],
+            "recovery_authorization_hash":
+                recovery_payload["recovery_authorization_hash"],
+        },
+    }
+    ready = {"payload": {"request": request},
+             "request_id": ir.RESULT_REQUEST_ID}
+    handoff.validate_ready_binding([old, approval], ready)
+    request["publication_recovery"][
+        "recovery_owner_approval_event_hash"] = "0" * 64
+    with pytest.raises(CouncilError, match="recovery binding"):
+        handoff.validate_ready_binding([old, approval], ready)
+
+
+def test_recovery_authorization_refuses_wrong_tool_or_stale_integrations(
+        monkeypatch):
+    from tools.council import git_state
+    chain = _production_owner_chain()
+    monkeypatch.setattr(events, "read_chain", lambda _root: chain)
+    monkeypatch.setattr(
+        state_machine, "project",
+        lambda _chain: {ir.RESULT_REQUEST_ID: {
+            "state": state_machine.RESULT_HANDOFF_OWNER_APPROVED}})
+    monkeypatch.setattr(
+        git_state, "head_commit",
+        lambda repo, _roots: (
+            COMMIT if repo == "/tmp/tool" else
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae"))
+    monkeypatch.setattr(git_state, "is_clean", lambda *_args: True)
+    monkeypatch.setattr(git_state, "is_ancestor", lambda *_args: True)
+    monkeypatch.setattr(
+        handoff, "target_has_only_exact_bundle", lambda *_args: True)
+    integrations = _recovery_authorization()[
+        "recovery_tool"]["integration_events"]
+    monkeypatch.setattr(
+        handoff, "_recovery_integrations",
+        lambda _chain, commit: copy.deepcopy(integrations)
+        if commit == COMMIT else pytest.fail("wrong commit reached"))
+    cfg = SimpleNamespace(repo_roots=("/tmp/original", "/tmp/tool"))
+    authorization = handoff.build_recovery_authorization(
+        "/tmp/council", cfg, "/tmp/tool", COMMIT, 240, 240, 1024)
+    assert authorization["recovery_tool"]["integration_events"] == integrations
+
+    monkeypatch.setattr(
+        git_state, "head_commit",
+        lambda repo, _roots: (
+            "d" * 40 if repo == "/tmp/tool" else
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae"))
+    with pytest.raises(CouncilError, match="clean exact descendant"):
+        handoff.build_recovery_authorization(
+            "/tmp/council", cfg, "/tmp/tool", COMMIT, 240, 240, 1024)
+    monkeypatch.setattr(
+        git_state, "head_commit",
+        lambda repo, _roots: (
+            COMMIT if repo == "/tmp/tool" else
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae"))
+    monkeypatch.setattr(
+        handoff, "_recovery_integrations",
+        lambda *_args: (_ for _ in ()).throw(
+            CouncilError("stale recovery integrations")))
+    with pytest.raises(CouncilError, match="stale recovery integrations"):
+        handoff.build_recovery_authorization(
+            "/tmp/council", cfg, "/tmp/tool", COMMIT, 240, 240, 1024)
+
+
+def test_old_approval_alone_cannot_run_recovery_and_consumption_is_once(
+        tmp_path, monkeypatch):
+    root = make_root(tmp_path)
+    cfg = SimpleNamespace(repo_roots=("/tmp/original", "/tmp/tool"))
+    chain = _production_owner_chain()
+    monkeypatch.setattr(events, "read_chain", lambda _root: chain)
+    monkeypatch.setattr(
+        state_machine, "project",
+        lambda _chain: {ir.RESULT_REQUEST_ID: {
+            "state": state_machine.RESULT_HANDOFF_OWNER_APPROVED}})
+    with pytest.raises(CouncilError, match="recovery request chain prefix"):
+        handoff.recover_approved(root, cfg, ir.RESULT_REQUEST_ID)
+    monkeypatch.setattr(
+        state_machine, "project",
+        lambda _chain: {ir.RESULT_REQUEST_ID: {
+            "state": state_machine.RESULT_AUDIT}})
+    with pytest.raises(CouncilError, match="already consumed"):
+        handoff.recover_approved(root, cfg, ir.RESULT_REQUEST_ID)
 
 
 def test_m8_ready_refused_without_result_owner_approval():
@@ -1278,6 +1579,16 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
         "payload": {"reason": handoff.PAUSE_REASON},
     }
     chain = [source_pause, proposal, approval]
+    synthetic_transaction = handoff.transaction_id(
+        ir.RESULT_REQUEST_ID, proposal, approval,
+        proposal["payload"]["closure_authorization_hash"], COMMIT)
+    expected_objects = handoff._artifact_objects(
+        _snapshot(), _replay_core(), _authorization(), proposal, approval,
+        synthetic_transaction)
+    expected_hashes = handoff._file_hashes(
+        handoff._artifact_bytes(expected_objects))
+    monkeypatch.setattr(
+        handoff, "ORIGINAL_DERIVED_HASHES", expected_hashes)
 
     monkeypatch.setattr(events, "read_chain",
                         lambda _root, verify=True: list(chain))
@@ -1304,8 +1615,6 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
     from tools.council import git_state
     monkeypatch.setattr(git_state, "head_commit",
                         lambda *_args, **_kwargs: COMMIT)
-    monkeypatch.setattr(git_state, "is_clean",
-                        lambda *_args, **_kwargs: True)
     monkeypatch.setattr(git_state, "commit_exists",
                         lambda *_args, **_kwargs: True)
 
@@ -1375,6 +1684,9 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
         state_machine.AUTONOMY_PAUSED
     derived = os.path.join(repo, ir.DERIVED_OUTPUT_ROOT)
     assert sorted(os.listdir(derived)) == sorted(ir.DERIVED_FILENAMES)
+    assert git_state.is_clean(repo, cfg.repo_roots) is False
+    assert handoff.target_has_only_exact_bundle(
+        repo, cfg.repo_roots, expected_hashes)
     claimed = storage.safe_request_path(
         root, "claimed", ir.RESULT_REQUEST_ID)
     assert os.path.isfile(claimed)
@@ -1384,6 +1696,340 @@ def test_publish_approved_synthetic_end_to_end_reaches_ready_and_audit(
     assert operation_order[lease_index + 1] == "namespace"
     assert lease_index < operation_order.index("namespace", lease_index) < \
         operation_order.index("registry") < operation_order.index("replay")
+
+
+def test_real_git_bundle_first_write_and_exact_adoption_preserve_inodes(
+        tmp_path, monkeypatch):
+    repo, _head = make_repo(tmp_path)
+    _objects, data, _request = _objects_and_request(repo)
+    hashes = handoff._file_hashes(data)
+    monkeypatch.setattr(handoff, "ORIGINAL_DERIVED_HASHES", hashes)
+    final = os.path.join(repo, ir.DERIVED_OUTPUT_ROOT)
+    budget = handoff._Budget({
+        "max_compute_minutes": 1, "max_wall_minutes": 1,
+        "max_storage_mb": 16, "max_replay_runs": 105,
+        "max_retries_per_run": 0})
+    handoff._write_bundle_transaction(final, "d" * 64, data, budget)
+    before = {
+        name: (os.lstat(os.path.join(final, name)).st_ino,
+               ir.file_sha256(os.path.join(final, name)))
+        for name in ir.DERIVED_FILENAMES
+    }
+    handoff._write_bundle_transaction(final, "d" * 64, data, budget)
+    after = {
+        name: (os.lstat(os.path.join(final, name)).st_ino,
+               ir.file_sha256(os.path.join(final, name)))
+        for name in ir.DERIVED_FILENAMES
+    }
+    assert after == before
+    assert handoff.target_has_only_exact_bundle(
+        repo, (repo,), hashes)
+
+
+@pytest.mark.parametrize("mutation", [
+    "tracked", "index", "unrelated", "extra", "missing", "changed", "symlink",
+    "hardlink",
+])
+def test_real_git_exact_bundle_predicate_refuses_every_other_tree(
+        tmp_path, monkeypatch, mutation):
+    repo, _head = make_repo(tmp_path)
+    _objects, data, _request = _objects_and_request(repo)
+    hashes = handoff._file_hashes(data)
+    monkeypatch.setattr(handoff, "ORIGINAL_DERIVED_HASHES", hashes)
+    final = os.path.join(repo, ir.DERIVED_OUTPUT_ROOT)
+    budget = handoff._Budget({
+        "max_compute_minutes": 1, "max_wall_minutes": 1,
+        "max_storage_mb": 16, "max_replay_runs": 105,
+        "max_retries_per_run": 0})
+    handoff._write_bundle_transaction(final, "d" * 64, data, budget)
+    member = os.path.join(final, ir.DERIVED_FILENAMES[0])
+    if mutation == "tracked":
+        with open(os.path.join(repo, "f.txt"), "a", encoding="utf-8") as fh:
+            fh.write("changed\n")
+    elif mutation == "index":
+        with open(os.path.join(repo, "f.txt"), "a", encoding="utf-8") as fh:
+            fh.write("staged\n")
+        subprocess.run(
+            ["git", "-C", repo, "add", "f.txt"], check=True)
+    elif mutation == "unrelated":
+        with open(os.path.join(repo, "unrelated.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("extra\n")
+    elif mutation == "extra":
+        with open(os.path.join(final, "extra.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{}\n")
+    elif mutation == "missing":
+        os.unlink(member)
+    elif mutation == "changed":
+        with open(member, "ab") as fh:
+            fh.write(b" ")
+    elif mutation == "symlink":
+        os.unlink(member)
+        os.symlink("replay_attestation.json", member)
+    elif mutation == "hardlink":
+        twin = os.path.join(repo, "bundle-twin")
+        os.link(member, twin)
+    assert not handoff.target_has_only_exact_bundle(
+        repo, (repo,), hashes)
+
+
+def test_recover_approved_end_to_end_adopts_once_and_rolls_forward(
+        tmp_path, monkeypatch):
+    from tools.council import git_state, result_handoff
+    target_repo, _target_head = make_repo(tmp_path, "target")
+    tool_repo, tool_head = make_repo(tmp_path, "tool")
+    root = make_root(tmp_path)
+    cfg = SimpleNamespace(
+        council_root=root, repo_roots=(target_repo, tool_repo),
+        role="claude")
+    inventory_content = {
+        "schema_version": "m8-budget-exhaustion-primary-inventory.v1",
+        "evidence_root": ir.EVIDENCE_ROOT,
+        "file_count": 423,
+        "files": {"manifest.jsonl": ir.MANIFEST_SHA256},
+    }
+    monkeypatch.setattr(
+        ir, "PRIMARY_INVENTORY_CONTENT_HASH",
+        ir.domain_hash(ir.PRIMARY_INVENTORY_DOMAIN, inventory_content))
+    synthetic_census = ir.build_coordinate_census(
+        _spec(), _success_rows(), _partial())
+    monkeypatch.setattr(
+        ir, "COORDINATE_CENSUS_CONTENT_HASH",
+        synthetic_census["content_hash"])
+    original_commit = \
+        "e4cf7f7a8f0dbad208865e1abf76082c9098faae"
+    authorization = _authorization()
+    authorization["closure_tool"]["target_commit"] = original_commit
+    for integration in authorization["closure_tool"]["integration_events"]:
+        integration["target_commit"] = original_commit
+    closure_hash = handoff.closure_authorization_hash(authorization)
+    monkeypatch.setattr(
+        handoff, "ORIGINAL_CLOSURE_AUTHORIZATION_HASH", closure_hash)
+    original_proposal = {
+        "event_id": handoff.ORIGINAL_PROPOSAL_EVENT_ID,
+        "event_hash": handoff.ORIGINAL_PROPOSAL_EVENT_HASH,
+        "event_type": "RESULT_HANDOFF_APPROVAL_REQUIRED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": target_repo,
+        "target_commit": original_commit,
+        "payload": {
+            "schema_version": "result-handoff-approval-required.v1",
+            "closure_authorization": authorization,
+            "closure_authorization_hash": closure_hash,
+        },
+    }
+    original_approval = {
+        "event_id": handoff.ORIGINAL_APPROVAL_EVENT_ID,
+        "event_hash": handoff.ORIGINAL_APPROVAL_EVENT_HASH,
+        "event_type": "RESULT_HANDOFF_APPROVED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": target_repo,
+        "target_commit": original_commit,
+        "payload": {
+            "schema_version": "result-handoff-approval.v1",
+            "approved_by": "human",
+            "approval_commit": original_commit,
+            "proposal_event_id": original_proposal["event_id"],
+            "proposal_event_hash": original_proposal["event_hash"],
+            "closure_authorization": authorization,
+            "closure_authorization_hash": closure_hash,
+            "human_token": {
+                "counter": 1, "preimage_hex": "f" * 64,
+                "binds": "e" * 64},
+        },
+    }
+    transaction = handoff.transaction_id(
+        ir.RESULT_REQUEST_ID, original_proposal, original_approval,
+        closure_hash, original_commit)
+    monkeypatch.setattr(
+        handoff, "ORIGINAL_BUNDLE_TRANSACTION_ID", transaction)
+    objects = handoff._artifact_objects(
+        _snapshot(), _replay_core(), authorization, original_proposal,
+        original_approval, transaction)
+    data = handoff._artifact_bytes(objects)
+    hashes = handoff._file_hashes(data)
+    monkeypatch.setattr(handoff, "ORIGINAL_DERIVED_HASHES", hashes)
+    final = os.path.join(target_repo, ir.DERIVED_OUTPUT_ROOT)
+    handoff._write_bundle_transaction(
+        final, transaction, data, handoff._Budget({
+            "max_compute_minutes": 1, "max_wall_minutes": 1,
+            "max_storage_mb": 16, "max_replay_runs": 105,
+            "max_retries_per_run": 0}))
+    before = {
+        name: (os.lstat(os.path.join(final, name)).st_ino,
+               ir.file_sha256(os.path.join(final, name)))
+        for name in ir.DERIVED_FILENAMES
+    }
+    integrations = [
+        {
+            "request_id": request_id,
+            "event_id": f"{index + 910:06d}-{index + 910:08x}",
+            "event_hash": f"{index + 910:064x}",
+            "target_commit": tool_head,
+        }
+        for index, request_id in enumerate(
+            handoff.RECOVERY_SOURCE_REQUEST_IDS)
+    ]
+    recovery_authorization = {
+        "schema_version":
+            "m8-incomplete-publication-recovery-authorization.v1",
+        "result_request_id": ir.RESULT_REQUEST_ID,
+        "original_repository": target_repo,
+        "original_target_commit": original_commit,
+        "original_proposal": {
+            "event_id": original_proposal["event_id"],
+            "event_hash": original_proposal["event_hash"],
+        },
+        "original_approval": {
+            "event_id": original_approval["event_id"],
+            "event_hash": original_approval["event_hash"],
+        },
+        "closure_authorization_hash": closure_hash,
+        "bundle_transaction_id": transaction,
+        "derived_artifact_hashes": hashes,
+        "recovery_tool": {
+            "repository": tool_repo,
+            "target_commit": tool_head,
+            "integration_events": integrations,
+        },
+        # Deliberately differs from the historical 240/240/1024 budget.
+        "recovery_budget": {
+            "max_compute_minutes": 7, "max_wall_minutes": 8,
+            "max_storage_mb": 9, "max_replay_runs": 105,
+            "max_retries_per_run": 0,
+        },
+    }
+    recovery_hash = handoff.recovery_authorization_hash(
+        recovery_authorization)
+    recovery_proposal = {
+        "event_id": "000920-00000398",
+        "event_hash": "c" * 64,
+        "event_type": "RESULT_HANDOFF_APPROVAL_REQUIRED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": target_repo,
+        "target_commit": original_commit,
+        "payload": {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval-required.v1",
+            "recovery_authorization": recovery_authorization,
+            "recovery_authorization_hash": recovery_hash,
+        },
+    }
+    recovery_approval = {
+        "event_id": "000921-00000399",
+        "event_hash": "d" * 64,
+        "event_type": "RESULT_HANDOFF_APPROVED",
+        "request_id": ir.RESULT_REQUEST_ID,
+        "repository": target_repo,
+        "target_commit": original_commit,
+        "payload": {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval.v1",
+            "approved_by": "human",
+            "approval_commit": original_commit,
+            "proposal_event_id": recovery_proposal["event_id"],
+            "proposal_event_hash": recovery_proposal["event_hash"],
+            "recovery_authorization": recovery_authorization,
+            "recovery_authorization_hash": recovery_hash,
+            "human_token": {
+                "counter": 2, "preimage_hex": "a" * 64,
+                "binds": "b" * 64},
+        },
+    }
+    chain = [
+        original_proposal, original_approval,
+        recovery_proposal, recovery_approval]
+    assert state_machine.project(chain)[ir.RESULT_REQUEST_ID]["state"] == \
+        state_machine.RESULT_HANDOFF_OWNER_APPROVED
+    monkeypatch.setattr(events, "read_chain",
+                        lambda _root, verify=True: list(chain))
+
+    def append_event(_root, _cfg, event_type, sender, request_id,
+                     repository, target_commit, payload, **_kwargs):
+        event = events.build_event(
+            event_type, sender, request_id, repository, target_commit,
+            payload, len(chain) + 1,
+            chain[-1]["event_hash"] if chain else "0" * 64)
+        state_machine.check(event, state_machine.project(chain))
+        chain.append(event)
+        return event
+
+    monkeypatch.setattr(events, "append_event", append_event)
+    monkeypatch.setattr(
+        handoff, "_runtime_tool_repository", lambda: tool_repo)
+    monkeypatch.setattr(
+        handoff, "_recovery_integrations",
+        lambda _chain, commit: copy.deepcopy(integrations)
+        if commit == tool_head else pytest.fail("wrong tool commit"))
+    real_head = git_state.head_commit
+    monkeypatch.setattr(
+        git_state, "head_commit",
+        lambda repo, roots: (
+            original_commit if repo == target_repo
+            else real_head(repo, roots)))
+    monkeypatch.setattr(
+        git_state, "commit_exists", lambda *_args, **_kwargs: True)
+    sweep = handoff.importlib.import_module("coliseum.textlab.sweep")
+
+    @contextmanager
+    def fake_manifest_lock(path):
+        yield path
+
+    replay_calls = []
+    monkeypatch.setattr(
+        sweep, "_manifest_advisory_lock", fake_manifest_lock)
+    monkeypatch.setattr(
+        handoff, "_resolved_closure_plan", lambda _repo: _spec())
+    monkeypatch.setattr(
+        handoff, "_derive_primary_locked",
+        lambda *_args, **_kwargs: _snapshot())
+    monkeypatch.setattr(
+        sweep, "build_pack_replay_core_locked",
+        lambda *_args, **_kwargs: (
+            replay_calls.append("replay") or _replay_core()))
+    real_verify = handoff.verify_bundle_request
+    deep_calls = []
+
+    def bounded_verify(repo, request, *, chain=None, deep=True, budget=None):
+        assert deep is True
+        assert budget.limits == recovery_authorization["recovery_budget"]
+        deep_calls.append(request["request_payload_hash"])
+        return real_verify(
+            repo, request, chain=chain, deep=True, budget=budget)
+
+    monkeypatch.setattr(handoff, "verify_bundle_request", bounded_verify)
+    real_write = storage.atomic_write_json
+    failed = {"done": False}
+
+    def fail_after_ready(path, value):
+        if "/requests/claimed/" in path and not failed["done"]:
+            failed["done"] = True
+            raise OSError("synthetic interruption after ready")
+        return real_write(path, value)
+
+    monkeypatch.setattr(storage, "atomic_write_json", fail_after_ready)
+    with pytest.raises(OSError, match="interruption after ready"):
+        handoff.recover_approved(root, cfg, ir.RESULT_REQUEST_ID)
+    assert [event["event_type"] for event in chain[-1:]] == [
+        "RESULT_HANDOFF_READY"]
+    assert len(deep_calls) == 1
+    monkeypatch.setattr(storage, "atomic_write_json", real_write)
+    audit = handoff.recover_approved(root, cfg, ir.RESULT_REQUEST_ID)
+    assert audit["event_type"] == "RESULT_AUDIT_REQUESTED"
+    assert len(deep_calls) == 1, \
+        "exact ready-journal roll-forward must not replay a second time"
+    assert replay_calls == ["replay"]
+    assert state_machine.project(chain)[ir.RESULT_REQUEST_ID]["state"] == \
+        state_machine.RESULT_AUDIT
+    after = {
+        name: (os.lstat(os.path.join(final, name)).st_ino,
+               ir.file_sha256(os.path.join(final, name)))
+        for name in ir.DERIVED_FILENAMES
+    }
+    assert after == before
+    with pytest.raises(CouncilError, match="already consumed"):
+        handoff.recover_approved(root, cfg, ir.RESULT_REQUEST_ID)
 
 
 def test_result_artifacts_v2_accept_exact_request_record():

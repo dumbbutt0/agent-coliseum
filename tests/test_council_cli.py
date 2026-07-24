@@ -76,6 +76,19 @@ def test_approve_requires_human_role(env):
                      "--commit", head]) == 1
 
 
+def test_m8_recovery_commands_preserve_role_boundaries(env):
+    _root, repo, head, _cfg = env
+    assert cli.main([
+        "--role", "codex", "propose-m8-incomplete-recovery",
+        "first-gladiator-m8-incomplete-result-001",
+        "--tool-repository", repo, "--tool-commit", head,
+        "--max-compute-minutes", "240", "--max-wall-minutes", "240",
+        "--max-storage-mb", "1024"]) == 1
+    assert cli.main([
+        "--role", "human", "recover-m8-incomplete-handoff",
+        "first-gladiator-m8-incomplete-result-001"]) == 1
+
+
 def test_approve_binds_to_exact_commit(env):
     root, repo, head, cfg = env
     _drive_to_awaiting_human(root, cfg, repo, head)

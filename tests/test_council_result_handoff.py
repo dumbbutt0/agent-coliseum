@@ -222,6 +222,19 @@ def test_event_first_publisher_is_idempotent(tmp_path, monkeypatch):
                 e["event_type"] == "RESULT_AUDIT_REQUESTED"]) == 1
 
 
+def test_generic_publisher_still_refuses_untracked_target(
+        tmp_path, monkeypatch):
+    root, repo, _head, cfg, request = _publisher_env(tmp_path, monkeypatch)
+    with open(os.path.join(repo, "untracked-result.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write("{}\n")
+    with pytest.raises(SchemaViolation, match="clean repository HEAD"):
+        result_handoff.publish_handoff(root, cfg, request)
+    assert not [
+        event for event in events.read_chain(root)
+        if event["request_id"] == RID]
+
+
 def test_crash_after_ready_rolls_forward_without_duplicate(tmp_path,
                                                             monkeypatch):
     root, _repo, _head, cfg, request = _publisher_env(tmp_path, monkeypatch)

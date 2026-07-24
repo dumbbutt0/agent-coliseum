@@ -63,11 +63,44 @@ SOURCE_SLICE_REQUEST_IDS = (
     "first-gladiator-m8-incomplete-closure-d-002",
     "first-gladiator-m8-incomplete-closure-e-002",
 )
+RECOVERY_SOURCE_REQUEST_IDS = (
+    "first-gladiator-m8-incomplete-recovery-a-001",
+    "first-gladiator-m8-incomplete-recovery-b-001",
+    "first-gladiator-m8-incomplete-recovery-c-001",
+    "first-gladiator-m8-incomplete-recovery-d-001",
+    "first-gladiator-m8-incomplete-recovery-e-001",
+)
+ORIGINAL_PROPOSAL_EVENT_ID = "002473-8a2175f0"
+ORIGINAL_PROPOSAL_EVENT_HASH = (
+    "ff469af69c364767b0ef8ccd8103e234b6af8cd290a426f9eabed75bf7d8a4e7")
+ORIGINAL_APPROVAL_EVENT_ID = "002474-080fd948"
+ORIGINAL_APPROVAL_EVENT_HASH = (
+    "9f709deafa25f308b2fb886dd7c5a557f6e89c2b57f43090a407dfcd5423cf81")
+ORIGINAL_CLOSURE_AUTHORIZATION_HASH = (
+    "c010df64dd3684c5e845522b3ab69f708a61b2383ef2fb67e097ba04c9ecfd23")
+ORIGINAL_BUNDLE_TRANSACTION_ID = (
+    "134a185191ca9c3bc6ae43a00c7930791f21d51ce819e3d08d84c6a0609cf205")
+ORIGINAL_DERIVED_HASHES = {
+    "primary_inventory.json":
+        "4b3ae29ac00f64aef802a96c870c677c23e1dec0e829547f6058940e02fec0fb",
+    "replay_attestation.json":
+        "5f491678c2c7d66a13ff5fad2350639e444842e225be7806ca74ac95d7e5dab9",
+    "coordinate_census.json":
+        "255f05f193ee7e2bf4c9dafc282e37c62d9590b446c947fd9138e4b65b2dd52b",
+    "incomplete_report.json":
+        "7e59039462dfb43ef0ea5c7eaf7ad4aa46740cd54e4786be475abe05bc44abd1",
+    "incomplete_result_package.json":
+        "b76960da3c6d63e4c18d8dc26eedeb68099ffadda3ff60c68ecfad1524c4187f",
+    "validation_report.json":
+        "24aaa51eb082672b15e92e97bce502b12ad7ad72c903c070ad004823d6b40f6f",
+}
+RECOVERY_AUTHORIZATION_DOMAIN = (
+    "council:m8-incomplete-publication-recovery-authorization:v1")
 AUTHORIZATION_DOMAIN = (
     "council:m8-budget-exhaustion-closure-authorization:v1")
 TRANSACTION_DOMAIN = (
     "council:m8-budget-exhaustion-handoff-transaction:v1")
-M8_EXPECTED_TEST_COUNT = 2396
+M8_EXPECTED_TEST_COUNT = 2414
 VALIDATIONS = [
     "council_chain_verified",
     "closure_owner_approval_verified",
@@ -350,7 +383,113 @@ def validate_closure_authorization(auth: dict) -> None:
         raise SchemaViolation("closure outcome or derived root differs")
 
 
+def recovery_authorization_hash(authorization: dict) -> str:
+    from tools.council.schemas import domain_hash
+    return domain_hash(RECOVERY_AUTHORIZATION_DOMAIN, authorization)
+
+
+def validate_recovery_authorization(auth: dict) -> None:
+    _closed(auth, {
+        "schema_version", "result_request_id", "original_repository",
+        "original_target_commit", "original_proposal", "original_approval",
+        "closure_authorization_hash", "bundle_transaction_id",
+        "derived_artifact_hashes", "recovery_tool",
+        "recovery_budget"}, "publication recovery authorization")
+    if auth["schema_version"] != \
+            "m8-incomplete-publication-recovery-authorization.v1" or \
+            auth["result_request_id"] != RESULT_REQUEST_ID:
+        raise SchemaViolation("publication recovery identity differs")
+    if auth["original_target_commit"] != \
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae":
+        raise SchemaViolation("publication recovery target commit differs")
+    if not isinstance(auth["original_repository"], str) or \
+            not auth["original_repository"]:
+        raise SchemaViolation("publication recovery repository is invalid")
+    for field, expected_id, expected_hash in (
+            ("original_proposal", ORIGINAL_PROPOSAL_EVENT_ID,
+             ORIGINAL_PROPOSAL_EVENT_HASH),
+            ("original_approval", ORIGINAL_APPROVAL_EVENT_ID,
+             ORIGINAL_APPROVAL_EVENT_HASH)):
+        value = _closed(auth[field], {"event_id", "event_hash"}, field)
+        if value != {"event_id": expected_id, "event_hash": expected_hash}:
+            raise SchemaViolation(f"{field} identity differs")
+    if auth["closure_authorization_hash"] != \
+            ORIGINAL_CLOSURE_AUTHORIZATION_HASH or \
+            auth["bundle_transaction_id"] != ORIGINAL_BUNDLE_TRANSACTION_ID:
+        raise SchemaViolation("publication recovery transaction differs")
+    if auth["derived_artifact_hashes"] != ORIGINAL_DERIVED_HASHES:
+        raise SchemaViolation("publication recovery artifact hashes differ")
+    tool = _closed(auth["recovery_tool"], {
+        "repository", "target_commit", "integration_events"},
+        "recovery_tool")
+    if not isinstance(tool["repository"], str) or not tool["repository"]:
+        raise SchemaViolation("recovery tool repository is invalid")
+    if not _COMMIT.fullmatch(str(tool["target_commit"])):
+        raise SchemaViolation("recovery tool commit is invalid")
+    integrations = tool["integration_events"]
+    if not isinstance(integrations, list) or len(integrations) != 5:
+        raise SchemaViolation("recovery tool requires five integrations")
+    if [item.get("request_id") if isinstance(item, dict) else None
+            for item in integrations] != list(RECOVERY_SOURCE_REQUEST_IDS):
+        raise SchemaViolation("recovery integration request order differs")
+    for item in integrations:
+        _closed(item, {"request_id", "event_id", "event_hash",
+                       "target_commit"}, "recovery integration")
+        _event_id(item["event_id"], "recovery integration event_id")
+        _hash(item["event_hash"], "recovery integration event_hash")
+        if item["target_commit"] != tool["target_commit"]:
+            raise SchemaViolation("recovery integration commit differs")
+    budget = _closed(auth["recovery_budget"], BUDGET_FIELDS,
+                     "recovery_budget")
+    for field in ("max_compute_minutes", "max_wall_minutes",
+                  "max_storage_mb"):
+        if _nonneg(budget[field], f"recovery_budget.{field}") < 1:
+            raise SchemaViolation(f"recovery_budget.{field} must be positive")
+    if budget["max_replay_runs"] != 105 or \
+            budget["max_retries_per_run"] != 0:
+        raise SchemaViolation("recovery replay/retry budget differs")
+
+
+def _validate_recovery_proposal_payload(payload: dict) -> None:
+    _closed(payload, {
+        "schema_version", "recovery_authorization",
+        "recovery_authorization_hash"}, "recovery approval-required payload")
+    if payload["schema_version"] != \
+            "m8-incomplete-publication-recovery-approval-required.v1":
+        raise SchemaViolation("recovery proposal schema differs")
+    validate_recovery_authorization(payload["recovery_authorization"])
+    if payload["recovery_authorization_hash"] != \
+            recovery_authorization_hash(payload["recovery_authorization"]):
+        raise SchemaViolation("recovery authorization hash differs")
+
+
+def _validate_recovery_approval_payload(payload: dict) -> None:
+    _closed(payload, {
+        "schema_version", "approved_by", "approval_commit",
+        "proposal_event_id", "proposal_event_hash",
+        "recovery_authorization", "recovery_authorization_hash",
+        "human_token"}, "recovery approval payload")
+    if payload["schema_version"] != \
+            "m8-incomplete-publication-recovery-approval.v1" or \
+            payload["approved_by"] != "human":
+        raise SchemaViolation("recovery approval identity differs")
+    _event_id(payload["proposal_event_id"], "proposal_event_id")
+    _hash(payload["proposal_event_hash"], "proposal_event_hash")
+    validate_recovery_authorization(payload["recovery_authorization"])
+    if payload["approval_commit"] != payload["recovery_authorization"][
+            "original_target_commit"] or \
+            payload["recovery_authorization_hash"] != \
+            recovery_authorization_hash(payload["recovery_authorization"]):
+        raise SchemaViolation("recovery approval binding differs")
+    if not isinstance(payload["human_token"], dict):
+        raise SchemaViolation("human_token must be an object")
+
+
 def validate_proposal_payload(payload: dict) -> None:
+    if payload.get("schema_version") == \
+            "m8-incomplete-publication-recovery-approval-required.v1":
+        _validate_recovery_proposal_payload(payload)
+        return
     _closed(payload, {
         "schema_version", "closure_authorization",
         "closure_authorization_hash"}, "approval-required payload")
@@ -363,6 +502,10 @@ def validate_proposal_payload(payload: dict) -> None:
 
 
 def validate_approval_payload(payload: dict) -> None:
+    if payload.get("schema_version") == \
+            "m8-incomplete-publication-recovery-approval.v1":
+        _validate_recovery_approval_payload(payload)
+        return
     _closed(payload, {
         "schema_version", "approved_by", "approval_commit",
         "proposal_event_id", "proposal_event_hash", "closure_authorization",
@@ -393,6 +536,25 @@ def validate_approval_binding(chain: list[dict], event: dict) -> None:
     if proposal is None:
         raise CouncilError("result-handoff approval has no proposal")
     payload = event["payload"]
+    if payload["schema_version"] == \
+            "m8-incomplete-publication-recovery-approval.v1":
+        if proposal["payload"].get("schema_version") != \
+                "m8-incomplete-publication-recovery-approval-required.v1" or \
+                payload["proposal_event_id"] != proposal["event_id"] or \
+                payload["proposal_event_hash"] != proposal["event_hash"] or \
+                payload["recovery_authorization"] != \
+                proposal["payload"]["recovery_authorization"] or \
+                payload["recovery_authorization_hash"] != \
+                proposal["payload"]["recovery_authorization_hash"]:
+            raise CouncilError(
+                "recovery approval does not exactly copy its proposal")
+        expected = proposal["payload"]["recovery_authorization"][
+            "original_target_commit"]
+        if event["target_commit"] != expected or \
+                payload["approval_commit"] != expected or \
+                event["repository"] != proposal["repository"]:
+            raise CouncilError("recovery approval coordinates differ")
+        return
     if payload["proposal_event_id"] != proposal["event_id"] or \
             payload["proposal_event_hash"] != proposal["event_hash"] or \
             payload["closure_authorization"] != \
@@ -414,8 +576,12 @@ def validate_ready_binding(chain: list[dict], event: dict) -> None:
     approvals = [item for item in chain
                  if item["request_id"] == event["request_id"] and
                  item["event_type"] == "RESULT_HANDOFF_APPROVED"]
-    if len(approvals) != 1:
-        raise CouncilError("M8 ready event requires exactly one owner approval")
+    recovery = request.get("publication_recovery")
+    expected_count = 2 if recovery is not None else 1
+    if len(approvals) != expected_count:
+        raise CouncilError(
+            f"M8 ready event requires exactly {expected_count} owner "
+            "approval(s)")
     approval = approvals[0]
     if request.get("closure_authorization") != \
             approval["payload"]["closure_authorization"] or \
@@ -426,6 +592,19 @@ def validate_ready_binding(chain: list[dict], event: dict) -> None:
             request["authorization_profile"].get(
                 "closure_owner_approval_event_hash") != approval["event_hash"]:
         raise CouncilError("M8 ready request differs from owner approval")
+    if recovery is not None:
+        recovery_approval = approvals[-1]
+        if recovery_approval["payload"].get("schema_version") != \
+                "m8-incomplete-publication-recovery-approval.v1" or \
+                recovery.get("recovery_owner_approval_event_id") != \
+                recovery_approval["event_id"] or \
+                recovery.get("recovery_owner_approval_event_hash") != \
+                recovery_approval["event_hash"] or \
+                recovery.get("recovery_authorization") != \
+                recovery_approval["payload"]["recovery_authorization"] or \
+                recovery.get("recovery_authorization_hash") != \
+                recovery_approval["payload"]["recovery_authorization_hash"]:
+            raise CouncilError("M8 ready recovery binding differs")
 
 
 def transaction_id(request_id: str, proposal: dict, approval: dict,
@@ -457,6 +636,9 @@ def validate_m8_handoff_request(request: dict) -> None:
         validate_result_artifacts)
 
     expected = set(REQUEST_REQUIRED_FIELDS) | M8_REQUEST_EXTRA_FIELDS
+    recovery = request.get("publication_recovery")
+    if recovery is not None:
+        expected.add("publication_recovery")
     if set(request) != expected:
         raise SchemaViolation(
             "M8 result request has missing or unknown keys: "
@@ -591,6 +773,36 @@ def validate_m8_handoff_request(request: dict) -> None:
     if request["validation_report_hash"] != \
             validation_report_hash(request["validations"]):
         raise SchemaViolation("validation_report_hash does not bind validations")
+    if recovery is not None:
+        _closed(recovery, {
+            "schema_version", "recovery_authorization",
+            "recovery_authorization_hash",
+            "recovery_owner_approval_event_id",
+            "recovery_owner_approval_event_hash"},
+            "publication_recovery")
+        if recovery["schema_version"] != \
+                "m8-incomplete-publication-recovery-binding.v1":
+            raise SchemaViolation("publication recovery binding differs")
+        validate_recovery_authorization(
+            recovery["recovery_authorization"])
+        recovery_auth = recovery["recovery_authorization"]
+        if recovery_auth["original_repository"] != request["repository"] or \
+                recovery_auth["original_target_commit"] != \
+                request["target_commit"] or \
+                recovery_auth["closure_authorization_hash"] != \
+                request["closure_authorization_hash"] or \
+                recovery_auth["derived_artifact_hashes"] != \
+                request["derived_artifact_hashes"]:
+            raise SchemaViolation(
+                "publication recovery does not bind the result request")
+        if recovery["recovery_authorization_hash"] != \
+                recovery_authorization_hash(
+                    recovery_auth):
+            raise SchemaViolation("publication recovery hash differs")
+        _event_id(recovery["recovery_owner_approval_event_id"],
+                  "recovery owner approval event")
+        _hash(recovery["recovery_owner_approval_event_hash"],
+              "recovery owner approval hash")
 
 
 def _event(chain: list[dict], event_id: str, event_hash: str,
@@ -652,6 +864,150 @@ def _closure_integrations(chain: list[dict], commit: str) -> list[dict]:
             "target_commit": commit,
         })
     return result
+
+
+def _recovery_integrations(chain: list[dict], commit: str) -> list[dict]:
+    result = []
+    for request_id in RECOVERY_SOURCE_REQUEST_IDS:
+        matching = [item for item in chain
+                    if item["request_id"] == request_id and
+                    item["event_type"] == "CHANGE_INTEGRATED"]
+        if len(matching) != 1 or matching[0]["target_commit"] != commit:
+            raise CouncilError(
+                f"{request_id} lacks one same-commit integration")
+        go = next((item for item in chain
+                   if item["request_id"] == request_id and
+                   item["event_type"] == "AUDIT_GO" and
+                   item["target_commit"] == commit), None)
+        if go is None or go["payload"].get("conditions") != []:
+            raise CouncilError(f"{request_id} lacks a fresh plain GO")
+        integration = matching[0]
+        if integration["payload"].get("audit_go_event") != go["event_id"]:
+            raise CouncilError(f"{request_id} integration does not bind its GO")
+        result.append({
+            "request_id": request_id,
+            "event_id": integration["event_id"],
+            "event_hash": integration["event_hash"],
+            "target_commit": commit,
+        })
+    return result
+
+
+def _original_owner_events(chain: list[dict]) -> tuple[dict, dict]:
+    proposal = _event(
+        chain, ORIGINAL_PROPOSAL_EVENT_ID, ORIGINAL_PROPOSAL_EVENT_HASH,
+        "RESULT_HANDOFF_APPROVAL_REQUIRED", RESULT_REQUEST_ID)
+    approval = _event(
+        chain, ORIGINAL_APPROVAL_EVENT_ID, ORIGINAL_APPROVAL_EVENT_HASH,
+        "RESULT_HANDOFF_APPROVED", RESULT_REQUEST_ID)
+    if proposal["payload"].get("schema_version") != \
+            "result-handoff-approval-required.v1" or \
+            approval["payload"].get("schema_version") != \
+            "result-handoff-approval.v1" or \
+            proposal["payload"].get("closure_authorization_hash") != \
+            ORIGINAL_CLOSURE_AUTHORIZATION_HASH:
+        raise CouncilError("original M8 owner boundary differs")
+    validate_approval_binding(chain[:chain.index(approval)], approval)
+    return proposal, approval
+
+
+def build_recovery_authorization(
+        root: str, cfg, tool_repository: str, tool_commit: str,
+        max_compute_minutes: int, max_wall_minutes: int,
+        max_storage_mb: int) -> dict:
+    """Derive the closed second owner gate without changing result files."""
+    from tools.council import events, git_state, state_machine
+    chain = events.read_chain(root)
+    projected = state_machine.project(chain).get(RESULT_REQUEST_ID, {})
+    if projected.get("state") != \
+            state_machine.RESULT_HANDOFF_OWNER_APPROVED:
+        raise CouncilError("M8 result is not at the recovery proposal boundary")
+    result_events = [
+        item for item in chain if item["request_id"] == RESULT_REQUEST_ID]
+    if [item["event_id"] for item in result_events] != [
+            ORIGINAL_PROPOSAL_EVENT_ID, ORIGINAL_APPROVAL_EVENT_ID]:
+        raise CouncilError("M8 result owner history differs before recovery")
+    proposal, approval = _original_owner_events(chain)
+    original_repo = proposal["repository"]
+    original_commit = proposal["target_commit"]
+    if original_commit != \
+            "e4cf7f7a8f0dbad208865e1abf76082c9098faae" or \
+            approval["repository"] != original_repo:
+        raise CouncilError("original M8 repository boundary differs")
+    if git_state.head_commit(original_repo, cfg.repo_roots) != \
+            original_commit or not target_has_only_exact_bundle(
+                original_repo, cfg.repo_roots, ORIGINAL_DERIVED_HASHES):
+        raise CouncilError(
+            "original M8 worktree is not the exact six-file boundary")
+    if git_state.head_commit(tool_repository, cfg.repo_roots) != tool_commit or \
+            not git_state.is_clean(tool_repository, cfg.repo_roots) or \
+            not git_state.is_ancestor(
+                original_commit, tool_commit, tool_repository, cfg.repo_roots):
+        raise CouncilError("recovery tool is not a clean exact descendant")
+    integrations = _recovery_integrations(chain, tool_commit)
+    authorization = {
+        "schema_version":
+            "m8-incomplete-publication-recovery-authorization.v1",
+        "result_request_id": RESULT_REQUEST_ID,
+        "original_repository": original_repo,
+        "original_target_commit": original_commit,
+        "original_proposal": {
+            "event_id": proposal["event_id"],
+            "event_hash": proposal["event_hash"],
+        },
+        "original_approval": {
+            "event_id": approval["event_id"],
+            "event_hash": approval["event_hash"],
+        },
+        "closure_authorization_hash":
+            proposal["payload"]["closure_authorization_hash"],
+        "bundle_transaction_id": ORIGINAL_BUNDLE_TRANSACTION_ID,
+        "derived_artifact_hashes": dict(ORIGINAL_DERIVED_HASHES),
+        "recovery_tool": {
+            "repository": tool_repository,
+            "target_commit": tool_commit,
+            "integration_events": integrations,
+        },
+        "recovery_budget": {
+            "max_compute_minutes": max_compute_minutes,
+            "max_wall_minutes": max_wall_minutes,
+            "max_storage_mb": max_storage_mb,
+            "max_replay_runs": 105,
+            "max_retries_per_run": 0,
+        },
+    }
+    validate_recovery_authorization(authorization)
+    return authorization
+
+
+def propose_recovery(
+        root: str, cfg, request_id: str, tool_repository: str,
+        tool_commit: str, max_compute_minutes: int,
+        max_wall_minutes: int, max_storage_mb: int) -> dict:
+    """Append only the closed publication-recovery owner proposal."""
+    from tools.council import events, locking
+    if request_id != RESULT_REQUEST_ID:
+        raise SchemaViolation(f"request id must be exactly {RESULT_REQUEST_ID}")
+    lease = locking.acquire(
+        root, "_m8_incomplete_handoff", SENDER, request_id,
+        kind="m8_incomplete_recovery_proposal")
+    try:
+        authorization = build_recovery_authorization(
+            root, cfg, tool_repository, tool_commit,
+            max_compute_minutes, max_wall_minutes, max_storage_mb)
+        payload = {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval-required.v1",
+            "recovery_authorization": authorization,
+            "recovery_authorization_hash":
+                recovery_authorization_hash(authorization),
+        }
+        return events.append_event(
+            root, cfg, "RESULT_HANDOFF_APPROVAL_REQUIRED", SENDER,
+            request_id, authorization["original_repository"],
+            authorization["original_target_commit"], payload)
+    finally:
+        locking.release(lease)
 
 
 def _resolved_closure_plan(repo: str) -> dict:
@@ -890,6 +1246,23 @@ def validate_proposal_append(root: str, cfg, chain: list[dict],
     """Authoritative append-bound revalidation for an M8 proposal."""
     if event["request_id"] != RESULT_REQUEST_ID:
         raise CouncilError("M8 proposal request id differs")
+    if event["payload"].get("schema_version") == \
+            "m8-incomplete-publication-recovery-approval-required.v1":
+        auth = event["payload"]["recovery_authorization"]
+        expected = build_recovery_authorization(
+            root, cfg, auth["recovery_tool"]["repository"],
+            auth["recovery_tool"]["target_commit"],
+            auth["recovery_budget"]["max_compute_minutes"],
+            auth["recovery_budget"]["max_wall_minutes"],
+            auth["recovery_budget"]["max_storage_mb"])
+        if auth != expected or event["repository"] != \
+                expected["original_repository"] or \
+                event["target_commit"] != expected["original_target_commit"] \
+                or event["payload"]["recovery_authorization_hash"] != \
+                recovery_authorization_hash(expected):
+            raise CouncilError(
+                "M8 recovery proposal differs from authoritative derivation")
+        return
     if any(item["request_id"] == RESULT_REQUEST_ID for item in chain):
         raise CouncilError("M8 proposal request id already has chain history")
     auth = event["payload"]["closure_authorization"]
@@ -939,11 +1312,30 @@ def approval_payload(chain: list[dict], request_id: str,
     proposals = [item for item in chain
                  if item["request_id"] == request_id and
                  item["event_type"] == "RESULT_HANDOFF_APPROVAL_REQUIRED"]
-    if len(proposals) != 1:
-        raise CouncilError("result handoff requires exactly one proposal")
-    proposal = proposals[0]
+    if not proposals:
+        raise CouncilError("result handoff requires a proposal")
+    proposal = proposals[-1]
     if proposal["target_commit"] != commit:
         raise CouncilError("approval commit differs from proposal")
+    if proposal["payload"].get("schema_version") == \
+            "m8-incomplete-publication-recovery-approval-required.v1":
+        if len(proposals) != 2:
+            raise CouncilError(
+                "publication recovery requires exactly two proposals")
+        return {
+            "schema_version":
+                "m8-incomplete-publication-recovery-approval.v1",
+            "approved_by": "human",
+            "approval_commit": commit,
+            "proposal_event_id": proposal["event_id"],
+            "proposal_event_hash": proposal["event_hash"],
+            "recovery_authorization":
+                proposal["payload"]["recovery_authorization"],
+            "recovery_authorization_hash":
+                proposal["payload"]["recovery_authorization_hash"],
+        }
+    if len(proposals) != 1:
+        raise CouncilError("result handoff requires exactly one proposal")
     return {
         "schema_version": "result-handoff-approval.v1",
         "approved_by": "human",
@@ -1033,6 +1425,36 @@ def _verify_exact_bundle(path: str, expected: dict[str, bytes]) -> None:
                 raise CouncilError("existing derived bundle bytes differ")
 
 
+def _derived_relative_paths() -> frozenset[str]:
+    return frozenset(
+        f"{ir.DERIVED_OUTPUT_ROOT}/{name}" for name in ir.DERIVED_FILENAMES)
+
+
+def target_has_only_exact_bundle(repo: str, repo_roots,
+                                 expected_hashes: dict[str, str]) -> bool:
+    """M8-only target predicate; generic clean handling is unchanged."""
+    from tools.council import git_state
+    if expected_hashes != ORIGINAL_DERIVED_HASHES or \
+            not git_state.has_only_untracked_paths(
+                repo, _derived_relative_paths(), repo_roots):
+        return False
+    root = ir.safe_repo_path(repo, ir.DERIVED_OUTPUT_ROOT)
+    if not os.path.isdir(root) or os.path.islink(root) or \
+            set(os.listdir(root)) != set(ir.DERIVED_FILENAMES):
+        return False
+    for name in ir.DERIVED_FILENAMES:
+        path = os.path.join(root, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            return False
+        if not os.path.isfile(path) or os.path.islink(path) or \
+                info.st_nlink != 1 or \
+                ir.file_sha256(path) != expected_hashes[name]:
+            return False
+    return True
+
+
 def _preflight_request_namespace(root: str, chain: list[dict]) -> None:
     from tools.council import storage
     allowed = {
@@ -1047,6 +1469,32 @@ def _preflight_request_namespace(root: str, chain: list[dict]) -> None:
         if os.path.lexists(path):
             raise CouncilError(
                 f"M8 result request already has a {bucket} lifecycle file")
+
+
+def _preflight_recovery_namespace(root: str, chain: list[dict],
+                                  *, allow_ready: bool = False) -> None:
+    from tools.council import storage
+    uses = [item for item in chain if item["request_id"] == RESULT_REQUEST_ID]
+    prefix = [
+        "RESULT_HANDOFF_APPROVAL_REQUIRED", "RESULT_HANDOFF_APPROVED",
+        "RESULT_HANDOFF_APPROVAL_REQUIRED", "RESULT_HANDOFF_APPROVED"]
+    observed = [item["event_type"] for item in uses]
+    if observed[:4] != prefix or len(observed) not in (
+            (4, 5) if allow_ready else (4,)):
+        raise CouncilError("M8 recovery request chain prefix differs")
+    if len(observed) == 5 and observed[4] != "RESULT_HANDOFF_READY":
+        raise CouncilError("M8 recovery ready journal differs")
+    ready_path = storage.safe_request_path(root, "ready", RESULT_REQUEST_ID)
+    complete_path = storage.safe_request_path(
+        root, "complete", RESULT_REQUEST_ID)
+    claimed_path = storage.safe_request_path(
+        root, "claimed", RESULT_REQUEST_ID)
+    if os.path.lexists(ready_path) or os.path.lexists(complete_path):
+        raise CouncilError("M8 recovery has a conflicting lifecycle file")
+    if not allow_ready and os.path.lexists(claimed_path):
+        raise CouncilError("M8 recovery claimed file exists before ready")
+    if allow_ready and len(observed) == 4 and os.path.lexists(claimed_path):
+        raise CouncilError("M8 recovery has an orphan claimed request")
 
 
 def _source_rewind_paths(root: str, request_id: str, cycle: int,
@@ -1868,12 +2316,16 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
     evidence_root = ir.safe_repo_path(repo, ir.EVIDENCE_ROOT)
     manifest_path = ir.safe_repo_path(repo, ir.MANIFEST)
     planned_design = _resolved_closure_plan(repo)
+    recovery = request.get("publication_recovery")
+    expected_budget = (
+        recovery["recovery_authorization"]["recovery_budget"]
+        if recovery is not None else authorization["closure_budget"])
     if budget is not None and (
             not isinstance(budget, _Budget) or
-            budget.limits != authorization["closure_budget"]):
+            budget.limits != expected_budget):
         raise CouncilError(
-            "deep verification budget differs from the owner closure budget")
-    active_budget = budget or _Budget(authorization["closure_budget"])
+            "deep verification budget differs from the owner-bound budget")
+    active_budget = budget or _Budget(expected_budget)
     active_budget.check(root)
     with sweep._manifest_advisory_lock(manifest_path) as locked_manifest:
         snapshot = _derive_primary_locked(
@@ -1887,6 +2339,8 @@ def verify_bundle_request(repo: str, request: dict, *, chain=None,
             locked_manifest, evidence_root,
             os.path.join(repo, "configs", "scenarios"),
             planned_design, progress_check=active_budget.check)
+        if len(replay_core["runs"]) > expected_budget["max_replay_runs"]:
+            raise CouncilError("deep replay count exceeds the owner budget")
         if objects["replay_attestation.json"] != \
                 ir.replay_attestation(replay_core):
             raise CouncilError(
@@ -2000,7 +2454,144 @@ def publish_approved(root: str, cfg, request_id: str) -> dict:
                 state_machine.AUTONOMY_PAUSED:
             raise CouncilError("source pause changed before result publication")
         return result_handoff._publish_handoff_locked(
-            root, cfg, request, _m8_budget=budget)
+            root, cfg, request, _m8_budget=budget,
+            _m8_exact_bundle_target=True)
+    finally:
+        if journal_lease is not None:
+            locking.release(journal_lease)
+        locking.release(lease)
+
+
+def _runtime_tool_repository() -> str:
+    return os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def recover_approved(root: str, cfg, request_id: str) -> dict:
+    """Adopt the exact interrupted bundle under the second owner gate."""
+    from tools.council import events, git_state, locking, result_handoff
+    from tools.council import state_machine
+
+    if request_id != RESULT_REQUEST_ID:
+        raise SchemaViolation(f"request id must be exactly {RESULT_REQUEST_ID}")
+    lease = locking.acquire(
+        root, "_m8_incomplete_handoff", SENDER, request_id,
+        kind="m8_incomplete_recovery")
+    journal_lease = None
+    try:
+        chain = events.read_chain(root)
+        projected = state_machine.project(chain).get(request_id, {})
+        if projected.get("state") == state_machine.RESULT_AUDIT:
+            raise CouncilError("M8 recovery was already consumed")
+        if projected.get("state") not in (
+                state_machine.RESULT_HANDOFF_OWNER_APPROVED,
+                state_machine.RESULT_VALIDATION):
+            raise CouncilError("M8 recovery is not owner-approved or resumable")
+        _preflight_recovery_namespace(
+            root, chain,
+            allow_ready=projected.get("state") ==
+            state_machine.RESULT_VALIDATION)
+        proposals = [item for item in chain
+                     if item["request_id"] == request_id and
+                     item["event_type"] ==
+                     "RESULT_HANDOFF_APPROVAL_REQUIRED"]
+        approvals = [item for item in chain
+                     if item["request_id"] == request_id and
+                     item["event_type"] == "RESULT_HANDOFF_APPROVED"]
+        if len(proposals) != 2 or len(approvals) != 2:
+            raise CouncilError("M8 recovery requires two owner gate cycles")
+        proposal, original_approval = proposals[0], approvals[0]
+        recovery_proposal, recovery_approval = proposals[1], approvals[1]
+        if proposal["event_id"] != ORIGINAL_PROPOSAL_EVENT_ID or \
+                original_approval["event_id"] != \
+                ORIGINAL_APPROVAL_EVENT_ID:
+            raise CouncilError("original M8 owner gate differs")
+        validate_approval_binding(
+            chain[:chain.index(recovery_approval)], recovery_approval)
+        recovery = recovery_proposal["payload"]["recovery_authorization"]
+        validate_recovery_authorization(recovery)
+        if recovery_approval["payload"]["recovery_authorization"] != \
+                recovery or \
+                recovery_approval["payload"][
+                    "recovery_authorization_hash"] != \
+                recovery_authorization_hash(recovery):
+            raise CouncilError("M8 recovery approval differs")
+        runtime_repo = _runtime_tool_repository()
+        tool = recovery["recovery_tool"]
+        if os.path.realpath(tool["repository"]) != runtime_repo or \
+                git_state.head_commit(runtime_repo, cfg.repo_roots) != \
+                tool["target_commit"] or \
+                not git_state.is_clean(runtime_repo, cfg.repo_roots) or \
+                _recovery_integrations(chain, tool["target_commit"]) != \
+                tool["integration_events"]:
+            raise CouncilError("runtime recovery tool binding differs")
+        repo = recovery["original_repository"]
+        commit = recovery["original_target_commit"]
+        if git_state.head_commit(repo, cfg.repo_roots) != commit or \
+                not target_has_only_exact_bundle(
+                    repo, cfg.repo_roots, ORIGINAL_DERIVED_HASHES):
+            raise CouncilError("original M8 bundle boundary differs")
+        authorization = proposal["payload"]["closure_authorization"]
+        validate_closure_authorization(authorization)
+        if closure_authorization_hash(authorization) != \
+                recovery["closure_authorization_hash"]:
+            raise CouncilError("M8 recovery closure authorization differs")
+        transaction = transaction_id(
+            request_id, proposal, original_approval,
+            recovery["closure_authorization_hash"], commit)
+        if transaction != recovery["bundle_transaction_id"]:
+            raise CouncilError("M8 recovery transaction identity differs")
+        journal_lease = locking.acquire(
+            root, "_result_handoff", SENDER, request_id,
+            kind="result_handoff_transaction")
+        fresh_chain = events.read_chain(root)
+        _preflight_recovery_namespace(
+            root, fresh_chain,
+            allow_ready=projected.get("state") ==
+            state_machine.RESULT_VALIDATION)
+        budget = _Budget(recovery["recovery_budget"])
+        final_path = ir.safe_repo_path(repo, ir.DERIVED_OUTPUT_ROOT)
+        budget.check(final_path)
+        objects = {}
+        from tools.council.strictjson import loads_strict
+        for name in ir.DERIVED_FILENAMES:
+            path = os.path.join(final_path, name)
+            with open(path, "rb") as fh:
+                objects[name] = loads_strict(
+                    fh.read(), max_bytes=8_000_000)
+        hashes = dict(ORIGINAL_DERIVED_HASHES)
+        request = _result_request(
+            repo, authorization, original_approval, objects, hashes)
+        request["publication_recovery"] = {
+            "schema_version":
+                "m8-incomplete-publication-recovery-binding.v1",
+            "recovery_authorization": recovery,
+            "recovery_authorization_hash":
+                recovery_authorization_hash(recovery),
+            "recovery_owner_approval_event_id":
+                recovery_approval["event_id"],
+            "recovery_owner_approval_event_hash":
+                recovery_approval["event_hash"],
+        }
+        final_chain = events.read_chain(root)
+        _preflight_recovery_namespace(
+            root, final_chain,
+            allow_ready=projected.get("state") ==
+            state_machine.RESULT_VALIDATION)
+        if git_state.head_commit(runtime_repo, cfg.repo_roots) != \
+                tool["target_commit"] or \
+                not git_state.is_clean(runtime_repo, cfg.repo_roots) or \
+                _recovery_integrations(
+                    final_chain, tool["target_commit"]) != \
+                tool["integration_events"] or \
+                git_state.head_commit(repo, cfg.repo_roots) != commit or \
+                not target_has_only_exact_bundle(
+                    repo, cfg.repo_roots, ORIGINAL_DERIVED_HASHES):
+            raise CouncilError("M8 recovery boundary changed before journal")
+        return result_handoff._publish_handoff_locked(
+            root, cfg, request, _m8_budget=budget,
+            _m8_exact_bundle_target=True,
+            _m8_resume_verified_ready=projected.get("state") ==
+            state_machine.RESULT_VALIDATION)
     finally:
         if journal_lease is not None:
             locking.release(journal_lease)

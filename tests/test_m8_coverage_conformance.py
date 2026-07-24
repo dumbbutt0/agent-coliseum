@@ -44,6 +44,19 @@ CLOSURE_PATHS = {
     "tests/test_m8_coverage_conformance.py",
     "tests/test_m8_operator_surface.py",
 }
+RECOVERY_BASE = "e4cf7f7a8f0dbad208865e1abf76082c9098faae"
+RECOVERY_PATHS = {
+    "docs/first-gladiator/M8-BUDGET-EXHAUSTION-CLOSURE.md",
+    "tools/council/cli.py",
+    "tools/council/git_state.py",
+    "tools/council/m8_incomplete_handoff.py",
+    "tools/council/result_handoff.py",
+    "tools/council/state_machine.py",
+    "tests/test_council_cli.py",
+    "tests/test_council_result_handoff.py",
+    "tests/test_m8_coverage_conformance.py",
+    "tests/test_m8_incomplete_handoff.py",
+}
 
 
 def _load():
@@ -95,12 +108,21 @@ def test_closure_head_descends_from_integrated_m8():
 
 def test_closure_committed_diff_matches_section8_allowlist():
     proc = subprocess.run(
-        ["git", "-C", REPO, "diff", "--name-only", INTEGRATED_M8, "HEAD"],
+        ["git", "-C", REPO, "diff", "--name-only",
+         INTEGRATED_M8, RECOVERY_BASE],
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     actual = {path for path in proc.stdout.splitlines() if path}
     assert actual <= CLOSURE_PATHS, sorted(actual - CLOSURE_PATHS)
-    # Before the closure commit is created the committed diff is empty. At the
-    # audited closure commit all declared paths must be present.
+    assert actual == CLOSURE_PATHS, sorted(CLOSURE_PATHS - actual)
+
+
+def test_publication_recovery_committed_diff_matches_frozen_design():
+    proc = subprocess.run(
+        ["git", "-C", REPO, "diff", "--name-only", RECOVERY_BASE, "HEAD"],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    actual = {path for path in proc.stdout.splitlines() if path}
+    assert actual <= RECOVERY_PATHS, sorted(actual - RECOVERY_PATHS)
     if actual:
-        assert actual == CLOSURE_PATHS, sorted(CLOSURE_PATHS - actual)
+        assert actual == RECOVERY_PATHS, sorted(RECOVERY_PATHS - actual)

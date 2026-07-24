@@ -390,7 +390,9 @@ def _validate_authority(root: str, cfg, chain: list, request: dict) -> None:
 
 def _publish_handoff_locked(root: str, cfg, request: dict,
                             correction: bool = False,
-                            _m8_budget=None) -> dict:
+                            _m8_budget=None,
+                            _m8_exact_bundle_target: bool = False,
+                            _m8_resume_verified_ready: bool = False) -> dict:
     """Preflight, then roll forward the three-step event-first journal."""
     request = dict(request)
     request["request_payload_hash"] = compute_request_payload_hash(request)
@@ -399,18 +401,53 @@ def _publish_handoff_locked(root: str, cfg, request: dict,
         raise SchemaViolation("command mode does not match request lineage")
     repo, commit, rid = (request["repository"], request["target_commit"],
                          request["request_id"])
+    exact_m8_target = False
+    if _m8_exact_bundle_target:
+        profile = request.get("authorization_profile", {}).get("profile_id")
+        if profile != "m8_budget_exhausted_incomplete_handoff.v1":
+            raise SchemaViolation(
+                "exact bundle target exception is M8-profile-only")
+        from tools.council.m8_incomplete_handoff import \
+            target_has_only_exact_bundle
+        exact_m8_target = target_has_only_exact_bundle(
+            repo, cfg.repo_roots, request.get("derived_artifact_hashes"))
     if git_state.head_commit(repo, cfg.repo_roots) != commit or \
-            not git_state.is_clean(repo, cfg.repo_roots):
+            not (git_state.is_clean(repo, cfg.repo_roots) or exact_m8_target):
         raise SchemaViolation("handoff target must be the clean repository HEAD")
     if not git_state.commit_exists(repo, commit, cfg.repo_roots):
         raise SchemaViolation("handoff target commit does not exist")
     chain = events.read_chain(root)
     m8_profile = request.get("authorization_profile", {}).get(
         "profile_id") == "m8_budget_exhausted_incomplete_handoff.v1"
+    skip_m8_deep = False
+    if _m8_resume_verified_ready:
+        if not m8_profile or request.get("publication_recovery") is None:
+            raise SchemaViolation(
+                "verified-ready resume is M8-recovery-only")
+        txn = domain_hash(
+            TRANSACTION_DOMAIN,
+            {"request_id": rid,
+             "request_payload_hash": request["request_payload_hash"]})
+        expected_ready = {
+            "transaction_id": txn, "phase": "ready_published",
+            "request": request,
+            "request_payload_hash": request["request_payload_hash"]}
+        prior_ready = [
+            event for event in chain
+            if event["request_id"] == rid and
+            event["event_type"] == "RESULT_HANDOFF_READY"]
+        projected = state_machine.project(chain).get(rid, {})
+        if len(prior_ready) != 1 or \
+                prior_ready[0]["payload"] != expected_ready or \
+                projected.get("state") != state_machine.RESULT_VALIDATION:
+            raise SchemaViolation(
+                "M8 recovery has no exact verified ready journal to resume")
+        skip_m8_deep = True
     if m8_profile:
         from tools.council.m8_incomplete_handoff import verify_bundle_request
-        verify_bundle_request(
-            repo, request, chain=chain, deep=True, budget=_m8_budget)
+        if not skip_m8_deep:
+            verify_bundle_request(
+                repo, request, chain=chain, deep=True, budget=_m8_budget)
     else:
         if _m8_budget is not None:
             raise SchemaViolation(

@@ -105,6 +105,56 @@ python3 -m tools.council.cli --role claude result-handoff \
   --request-id first-gladiator-m8-incomplete-result-001
 ```
 
+## Interrupted publication recovery
+
+The first owner-approved builder constructed the exact six-file bundle and
+then refused because its generic publication layer treated those newly
+constructed untracked files as a dirty target. The files are preserved at the
+original clean-source commit and are not deleted, ignored, staged, committed,
+or rewritten.
+
+Recovery is a separate source and owner lifecycle. Its source reviews use:
+
+- `first-gladiator-m8-incomplete-recovery-a-001`
+- `first-gladiator-m8-incomplete-recovery-b-001`
+- `first-gladiator-m8-incomplete-recovery-c-001`
+- `first-gladiator-m8-incomplete-recovery-d-001`
+- `first-gladiator-m8-incomplete-recovery-e-001`
+
+All five require a plain GO and integration at one repair commit. The original
+proposal and owner approval remain bound to the original closure-tool commit;
+they do not authorize the repaired tool.
+
+After those integrations, a second M8-specific
+`RESULT_HANDOFF_APPROVAL_REQUIRED` proposal binds the repair commit, all five
+integrations, the original proposal and approval, the closure authorization,
+the exact six hashes and transaction, and a fresh bounded replay budget. A
+second human-token `RESULT_HANDOFF_APPROVED` must exactly copy that binding.
+Generic duplicate owner-gate events remain invalid.
+
+Only then may the repaired command run from its clean audited worktree:
+
+```text
+python3 -m tools.council.cli --role claude \
+  recover-m8-incomplete-handoff \
+  first-gladiator-m8-incomplete-result-001
+```
+
+The command operates on the unchanged original worktree. Its status must
+contain exactly the six canonical untracked files and no tracked, index, or
+other untracked change. Every member must be regular, single-link, and
+byte-identical to the approved transaction. Adoption performs no member
+rewrite. Mandatory provider-free deep verification occurs within the fresh
+budget before `RESULT_HANDOFF_READY` and `RESULT_AUDIT_REQUESTED`.
+The verified publication performs the 105-run replay exactly once. If the
+process stops after the ready event, an exact ready-journal roll-forward may
+finish the claimed request and audit event without replaying again.
+
+This recovery gate grants no model contact, execution retry, scientific
+statistic, result verdict, source-request disposition, or later milestone.
+The recovery result request binds the exact full-suite expectation of 2,414
+passing tests.
+
 ## Evidence and output rules
 
 The primary root remains
